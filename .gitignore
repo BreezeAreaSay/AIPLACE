@@ -14,3 +14,6 @@ frontend/.env.local
 # OS / editors
 .DS_Store
 *.log
+
+# TypeScript incremental cache
+*.tsbuildinfo
