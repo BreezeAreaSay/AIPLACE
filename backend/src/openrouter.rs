@@ -5,9 +5,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+use tokio::sync::RwLock;
 
-use crate::{config::Config, mock_llm};
+use crate::{config::LlmSettings, mock_llm};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -39,7 +43,8 @@ pub struct ChatOpts {
 
 pub struct LlmClient {
     http: reqwest::Client,
-    cfg: Config,
+    settings: Arc<RwLock<LlmSettings>>,
+    app_url: String,
 }
 
 #[derive(Deserialize)]
@@ -57,34 +62,31 @@ struct ChoiceMessage {
 }
 
 impl LlmClient {
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub fn new(settings: Arc<RwLock<LlmSettings>>, app_url: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
             .build()
             .context("cannot build http client")?;
-        Ok(Self { http, cfg })
-    }
-
-    pub fn is_mock(&self) -> bool {
-        self.cfg.mock_mode()
+        Ok(Self { http, settings, app_url })
     }
 
     /// Run a chat completion. The returned text already has the prefill prepended, so callers
     /// can split `<ego_thought>…</ego_thought>` deterministically.
     pub async fn chat(&self, model: &str, messages: &[ChatMessage], opts: &ChatOpts) -> Result<String> {
-        if self.is_mock() {
-            return Ok(mock_llm::respond(messages, opts));
-        }
+        let key = match self.settings.read().await.api_key.clone() {
+            Some(k) => k,
+            None => return Ok(mock_llm::respond(messages, opts)),
+        };
         let mut msgs = messages.to_vec();
         if let Some(p) = &opts.prefill {
             msgs.push(ChatMessage::assistant(p.clone()));
         }
-        let text = match self.call(model, &msgs, opts, opts.json_mode).await {
+        let text = match self.call(&key, model, &msgs, opts, opts.json_mode).await {
             Ok(t) => t,
             Err(e) if opts.json_mode => {
                 tracing::warn!(error = %e, "json_mode request failed → retrying without response_format");
-                self.call(model, &msgs, opts, false).await?
+                self.call(&key, model, &msgs, opts, false).await?
             }
             Err(e) => return Err(e),
         };
@@ -94,12 +96,7 @@ impl LlmClient {
         })
     }
 
-    async fn call(&self, model: &str, msgs: &[ChatMessage], opts: &ChatOpts, json_mode: bool) -> Result<String> {
-        let key = self
-            .cfg
-            .openrouter_api_key
-            .as_deref()
-            .ok_or_else(|| anyhow!("OPENROUTER_API_KEY is not set"))?;
+    async fn call(&self, key: &str, model: &str, msgs: &[ChatMessage], opts: &ChatOpts, json_mode: bool) -> Result<String> {
         let mut body = json!({
             "model": model,
             "messages": msgs,
@@ -113,7 +110,7 @@ impl LlmClient {
             .http
             .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(key)
-            .header("HTTP-Referer", &self.cfg.app_url)
+            .header("HTTP-Referer", &self.app_url)
             .header("X-Title", "Triad Canvas")
             .json(&body)
             .send()

@@ -56,7 +56,8 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
         prefill: None,
     };
 
-    let (mut output, source) = match app.llm.chat(&app.cfg.director_model, &msgs, &opts).await {
+    let director_model = app.llm_settings().await.director_model;
+    let (mut output, source) = match app.llm.chat(&director_model, &msgs, &opts).await {
         Ok(raw) => match extract_json(&raw).and_then(|v| Ok(serde_json::from_value::<DirectorOutput>(v)?)) {
             Ok(o) => (o, "llm"),
             Err(e) => {

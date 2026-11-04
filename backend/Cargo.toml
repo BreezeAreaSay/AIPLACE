@@ -21,7 +21,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 regex = "1"
 rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+dirs = "5"
+self_update = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
+
+
+[[bin]]
+name = "triad"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
 lto = true
+strip = true
+codegen-units = 1

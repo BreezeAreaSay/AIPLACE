@@ -25,33 +25,83 @@ frontend/  (Vite + React + TS + Tailwind + Mermaid)   ──HTTP /api/* + SSE─
 * Бэкенд — один бинарник. На ноутбуке слушает `localhost:3000`; на VPS за $5 — тот же бинарник, тот же SQLite-файл,
   плюс он сам отдаёт собранный `frontend/dist`. Telegram Mini App просто указывает на его URL.
 
-## Запуск за 3 минуты
+## Установка за минуту (готовый бинарник)
+
+Один файл `triad` со встроенным UI, без Node/Rust на машине:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BreezeAreaSay/AIPLACE/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/BreezeAreaSay/AIPLACE/main/install.ps1 | iex
+```
+
+Установщик кладёт бинарник в `~/.triad/bin` (Windows: `%LOCALAPPDATA%\triad\bin`), добавляет его в PATH и сразу
+запускает мастер `triad setup`, где ты вставляешь ключ OpenRouter. Дальше:
+
+| Команда | Что делает |
+|---|---|
+| `triad` | запустить комнату → http://localhost:3000 (без ключа спросит его прямо в терминале) |
+| `triad setup` | мастер: ключ, модель агентов, модель Режиссёра, порт → `~/.triad/config.env` |
+| `triad key sk-or-v1-…` | записать ключ без мастера (`triad key` без аргумента — удалить) |
+| `triad config` | где лежит конфиг и что в нём (ключ маскируется) |
+| `triad update` | обновиться до последнего GitHub Release (`--check` — только проверить) |
+| `triad --port 8080` | любой флаг/переменная из таблицы ниже |
+
+Ключ можно вставить и **в UI** (⚙ в шапке или баннер «mock-режим»): он уходит в `~/.triad/config.env`, в браузер
+никогда не возвращается, а менять его через UI разрешено только с той машины, где крутится сервер
+(иначе на VPS любой открывший Mini App мог бы подменить ключ). Снять ограничение: `ALLOW_REMOTE_SETTINGS=true`.
+
+При старте `triad` тихо проверяет GitHub Releases и показывает бейдж «доступна vX.Y.Z» в шапке UI
+(отключить: `TRIAD_NO_UPDATE_CHECK=1`). База и конфиг живут в `~/.triad` (переопределить: `TRIAD_HOME`).
+
+## Запуск из исходников (dev)
 
 ```bash
 cd backend
-cp .env.example .env          # вставь OPENROUTER_API_KEY (без ключа — MOCK-режим с шаблонными репликами)
-cargo run
+cp .env.example .env          # ключ можно и не вставлять — будет MOCK-режим с шаблонными репликами
+cargo run                     # бинарник собирается как `triad`; UI встроится, если есть frontend/dist
 ```
 
 ```bash
 cd frontend
 npm install
-npm run dev                   # http://localhost:5173 — /api проксируется на :3000
+npm run dev                   # http://localhost:5173 — /api проксируется на :3000, hot reload
 ```
 
-Либо один процесс: `cd frontend && npm run build`, затем `cd backend && cargo run` и открывай `http://localhost:3000`.
+Собрать «как релиз» локально: `cd frontend && npm run build && cd ../backend && cargo build --release` →
+`backend/target/release/triad` уже содержит UI.
 
-### Переменные окружения (`backend/.env`)
+### Переменные окружения
+
+Приоритет: переменные процесса → `./.env` (dev) → `~/.triad/config.env` → умолчания.
 
 | Переменная | По умолчанию | Зачем |
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | Пусто → mock-режим (пайплайн работает, химии нет) |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-chat` | Модель агентов. Нужна поддержка assistant-prefill (deepseek / anthropic / gemini / llama) |
 | `OPENROUTER_DIRECTOR_MODEL` | = `OPENROUTER_MODEL` | Быстрая JSON-модель для Режиссёра, напр. `google/gemini-2.5-flash` |
-| `DATABASE_URL` | `sqlite://triad.db?mode=rwc` | Автомиграция и сид триады при первом старте |
-| `STATIC_DIR` | `../frontend/dist` | Если есть `index.html` — бинарник отдаёт SPA |
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | Куда слушать |
+| `DATABASE_URL` | `sqlite://~/.triad/triad.db?mode=rwc` | Автомиграция и сид триады при первом старте |
+| `STATIC_DIR` | — | Отдавать UI с диска вместо встроенного (dev без пересборки) |
+| `ALLOW_REMOTE_SETTINGS` | `false` | Разрешить `POST /api/settings` не только с localhost |
+| `TRIAD_NO_UPDATE_CHECK` | — | `1` — не ходить на GitHub за версией при старте |
 | `CONTEXT_MESSAGES` | `14` | Сколько реплик видят Режиссёр и агенты |
 | `TICK_ENTROPY_HP` / `TICK_ENTROPY_DOPAMINE` | `2` / `3` | Сколько теряет каждый за автономный тик |
+
+## Релизы (для мейнтейнера)
+
+```bash
+# 1. поднять version в backend/Cargo.toml (и Cargo.lock: cd backend && cargo update -p triad-canvas-backend)
+# 2. закоммитить, затем:
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` соберёт UI, встроит его в бинарники для Linux x64/arm64, macOS Intel/Apple Silicon
+и Windows x64, и опубликует GitHub Release с `SHA256SUMS.txt`. Тег обязан совпадать с версией в `Cargo.toml`
+(workflow падает иначе). Имена ассетов `triad-<ver>-<target>.tar.gz|zip` — их ждут `install.sh` и `triad update`.
+CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy -D warnings` и `cargo test`.
 
 ## Пайплайн хода («мозг»)
 
@@ -83,7 +133,8 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 | `POST` | `/api/schema` (алиас `/api/synthesize-schema`) | сборка блок-схемы спора |
 | `POST` | `/api/reset` | стереть комнату, заселить Триаду заново |
 | `GET` | `/api/events` | SSE-поток живых событий раунда |
-| `GET` | `/api/health` | режим (mock/live), модели |
+| `GET` | `/api/health` | версия, режим (mock/live), модели |
+| `GET`/`POST` | `/api/settings` | ключ (маскированный) и модели; `POST` — только с localhost или при `ALLOW_REMOTE_SETTINGS` |
 
 ## План «первого запуска» сегодня вечером
 
@@ -95,24 +146,40 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 
 ## Деплой под Telegram Mini Apps
 
+На VPS нужен только бинарник и https:
+
 ```bash
-cd frontend && VITE_API_URL= npm run build        # пусто = same-origin, бандл лежит рядом с бэкендом
-cd ../backend && cargo build --release
-scp target/release/triad-canvas-backend .env user@vps:/opt/triad/
-scp -r ../frontend/dist user@vps:/opt/triad/frontend/dist
-# на VPS: STATIC_DIR=./frontend/dist ./triad-canvas-backend  (за Caddy/nginx с TLS — Telegram требует https)
+ssh user@vps 'curl -fsSL https://raw.githubusercontent.com/BreezeAreaSay/AIPLACE/main/install.sh | TRIAD_NO_SETUP=1 sh'
+ssh user@vps '~/.triad/bin/triad key sk-or-v1-…'
+ssh user@vps '~/.triad/bin/triad --no-prompt --host 127.0.0.1 --port 3000'   # лучше как systemd-сервис
 ```
+
+Пример `/etc/systemd/system/triad.service`:
+
+```ini
+[Service]
+ExecStart=/home/user/.triad/bin/triad --no-prompt --host 127.0.0.1 --port 3000
+Restart=always
+User=user
+[Install]
+WantedBy=multi-user.target
+```
+
+Сверху Caddy (`reverse_proxy 127.0.0.1:3000`) — Telegram требует https. Обновление: `triad update && systemctl restart triad`.
 
 В BotFather: `/newapp` → URL `https://твой-домен`. `index.html` уже подключает `telegram-web-app.js`,
 `src/telegram.ts` вызывает `ready()/expand()`, красит шапку в `#0D0E12` и даёт haptic-отклик на кнопках.
-Если фронт хостится отдельно (Vercel/Pages) — просто задай `VITE_API_URL=https://api.твой-домен`; CORS на бэкенде permissive.
+Если фронт хостится отдельно (Vercel/Pages) — задай `VITE_API_URL=https://api.твой-домен` при сборке; CORS на бэкенде permissive.
 
 ## Структура
 
 ```
 backend/src/
-  main.rs         старт, CORS, роутер, раздача dist
-  config.rs       env → Config (mock-режим без ключа)
+  main.rs         CLI-диспетчер, старт сервера, CORS, роутер
+  cli.rs          triad setup / key / config / update, подсказка ключа при первом запуске
+  config.rs       ~/.triad/config.env, приоритеты env, горячие LlmSettings
+  update.rs       самообновление с GitHub Releases + тихая проверка версии
+  web.rs          встроенный UI (rust-embed, SPA-fallback); build.rs копирует frontend/dist
   models.rs       Agent, Message, GraphNode/Edge, DirectorOutput, RoomState, RoomEvent
   db.rs           пул, миграции, сид трёх персонажей, CRUD
   openrouter.rs   reqwest-клиент, prefill, extract_json
@@ -121,12 +188,14 @@ backend/src/
   director.rs     план хода, повестки, статы, мутации графа, fallback
   agent_runner.rs ход агента, парсинг <ego_thought>
   mermaid.rs      safe_id, sanitize_label, build_graph, classDef-раскраска
-  handlers.rs     axum-роуты + SSE
+  handlers.rs     axum-роуты + SSE + /api/settings (только localhost)
   state.rs        AppState
 frontend/src/
   App.tsx, hooks/useRoom.ts (SSE + REST), api.ts, telegram.ts, types.ts
   components/ TopBar · AgentCard · StatBar · ChatStream · MessageBubble · Composer
-              GraphPanel · MermaidView · DirectorInspector · Drawer
+              GraphPanel · MermaidView · DirectorInspector · Drawer · SettingsModal
+.github/workflows/  ci.yml (build+clippy+test) · release.yml (теги v* → бинарники под 5 платформ)
+install.sh / install.ps1   установка последнего релиза одной командой
 ```
 
 ## Тесты

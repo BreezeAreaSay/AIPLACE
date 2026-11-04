@@ -85,6 +85,34 @@ export interface RoomState {
   mock_mode: boolean
   model: string
   director_model: string
+  version: string
+  update: UpdateInfo | null
+  settings_editable: boolean
+}
+
+export interface UpdateInfo {
+  current: string
+  latest: string
+  url: string
+}
+
+export interface SettingsView {
+  has_key: boolean
+  key_hint: string | null
+  model: string
+  director_model: string
+  editable: boolean
+  config_path: string
+  version: string
+  update: UpdateInfo | null
+  ui_embedded: boolean
+}
+
+export interface SettingsPatch {
+  api_key?: string
+  clear_key?: boolean
+  model?: string
+  director_model?: string
 }
 
 export type RoomEvent =

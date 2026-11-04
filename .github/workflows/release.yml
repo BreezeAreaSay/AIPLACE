@@ -1,0 +1,125 @@
+# Push a tag `vX.Y.Z` (matching backend/Cargo.toml version) → builds the UI, embeds it into
+# the Rust binary for every target and publishes a GitHub Release. `triad update` and
+# install.sh consume these assets.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN: triad
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  archive: tar.gz }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }
+          - { os: macos-13,         target: x86_64-apple-darwin,       archive: tar.gz }
+          - { os: macos-14,         target: aarch64-apple-darwin,      archive: tar.gz }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    archive: zip }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          CARGO_VER=$(grep -m1 '^version' backend/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VER" != "$CARGO_VER" ]]; then
+              echo "::error::tag v$TAG_VER != backend/Cargo.toml version $CARGO_VER"; exit 1
+            fi
+          fi
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build UI
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: ${{ matrix.target }}
+
+      - name: Build binary (UI embedded)
+        working-directory: backend
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.v.outputs.version }}"
+          NAME="${BIN}-${VERSION}-${{ matrix.target }}"
+          STAGE="stage/$NAME"
+          mkdir -p "$STAGE"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "backend/target/${{ matrix.target }}/release/${BIN}.exe" "$STAGE/"
+            cp README.md install.ps1 "$STAGE/"
+            (cd stage && 7z a -tzip "../$NAME.zip" "$NAME" >/dev/null)
+            ASSET="$NAME.zip"
+          else
+            cp "backend/target/${{ matrix.target }}/release/${BIN}" "$STAGE/"
+            cp README.md install.sh "$STAGE/"
+            tar -C stage -czf "$NAME.tar.gz" "$NAME"
+            ASSET="$NAME.tar.gz"
+          fi
+          if command -v sha256sum >/dev/null; then sha256sum "$ASSET" > "$ASSET.sha256"; else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist && cat *.sha256 > SHA256SUMS.txt && rm *.sha256 && ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Установка
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+            ```
+            Windows (PowerShell):
+            ```powershell
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+            ```
+            Уже стоит? `triad update`. Ключ OpenRouter: `triad setup`, `triad key sk-or-…` или ⚙ в UI.

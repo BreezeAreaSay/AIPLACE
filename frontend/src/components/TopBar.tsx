@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Radio, RotateCcw, Zap } from 'lucide-react'
+import { ArrowUpCircle, Radio, RotateCcw, Settings, Zap } from 'lucide-react'
 import type { Agent } from '../types'
 import { AgentCard } from './AgentCard'
 
@@ -10,10 +10,12 @@ interface Props {
   mockMode: boolean
   model: string
   onReset: () => void
+  onSettings: () => void
+  updateLatest: string | null
   compact: boolean
 }
 
-export function TopBar({ agents, speaking, live, mockMode, model, onReset, compact }: Props) {
+export function TopBar({ agents, speaking, live, mockMode, model, onReset, onSettings, updateLatest, compact }: Props) {
   const [showAll, setShowAll] = useState(false)
   const [open, setOpen] = useState<Record<string, boolean>>({})
   const toggle = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }))
@@ -24,10 +26,23 @@ export function TopBar({ agents, speaking, live, mockMode, model, onReset, compa
         <span className="font-mono text-sm font-bold tracking-[0.2em] text-zinc-100">TRIAD CANVAS</span>
         <span className="hidden text-[10px] font-mono text-zinc-600 sm:inline">киберпсихологическая комната</span>
         <div className="ml-auto flex items-center gap-2 text-[10px] font-mono">
+          {updateLatest && (
+            <button
+              onClick={onSettings}
+              className="hidden items-center gap-1 rounded border border-acid/60 px-1.5 py-0.5 text-acid sm:flex"
+              title="Доступна новая версия — triad update"
+            >
+              <ArrowUpCircle size={11} /> v{updateLatest}
+            </button>
+          )}
           {mockMode ? (
-            <span className="rounded border border-magenta/50 px-1.5 py-0.5 text-magenta" title="Нет OPENROUTER_API_KEY — ответы шаблонные">
+            <button
+              onClick={onSettings}
+              className="rounded border border-magenta/50 px-1.5 py-0.5 text-magenta hover:bg-magenta/10"
+              title="Нет ключа OpenRouter — ответы шаблонные. Нажми, чтобы вставить ключ."
+            >
               MOCK LLM
-            </span>
+            </button>
           ) : (
             <span className="hidden rounded border border-line px-1.5 py-0.5 text-zinc-500 sm:inline" title="OPENROUTER_MODEL">
               {model}
@@ -43,6 +58,14 @@ export function TopBar({ agents, speaking, live, mockMode, model, onReset, compa
             title="Показать все скрытые цели"
           >
             {showAll ? 'скрыть цели' : 'цели'}
+          </button>
+          <button
+            onClick={onSettings}
+            className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid"
+            title="Ключ OpenRouter и модели"
+            aria-label="Настройки"
+          >
+            <Settings size={12} />
           </button>
           <button
             onClick={() => {

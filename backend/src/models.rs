@@ -177,6 +177,35 @@ pub struct RoomState {
     pub mock_mode: bool,
     pub model: String,
     pub director_model: String,
+    pub version: String,
+    pub update: Option<crate::update::UpdateInfo>,
+    /// Can this client change the key/model via `POST /api/settings`?
+    pub settings_editable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsView {
+    pub has_key: bool,
+    pub key_hint: Option<String>,
+    pub model: String,
+    pub director_model: String,
+    pub editable: bool,
+    pub config_path: String,
+    pub version: String,
+    pub update: Option<crate::update::UpdateInfo>,
+    pub ui_embedded: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SettingsPatch {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub clear_key: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub director_model: Option<String>,
 }
 
 /// Live events pushed over SSE (`GET /api/events`) while a round is running.

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, PanelRightOpen } from 'lucide-react'
+import { AlertTriangle, KeyRound, PanelRightOpen } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
 import { TopBar } from './components/TopBar'
 import { ChatStream } from './components/ChatStream'
 import { Composer } from './components/Composer'
 import { GraphPanel } from './components/GraphPanel'
 import { Drawer } from './components/Drawer'
+import { SettingsModal } from './components/SettingsModal'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -22,6 +23,7 @@ export default function App() {
   const room = useRoom()
   const [showEgo, setShowEgo] = useState(true)
   const [drawer, setDrawer] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const isDesktop = useMedia('(min-width: 768px)')
 
   const speaking = useMemo(() => {
@@ -77,6 +79,8 @@ export default function App() {
         mockMode={s.mock_mode}
         model={s.model}
         onReset={room.reset}
+        onSettings={() => setSettingsOpen(true)}
+        updateLatest={s.update?.latest ?? null}
         compact={!isDesktop}
       />
 
@@ -87,6 +91,24 @@ export default function App() {
             <div className="flex items-center gap-2 border-b border-magenta/40 bg-magenta/10 px-3 py-1.5 text-xs text-magenta">
               <AlertTriangle size={14} /> {room.error}
             </div>
+          )}
+          {s.mock_mode && (
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="flex items-center gap-2 border-b border-acid/30 bg-acid/5 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-acid/10"
+            >
+              <KeyRound size={14} className="shrink-0 text-acid" />
+              <span>
+                Комната в <b className="text-magenta">mock-режиме</b>: реплики шаблонные.{' '}
+                {s.settings_editable ? (
+                  <span className="text-acid underline">Вставить ключ OpenRouter →</span>
+                ) : (
+                  <span>
+                    на сервере: <code>triad key sk-or-…</code>
+                  </span>
+                )}
+              </span>
+            </button>
           )}
           <ChatStream messages={s.messages} agents={s.agents} showEgo={showEgo} busy={room.busy} />
           <Composer disabled={disabled} onSend={room.send} onTick={room.tick} onSchema={room.synthesize} showEgo={showEgo} onToggleEgo={() => setShowEgo((v) => !v)} />
@@ -107,6 +129,7 @@ export default function App() {
       <Drawer open={drawer && !isDesktop} onClose={() => setDrawer(false)} title="Доска комнаты">
         {panel}
       </Drawer>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void room.refresh()} />
     </div>
   )
 }

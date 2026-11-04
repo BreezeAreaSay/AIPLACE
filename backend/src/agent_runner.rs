@@ -47,7 +47,8 @@ pub async fn run_agent(app: &AppState, agent_id: &str, room_mood: Option<&str>) 
         prefill: Some(EGO_PREFILL.to_string()),
     };
 
-    let (ego, speech) = match app.llm.chat(&app.cfg.openrouter_model, &msgs, &opts).await {
+    let model = app.llm_settings().await.model;
+    let (ego, speech) = match app.llm.chat(&model, &msgs, &opts).await {
         Ok(raw) => parse_agent_reply(&raw),
         Err(e) => {
             tracing::warn!(agent = %agent_id, error = %e, "agent LLM call failed");

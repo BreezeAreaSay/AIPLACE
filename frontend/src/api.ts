@@ -1,4 +1,4 @@
-import type { RoomEvent, RoomState } from './types'
+import type { RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
 export const API_BASE: string = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -28,6 +28,8 @@ export const api = {
   tick: () => request<RoomState>('/api/tick', { method: 'POST' }),
   schema: () => request<RoomState>('/api/schema', { method: 'POST' }),
   reset: () => request<RoomState>('/api/reset', { method: 'POST' }),
+  settings: () => request<SettingsView>('/api/settings'),
+  saveSettings: (patch: SettingsPatch) => request<SettingsView>('/api/settings', { method: 'POST', body: JSON.stringify(patch) }),
 }
 
 /** Subscribe to live room events (SSE). Returns an unsubscribe function. */

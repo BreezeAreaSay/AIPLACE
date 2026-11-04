@@ -1,9 +1,10 @@
 //! Axum routes: state, chat, tick, schema synthesis, reset, SSE event stream.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, net::SocketAddr};
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
@@ -17,7 +18,7 @@ use crate::{
     director::{self, Trigger},
     error::{AppError, AppResult},
     mermaid,
-    models::{ChatRequest, Graph, RoomEvent, RoomState, SchemaDoc, USER_ID},
+    models::{ChatRequest, Graph, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID},
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
     state::AppState,
@@ -33,22 +34,36 @@ pub fn router(state: AppState) -> Router {
         .route("/api/synthesize-schema", post(synthesize_schema))
         .route("/api/reset", post(reset))
         .route("/api/events", get(events))
+        .route("/api/settings", get(get_settings).post(post_settings))
         .with_state(state)
 }
 
 async fn health(State(app): State<AppState>) -> Json<serde_json::Value> {
+    let s = app.llm_settings().await;
     Json(json!({
         "ok": true,
-        "mock_mode": app.llm.is_mock(),
-        "model": app.cfg.openrouter_model,
-        "director_model": app.cfg.director_model,
+        "version": crate::update::VERSION,
+        "mock_mode": s.mock_mode(),
+        "model": s.model,
+        "director_model": s.director_model,
     }))
 }
 
-pub async fn build_state(app: &AppState) -> anyhow::Result<RoomState> {
+/// Settings are editable from the machine the server runs on. Behind a reverse proxy the
+/// peer is loopback too, so a forwarded-for header demotes the request to "remote".
+fn settings_editable(app: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
+    if app.cfg.allow_remote_settings {
+        return true;
+    }
+    let forwarded = headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip");
+    peer.ip().is_loopback() && !forwarded
+}
+
+pub async fn build_state(app: &AppState, editable: bool) -> anyhow::Result<RoomState> {
     let nodes = db::list_nodes(&app.db).await?;
     let edges = db::list_edges(&app.db).await?;
     let graph_mermaid = mermaid::build_graph(&nodes, &edges);
+    let s = app.llm_settings().await;
     Ok(RoomState {
         agents: db::list_agents(&app.db).await?,
         messages: db::recent_messages(&app.db, 80).await?,
@@ -56,17 +71,90 @@ pub async fn build_state(app: &AppState) -> anyhow::Result<RoomState> {
         graph_mermaid,
         schema: db::last_schema(&app.db).await?,
         last_director: db::last_director_log(&app.db).await?,
-        mock_mode: app.llm.is_mock(),
-        model: app.cfg.openrouter_model.clone(),
-        director_model: app.cfg.director_model.clone(),
+        mock_mode: s.mock_mode(),
+        model: s.model,
+        director_model: s.director_model,
+        version: crate::update::VERSION.into(),
+        update: app.update.read().await.clone(),
+        settings_editable: editable,
     })
 }
 
-async fn get_state(State(app): State<AppState>) -> AppResult<Json<RoomState>> {
-    Ok(Json(build_state(&app).await?))
+async fn get_state(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> AppResult<Json<RoomState>> {
+    let editable = settings_editable(&app, peer, &headers);
+    Ok(Json(build_state(&app, editable).await?))
 }
 
-async fn chat(State(app): State<AppState>, Json(req): Json<ChatRequest>) -> AppResult<Json<RoomState>> {
+async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
+    let s = app.llm_settings().await;
+    SettingsView {
+        has_key: !s.mock_mode(),
+        key_hint: s.key_hint(),
+        model: s.model,
+        director_model: s.director_model,
+        editable,
+        config_path: crate::config::config_path().display().to_string(),
+        version: crate::update::VERSION.into(),
+        update: app.update.read().await.clone(),
+        ui_embedded: crate::web::is_embedded(),
+    }
+}
+
+async fn get_settings(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Json<SettingsView> {
+    let editable = settings_editable(&app, peer, &headers);
+    Json(settings_view(&app, editable).await)
+}
+
+async fn post_settings(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(patch): Json<SettingsPatch>,
+) -> Result<Json<SettingsView>, (StatusCode, Json<serde_json::Value>)> {
+    if !settings_editable(&app, peer, &headers) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Настройки можно менять только с машины, где запущен сервер (или ALLOW_REMOTE_SETTINGS=true). Используй `triad setup` / `triad key`."})),
+        ));
+    }
+    let mut s = app.llm_settings().await;
+    if patch.clear_key {
+        s.api_key = None;
+    } else if let Some(k) = patch.api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+        if k.chars().count() < 16 || k.chars().any(char::is_whitespace) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "ключ выглядит неправильно"}))));
+        }
+        s.api_key = Some(k);
+    }
+    if let Some(m) = patch.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()) {
+        s.model = m;
+    }
+    if let Some(m) = patch.director_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()) {
+        s.director_model = m;
+    }
+    if let Err(e) = s.save() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("не удалось сохранить конфиг: {e:#}")}))));
+    }
+    *app.settings.write().await = s;
+    tracing::info!("LLM settings updated via UI");
+    Ok(Json(settings_view(&app, true).await))
+}
+
+async fn chat(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<ChatRequest>,
+) -> AppResult<Json<RoomState>> {
+    let editable = settings_editable(&app, peer, &headers);
     let text = req.message.trim();
     if text.is_empty() {
         return Err(AppError::bad_request("пустое сообщение"));
@@ -78,17 +166,22 @@ async fn chat(State(app): State<AppState>, Json(req): Json<ChatRequest>) -> AppR
     let msg = db::insert_message(&app.db, USER_ID, None, text).await?;
     app.emit(RoomEvent::Message { message: msg });
     run_round(&app, Trigger::UserMessage).await?;
-    Ok(Json(build_state(&app).await?))
+    Ok(Json(build_state(&app, editable).await?))
 }
 
-async fn tick(State(app): State<AppState>) -> AppResult<Json<RoomState>> {
+async fn tick(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> AppResult<Json<RoomState>> {
+    let editable = settings_editable(&app, peer, &headers);
     let _turn = app.turn_lock.lock().await;
     let alive = db::list_agents(&app.db).await?.into_iter().filter(|a| a.is_alive()).count();
     if alive == 0 {
         return Err(AppError::bad_request("в комнате никого не осталось — нажми «Новая комната»"));
     }
     run_round(&app, Trigger::Tick).await?;
-    Ok(Json(build_state(&app).await?))
+    Ok(Json(build_state(&app, editable).await?))
 }
 
 /// Director → (1–2) agents, sequentially, so the second can answer the first.
@@ -114,7 +207,12 @@ async fn run_round(app: &AppState, trigger: Trigger) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn synthesize_schema(State(app): State<AppState>) -> AppResult<Json<RoomState>> {
+async fn synthesize_schema(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> AppResult<Json<RoomState>> {
+    let editable = settings_editable(&app, peer, &headers);
     let _turn = app.turn_lock.lock().await;
     app.emit(RoomEvent::Status {
         stage: "schema".into(),
@@ -134,7 +232,8 @@ async fn synthesize_schema(State(app): State<AppState>) -> AppResult<Json<RoomSt
         json_mode: true,
         prefill: None,
     };
-    let parsed: Option<SchemaDoc> = match app.llm.chat(&app.cfg.openrouter_model, &msgs, &opts).await {
+    let model = app.llm_settings().await.model;
+    let parsed: Option<SchemaDoc> = match app.llm.chat(&model, &msgs, &opts).await {
         Ok(raw) => extract_json(&raw)
             .ok()
             .and_then(|v| serde_json::from_value::<SchemaDoc>(v).ok())
@@ -164,13 +263,18 @@ async fn synthesize_schema(State(app): State<AppState>) -> AppResult<Json<RoomSt
     let saved = db::save_schema(&app.db, &doc).await?;
     app.emit(RoomEvent::Schema { schema: saved });
     app.emit(RoomEvent::Done);
-    Ok(Json(build_state(&app).await?))
+    Ok(Json(build_state(&app, editable).await?))
 }
 
-async fn reset(State(app): State<AppState>) -> AppResult<Json<RoomState>> {
+async fn reset(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> AppResult<Json<RoomState>> {
+    let editable = settings_editable(&app, peer, &headers);
     let _turn = app.turn_lock.lock().await;
     db::reset_room(&app.db).await?;
-    let state = build_state(&app).await?;
+    let state = build_state(&app, editable).await?;
     app.emit(RoomEvent::Agents { agents: state.agents.clone() });
     app.emit(RoomEvent::Graph {
         graph: state.graph.clone(),
