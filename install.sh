@@ -35,10 +35,13 @@ url="https://github.com/$REPO/releases/download/$tag/$name.tar.gz"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 say "скачиваю $url"
 curl -fL --progress-bar "$url" -o "$tmp/pkg.tar.gz" || die "нет сборки $name в релизе $tag"
-if curl -fsSL "$url.sha256" -o "$tmp/pkg.sha256" 2>/dev/null; then
-  expected=$(awk '{print $1}' "$tmp/pkg.sha256")
-  actual=$( (command -v sha256sum >/dev/null && sha256sum "$tmp/pkg.tar.gz" || shasum -a 256 "$tmp/pkg.tar.gz") | awk '{print $1}')
-  [ "$expected" = "$actual" ] || die "контрольная сумма не совпала"
+if curl -fsSL "https://github.com/$REPO/releases/download/$tag/SHA256SUMS.txt" -o "$tmp/sums" 2>/dev/null; then
+  expected=$(grep " $name.tar.gz\$" "$tmp/sums" | awk '{print $1}' | head -n1)
+  if [ -n "$expected" ]; then
+    actual=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$tmp/pkg.tar.gz" || shasum -a 256 "$tmp/pkg.tar.gz") | awk '{print $1}')
+    [ "$expected" = "$actual" ] || die "контрольная сумма не совпала"
+    say "sha256 ок"
+  fi
 fi
 tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 mkdir -p "$INSTALL_DIR"

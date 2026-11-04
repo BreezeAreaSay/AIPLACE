@@ -19,10 +19,14 @@ pub struct UpdateInfo {
 /// Blocking — call before the tokio runtime starts.
 pub fn self_update(check_only: bool) -> Result<()> {
     let target = self_update::get_target();
+    let bin_file = if cfg!(windows) { format!("{BIN_NAME}.exe") } else { BIN_NAME.to_string() };
+    // Archives are laid out as `triad-<ver>-<target>/triad[.exe]` (see release.yml).
+    let in_archive = format!("{BIN_NAME}-{{{{ version }}}}-{{{{ target }}}}/{bin_file}");
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
-        .bin_name(BIN_NAME)
+        .bin_name(&bin_file)
+        .bin_path_in_archive(&in_archive)
         .target(target)
         .current_version(VERSION)
         .show_download_progress(true)
