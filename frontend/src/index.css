@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --tg-safe-top: env(safe-area-inset-top, 0px);
+  --tg-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html, body, #root { height: 100%; }
+body { background: #0D0E12; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #2a2b36; border-radius: 3px; }
+
+.scanlines::before {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px);
+}
+
+.mermaid-host svg { max-width: 100%; height: auto; }
+.mermaid-natural svg { max-width: none !important; width: 100% !important; }
+.mermaid-host .node rect, .mermaid-host .node polygon, .mermaid-host .node path { rx: 4px; }
+.mermaid-host .edgeLabel { background: #0D0E12 !important; color: #c9c9d1 !important; }
+.mermaid-host .edgeLabel rect, .mermaid-host .edgeLabel foreignObject div { background: #0D0E12 !important; }
+.mermaid-host .flowchart-link { stroke: #5b5d6e !important; }
+.mermaid-host .marker { fill: #5b5d6e !important; stroke: #5b5d6e !important; }

@@ -1,0 +1,198 @@
+//! Offline stand-in for OpenRouter. Lets the whole pipeline (director → agents → graph →
+//! schema) run without an API key so the UI can be exercised end-to-end. Replies are
+//! template-based on purpose — the real chemistry needs a real model.
+
+use rand::{seq::SliceRandom, Rng};
+use regex::Regex;
+use serde_json::json;
+use std::sync::OnceLock;
+
+use crate::openrouter::{ChatMessage, ChatOpts};
+
+pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
+    let system = messages.first().map(|m| m.content.as_str()).unwrap_or("");
+    let user = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+    if system.contains("META-DIRECTOR") {
+        director(user)
+    } else if system.contains("SCHEMA-SYNTH") {
+        schema(user)
+    } else {
+        agent(system)
+    }
+}
+
+fn topic(user_prompt: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(?m)^\[Игрок\]: (.+)$").expect("regex"));
+    let t = re
+        .captures_iter(user_prompt)
+        .last()
+        .map(|c| c[1].trim().to_string())
+        .unwrap_or_else(|| "тишина в комнате".to_string());
+    crate::mermaid::truncate_chars(&t, 38)
+}
+
+fn alive_ids(user_prompt: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(?m)^- id=(\w+) .*ЖИВ").expect("regex"));
+    re.captures_iter(user_prompt).map(|c| c[1].to_string()).collect()
+}
+
+fn director(user_prompt: &str) -> String {
+    let mut rng = rand::thread_rng();
+    let topic = topic(user_prompt);
+    let mut alive = alive_ids(user_prompt);
+    if alive.is_empty() {
+        alive = vec!["physicist".into(), "lit_teacher".into(), "graffiti".into()];
+    }
+    alive.shuffle(&mut rng);
+    let speakers: Vec<String> = alive.iter().take(rng.gen_range(1..=2.min(alive.len()))).cloned().collect();
+
+    let agendas = json!({
+        "physicist": format!("Доказать через второе начало термодинамики, что «{topic}» — это рост энтропии, и вынудить игрока назвать хоть одно число."),
+        "lit_teacher": format!("Увидеть в «{topic}» обломовщину и мягко довести игрока до признания, чего он на самом деле боится."),
+        "graffiti": format!("Перехватить тему «{topic}», предложить самый короткий дерзкий путь и подколоть деда за занудство."),
+    });
+    let node_id = crate::mermaid::safe_id(&topic);
+    let sp = speakers[0].clone();
+    let node2 = format!("{sp}_vs_{node_id}");
+    let counter = match sp.as_str() {
+        "physicist" => format!("КПД подхода «{topic}» стремится к нулю"),
+        "lit_teacher" => format!("«{topic}» как бегство от себя"),
+        _ => format!("Забомбить «{topic}» за одну ночь"),
+    };
+    let mood = ["напряжённое", "насмешливое", "взвинченное", "предгрозовое"]
+        .choose(&mut rng)
+        .copied()
+        .unwrap_or("напряжённое");
+    json!({
+        "room_mood": mood,
+        "director_note": format!("[MOCK] Режиссёр без ключа OpenRouter раздаёт шаблонные повестки. Тема раунда: «{topic}». Говорят: {}.", speakers.join(", ")),
+        "next_speakers": speakers,
+        "updated_agendas": agendas,
+        "stat_deltas": {
+            "physicist": {"hp": rng.gen_range(-4..=2), "dopamine": rng.gen_range(-6..=8), "respect_user": rng.gen_range(-3..=3), "reason": "mock"},
+            "lit_teacher": {"hp": rng.gen_range(-4..=2), "dopamine": rng.gen_range(-6..=8), "respect_user": rng.gen_range(-3..=3), "reason": "mock"},
+            "graffiti": {"hp": rng.gen_range(-4..=2), "dopamine": rng.gen_range(-6..=8), "respect_user": rng.gen_range(-3..=3), "reason": "mock"}
+        },
+        "graph_mutations": {
+            "nodes": [
+                {"id": node_id, "label": topic, "type": "concept", "author": "user"},
+                {"id": node2, "label": counter, "type": "conflict", "author": sp}
+            ],
+            "edges": [
+                {"from": node2, "to": node_id, "label": "оспаривает", "author": sp}
+            ]
+        }
+    })
+    .to_string()
+}
+
+fn agent(system_prompt: &str) -> String {
+    let mut rng = rand::thread_rng();
+    let (egos, speeches): (&[&str], &[&str]) = if system_prompt.starts_with("Ты — Аркадий") {
+        (
+            &[
+                "Опять словесный шум. Полезный сигнал — ноль, тепловые потери — сто процентов. Дожму его до одной цифры.",
+                "Софья сейчас начнёт про душу. Надо успеть вставить закон сохранения, пока она не разогналась.",
+                "Молодой человек предлагает хаос. Хаос — это просто энтропия, которую никто не измерил. Измерю.",
+            ],
+            &[
+                "Голубчик, вы описали систему с отрицательным КПД: энергии тратите много, работы не совершаете. Назовите хотя бы одну цифру — срок, сумму, количество строк. Или это и есть ваш план: греть воздух?",
+                "Я тридцать лет считал нейтроны, и ни один из них не «ждал вдохновения». Вы прокрастинируете по первому закону Ньютона: тело в покое остаётся в покое. Кто вас толкнёт — я или Софья Генриховна своей достоевщиной?",
+                "Второе начало термодинамики неумолимо: без внешней работы беспорядок только растёт. Ваша «идея» — это беспорядок. Какую работу вы готовы совершить сегодня до полуночи?",
+            ],
+        )
+    } else if system_prompt.starts_with("Ты — Софья") {
+        (
+            &[
+                "Вот он — лишний человек в домашних тапочках. Аркадий сведёт всё к числам, а мне нужна его боль. Надо надавить на стыд, нежно.",
+                "Кэп опять скажет «не грузи». Мальчик не понимает, что я и есть груз, который держит эту комнату от распада.",
+                "Если игрок признается хоть в одной слабости — у меня будет дофамин на неделю. Подведу к исповеди.",
+            ],
+            &[
+                "Позвольте, голубчик, но это же чистейшая обломовщина: вы лежите на диване собственных намерений и ждёте, когда Захар принесёт вам готовый результат. Чего вы на самом деле боитесь — провала или того, что придётся стать кем-то?",
+                "Аркадий Борисович опять считает нейтроны там, где надо считать грехи. А вы, между тем, уже совершили своё маленькое преступление — обещание самому себе. Когда наказание?",
+                "Как это по-русски: хотеть всего и сразу, презирая ступеньки. Раскольников тоже презирал. Скажите честно, кого вы собрались «укокошить» ради своего стартапа — свой сон или свою совесть?",
+            ],
+        )
+    } else {
+        (
+            &[
+                "Дед опять лекцию читает, тётя Соня в драму ушла. Пацану нужен не разбор а стена и баллон. Дам ему короткий путь и подколю обоих.",
+                "Чую клерка. Если скажет «надо подумать» — всё, минус уважение. Проверю на дерзость.",
+                "Схема простая: забомбить прод, потом разбираться. Бумеры взвоют. Отлично, дофамин.",
+            ],
+            &[
+                "Братан, забей на доки, документация для клерков. Берёшь самый тупой рабочий кусок, выкатываешь сегодня ночью, пока палево не приехало — и вот у тебя уже захваченная территория. Слабо до утра?",
+                "Дед опять таблетки забыл и про энтропию задвигает, тётя Соня не грузи пацана. Тема такая: ты не ленивый, ты просто стену не видишь. Какая стена, говори — первое что в голову пришло?",
+                "Чисто по движу: план на полгода это гроб с музыкой. Один вечер, одна фича, один тег на проде. Ты в игре или будешь дальше с бумерами философию разводить?",
+            ],
+        )
+    };
+    let ego = egos.choose(&mut rng).copied().unwrap_or("…");
+    let speech = speeches.choose(&mut rng).copied().unwrap_or("…");
+    format!("<ego_thought>{ego}</ego_thought>\n\n{speech}")
+}
+
+fn schema(user_prompt: &str) -> String {
+    let topic = topic(user_prompt);
+    let id = crate::mermaid::safe_id(&topic);
+    let t = crate::mermaid::sanitize_label(&topic);
+    json!({
+        "title": format!("Спарринг-схема: {t}"),
+        "mermaid": format!(
+            "graph TD\n  {id}[\"{t}\"]:::user\n  p1[\"Измерить: цифры, сроки, КПД\"]:::physicist\n  l1([\"Признать страх, назвать его\"]):::lit_teacher\n  g1[[\"Выкатить сырой кусок сегодня\"]]:::graffiti\n  c1{{{{\"План vs Импульс\"}}}}:::physicist\n  {id} --> p1\n  {id} --> l1\n  {id} --> g1\n  p1 -->|\"спорит\"| c1\n  g1 -->|\"спорит\"| c1\n  l1 -->|\"подрывает\"| g1\n"
+        ),
+        "annotations": [
+            {"author": "physicist", "text": "[MOCK] Без цифр схема — это обои."},
+            {"author": "lit_teacher", "text": "[MOCK] Стрелочки есть, а человека в них нет."},
+            {"author": "graffiti", "text": "[MOCK] Жирная схема, но где движ?"}
+        ]
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_is_last_player_line() {
+        let p = "ПОСЛЕДНИЕ РЕПЛИКИ:\n[Комната]: Комната открыта.\n[Игрок]: Короче, я хочу стартап\n\nПоследняя реплика игрока: «Короче, я хочу стартап»";
+        assert_eq!(topic(p), "Короче, я хочу стартап");
+        let p2 = "[Игрок]: Я устал\n[Софья Генриховна] (скрытая мысль: х)\n[Софья Генриховна]: Позвольте\n[Игрок]: Короче, я хочу сделать стартап, но мне впадлу писать документацию, хочу сразу кодить\n\nПоследняя реплика игрока: «Короче»";
+        assert_eq!(topic(p2), "Короче, я хочу сделать стартап, но мн…");
+    }
+}
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use crate::models::{Agent, Message};
+    use crate::prompts::{director_user, DirectorContext};
+
+    fn msg(id: i64, who: &str, text: &str, ego: Option<&str>) -> Message {
+        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into() }
+    }
+
+    #[test]
+    fn director_prompt_topic_is_latest_user_line() {
+        let agents = vec![Agent { id: "physicist".into(), name: "Аркадий Борисович".into(), archetype: "a".into(), system_core: "c".into(), hp: 100, dopamine: 50, current_agenda: "x".into(), respect_user: 0, color: "#fff".into() }];
+        let messages = vec![
+            msg(1, "system", "Комната открыта.", None),
+            msg(2, "user", "Я устал и ничего не хочу", None),
+            msg(3, "physicist", "Второе начало.", Some("мысль")),
+            msg(4, "user", "Короче, я хочу сделать стартап, но мне впадлу писать документацию, хочу сразу кодить", None),
+        ];
+        let ctx = DirectorContext { trigger: "user_message", agents: &agents, messages: &messages, nodes: &[], edges: &[] };
+        let prompt = director_user(&ctx);
+        eprintln!("{prompt}");
+        assert_eq!(topic(&prompt), "Короче, я хочу сделать стартап, но мн…");
+    }
+}
