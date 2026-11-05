@@ -130,6 +130,17 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             text       TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS attachments (
+            id         TEXT PRIMARY KEY,
+            node_id    TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            mime       TEXT NOT NULL,
+            size       INTEGER NOT NULL,
+            path       TEXT NOT NULL,
+            text       TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
         CREATE TABLE IF NOT EXISTS schemas (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             title       TEXT NOT NULL,
@@ -182,6 +193,35 @@ async fn seed_types(pool: &Db) -> Result<()> {
         .bind(t.schema.to_string())
         .execute(pool)
         .await?;
+        // Rooms created by older versions: add new built-in props/template without touching
+        // anything the user customised (their props, order, options stay).
+        let existing: Option<String> = sqlx::query_scalar("SELECT schema FROM object_types WHERE id = ?").bind(t.id).fetch_optional(pool).await?;
+        if let Some(raw) = existing {
+            let mut cur: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "props": [] }));
+            let mut changed = false;
+            let have: Vec<String> = cur.get("props").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|p| p.get("key").and_then(|k| k.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+            if let Some(seed_props) = t.schema.get("props").and_then(|p| p.as_array()) {
+                for p in seed_props {
+                    let key = p.get("key").and_then(|k| k.as_str()).unwrap_or("");
+                    if !have.iter().any(|h| h == key) {
+                        if !cur.get("props").map(|p| p.is_array()).unwrap_or(false) {
+                            cur["props"] = serde_json::json!([]);
+                        }
+                        cur["props"].as_array_mut().unwrap().push(p.clone());
+                        changed = true;
+                    }
+                }
+            }
+            if cur.get("template").is_none() {
+                if let Some(tpl) = t.schema.get("template") {
+                    cur["template"] = tpl.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                sqlx::query("UPDATE object_types SET schema = ? WHERE id = ?").bind(cur.to_string()).bind(t.id).execute(pool).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -657,6 +697,84 @@ pub async fn insert_type(pool: &Db, id: &str, name: &str, icon: &str, color: &st
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn update_type(pool: &Db, id: &str, name: Option<&str>, icon: Option<&str>, color: Option<&str>, schema: Option<&serde_json::Value>) -> Result<()> {
+    sqlx::query("UPDATE object_types SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color), schema = COALESCE(?, schema) WHERE id = ?")
+        .bind(name)
+        .bind(icon)
+        .bind(color)
+        .bind(schema.map(|s| s.to_string()))
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Delete a type; its objects become notes.
+pub async fn delete_type(pool: &Db, id: &str) -> Result<()> {
+    sqlx::query("UPDATE graph_nodes SET type_id = 'note' WHERE type_id = ?").bind(id).execute(pool).await?;
+    sqlx::query("DELETE FROM object_types WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
+// ───────────────────────────── Attachments ─────────────────────────────
+
+pub async fn insert_attachment(pool: &Db, a: &crate::models::Attachment) -> Result<()> {
+    sqlx::query("INSERT INTO attachments (id, node_id, name, mime, size, path, text, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&a.id)
+        .bind(&a.node_id)
+        .bind(&a.name)
+        .bind(&a.mime)
+        .bind(a.size)
+        .bind(&a.path)
+        .bind(&a.text)
+        .bind(&a.created_by)
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE graph_nodes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?").bind(&a.node_id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn list_attachments(pool: &Db) -> Result<Vec<crate::models::Attachment>> {
+    Ok(sqlx::query_as::<_, crate::models::Attachment>("SELECT id, node_id, name, mime, size, path, '' AS text, length(text) AS text_len, created_by, created_at FROM attachments ORDER BY created_at")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn attachments_of(pool: &Db, node_id: &str) -> Result<Vec<crate::models::Attachment>> {
+    Ok(sqlx::query_as::<_, crate::models::Attachment>("SELECT id, node_id, name, mime, size, path, text, length(text) AS text_len, created_by, created_at FROM attachments WHERE node_id = ? ORDER BY created_at")
+        .bind(node_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn get_attachment(pool: &Db, id: &str) -> Result<Option<crate::models::Attachment>> {
+    Ok(sqlx::query_as::<_, crate::models::Attachment>("SELECT id, node_id, name, mime, size, path, text, length(text) AS text_len, created_by, created_at FROM attachments WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn delete_attachment(pool: &Db, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM attachments WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// Objects whose attached documents mention the words (adds to `search_objects`).
+pub async fn search_attachments(pool: &Db, text: &str, limit: usize) -> Result<Vec<(String, String)>> {
+    let words: Vec<String> = text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3).map(|w| w.chars().take(6).collect::<String>()).take(6).collect();
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT node_id, name, substr(lower(text), 1, 200000) FROM attachments WHERE text <> ''").fetch_all(pool).await?;
+    let mut out: Vec<(usize, String, String)> = rows
+        .into_iter()
+        .map(|(n, name, t)| (words.iter().filter(|w| t.contains(w.as_str())).count(), n, name))
+        .filter(|(s, _, _)| *s > 0)
+        .collect();
+    out.sort_by_key(|x| std::cmp::Reverse(x.0));
+    Ok(out.into_iter().take(limit).map(|(_, n, name)| (n, name)).collect())
 }
 
 // ───────────────────────────── Mentions ─────────────────────────────

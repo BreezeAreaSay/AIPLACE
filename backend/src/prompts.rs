@@ -325,6 +325,12 @@ pub struct AgentContext<'a> {
     pub focus: Option<(&'a GraphNode, &'a [crate::models::NodeNote])>,
     /// Library lookup results relevant to the player's question (the "steroids").
     pub library: Option<&'a str>,
+    /// Text of files attached to the focus object (what the player handed over).
+    pub focus_files: Option<&'a str>,
+    /// "За окном" — weather + local time, when configured.
+    pub world: Option<&'a str>,
+    /// Whether web search is available (think stage may ask for it).
+    pub can_search: bool,
     /// Object types the agent may use in <act> tags.
     pub types: &'a [crate::models::ObjectType],
     /// Objects relevant to the moment (by topic + the agent's own), with ids, so actions can target them.
@@ -668,6 +674,11 @@ pub struct CasterInput<'a> {
     pub events: &'a [RoomEventRecord],
     pub focus: Option<(&'a GraphNode, &'a str)>,
     pub memories: &'a [AgentMemory],
+    pub world: Option<&'a str>,
+    pub calendar: Option<&'a str>,
+    /// Fresh feed items (title, summary, url) for `news` beats.
+    pub news: &'a [(String, String, String)],
+    pub focus_files: Option<&'a str>,
 }
 
 pub fn caster_user(i: &CasterInput) -> String {
@@ -683,6 +694,7 @@ pub fn caster_user(i: &CasterInput) -> String {
             match i.life_kind.unwrap_or("write_first") {
                 "argue" => "ИГРОК ДАВНО МОЛЧИТ. Двое персонажей заводят разговор МЕЖДУ СОБОЙ (2 бита, адресаты — друг другу): о чём-то из доски, о прошлом споре, о своём. Не про игрока в третьем лице каждый раз — у них есть свои темы.".to_string(),
                 "own_project" => format!("ИГРОК ДАВНО МОЛЧИТ. Один персонаж рассказывает комнате (addressee room) о продвижении СВОЕГО проекта — конкретная маленькая новость, деталь, затык или радость. 1 бит, можно второй — короткая реакция соседа.\nИХ ПРОЕКТЫ:\n{projects}"),
+                "news" => format!("ИГРОК ДАВНО МОЛЧИТ. Один персонаж приносит в комнату СВЕЖУЮ НОВОСТЬ из лент (ту, что ему по характеру и по теме) и говорит, что он о ней думает — одной-двумя фразами, с мнением, не пересказ. Второй бит — короткая реакция соседа или вопрос игроку. В intent укажи заголовок новости.\nСВЕЖЕЕ ИЗ ЛЕНТ:\n{}", i.news.iter().map(|(t, s, u)| format!("  • {t} — {} ({u})", crate::mermaid::truncate_chars(s, 160))).collect::<Vec<_>>().join("\n")),
                 _ => "ИГРОК ДАВНО МОЛЧИТ. Один персонаж пишет ему ПЕРВЫМ (1 бит, addressee user): спросить про конкретное дело из библиотеки или открытое слово, продолжить незакрытую тему, поделиться мыслью, которая пришла. Коротко, как в мессенджере, без пафоса. Второй бит не нужен.".to_string(),
             }
         }
@@ -694,8 +706,11 @@ pub fn caster_user(i: &CasterInput) -> String {
         .map(|m| format!("- {}: {}", m.agent_id, crate::mermaid::truncate_chars(&m.summary, 240)))
         .collect::<Vec<_>>()
         .join("\n");
+    let world = i.world.map(|w| format!("\nЗА ОКНОМ: {w} — пусть это иногда просачивается в сцену (настроение, планы, реплики), но не каждый раз.")).unwrap_or_default();
+    let cal = i.calendar.map(|c| format!("\nКАЛЕНДАРЬ ИГРОКА (ближайшее):\n{c}")).unwrap_or_default();
+    let files = i.focus_files.map(|f| format!("\nК ОБЪЕКТУ ПРИЛОЖЕНЫ ФАЙЛЫ (персонажи их читали):\n{f}")).unwrap_or_default();
     format!(
-        "{trigger}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ: {}\nГОВОРИЛИ В ПОСЛЕДНИХ РАУНДАХ (свежие первыми): {}\nПЕРСОНАЖИ:\n{}\nОТНОШЕНИЯ:\n{}\nСОБЫТИЯ:\n{}\nИЗ ДНЕВНИКОВ:\n{}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}",
+        "{trigger}{world}{cal}{files}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ: {}\nГОВОРИЛИ В ПОСЛЕДНИХ РАУНДАХ (свежие первыми): {}\nПЕРСОНАЖИ:\n{}\nОТНОШЕНИЯ:\n{}\nСОБЫТИЯ:\n{}\nИЗ ДНЕВНИКОВ:\n{}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}",
         i.reader,
         if i.recent_speakers.is_empty() { "никто".to_string() } else { i.recent_speakers.join(", ") },
         short_agents(i.agents),
@@ -788,10 +803,11 @@ fn short_state(a: &Agent) -> String {
 pub fn think_system(ctx: &AgentContext) -> String {
     let a = ctx.agent;
     format!(
-        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Если тебе нужны факты из библиотеки комнаты (дела игрока, люди, сроки, твои объекты) — добавь строку ИЩУ В БИБЛИОТЕКЕ: ключевые слова — и получишь результат перед репликой. Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
+        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Если тебе нужны факты из библиотеки комнаты (дела игрока, люди, сроки, твои объекты) — добавь строку ИЩУ В БИБЛИОТЕКЕ: ключевые слова — и получишь результат перед репликой.{search} Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
         core = a.system_core,
         state = short_state(a),
         agenda = a.current_agenda,
+        search = if ctx.can_search { " Если нужен факт из внешнего мира (новость, цена, дата, цитата, определение) — строка ИЩУ В СЕТИ: запрос — и перед репликой получишь результаты поиска." } else { "" },
         beat = beat_text(ctx, &std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect::<Vec<_>>())
     )
 }
@@ -804,17 +820,20 @@ pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
         format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
     };
     let memory = ctx.memory.filter(|m| !m.is_empty()).map(|m| format!("\nИЗ ТВОЕГО ДНЕВНИКА: {}", crate::mermaid::truncate_chars(m, 500))).unwrap_or_default();
-    let focus = ctx.focus.map(|(n, _)| format!("\nРЕЧЬ ИДЁТ ОБ УЗЛЕ ДОСКИ «{}»: {}", n.label, crate::mermaid::truncate_chars(&n.body, 300))).unwrap_or_default();
+    let focus = ctx.focus.map(|(n, _)| format!("\nРЕЧЬ ИДЁТ ОБ ОБЪЕКТЕ «{}» [{}]{}: {}", n.label, n.type_id, props_inline(n), crate::mermaid::truncate_chars(&n.body, 600))).unwrap_or_default();
+    let files = ctx.focus_files.map(|f| format!("\nК НЕМУ ПРИЛОЖЕНО (ты это читал):\n{f}")).unwrap_or_default();
+    let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
     let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (точные факты, на них можно опираться):\n{l}")).unwrap_or_default();
-    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
+    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{files}{world}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
 }
 
-/// Split the think-stage output into (thought, hook phrase, library query).
-pub fn split_thought(raw: &str) -> (String, String, Option<String>) {
+/// Split the think-stage output into (thought, hook phrase, library query, web query).
+pub fn split_thought(raw: &str) -> (String, String, Option<String>, Option<String>) {
     let text = raw.trim().trim_start_matches(EGO_PREFILL).trim_end_matches("</ego_thought>").trim();
     let mut thought = Vec::new();
     let mut hook = String::new();
     let mut query = None;
+    let mut web = None;
     for line in text.lines() {
         let l = line.trim();
         let up = l.to_uppercase();
@@ -825,11 +844,22 @@ pub fn split_thought(raw: &str) -> (String, String, Option<String>) {
             if !q.is_empty() {
                 query = Some(crate::mermaid::truncate_chars(&q, 120));
             }
+        } else if up.starts_with("ИЩУ В СЕТИ") || up.starts_with("ИЩУ В ИНТЕРНЕТЕ") {
+            let q = l.split_once(':').map(|(_, v)| v).unwrap_or("").trim().trim_matches('"').to_string();
+            if !q.is_empty() {
+                web = Some(crate::mermaid::truncate_chars(&q, 120));
+            }
         } else if !l.is_empty() {
             thought.push(l);
         }
     }
-    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120), query)
+    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120), query, web)
+}
+
+/// `key=value, …` for an object's non-empty props (prompt helper).
+pub fn props_inline(n: &GraphNode) -> String {
+    let s = n.props.0.as_object().map(|o| o.iter().filter(|(_, v)| !v.is_null() && v.as_str() != Some("")).map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    if s.is_empty() { s } else { format!(" ({s})") }
 }
 
 pub fn speak_system_native(ctx: &AgentContext) -> String {
@@ -878,9 +908,11 @@ pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str, 
         format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
     };
     let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (это точные факты о делах игрока — используй их, а не догадки):\n{l}")).unwrap_or_default();
-    let found = found.map(|f| format!("\nТЫ ИСКАЛ В БИБЛИОТЕКЕ — НАЙДЕНО:\n{f}")).unwrap_or_default();
+    let found = found.map(|f| format!("\nТЫ ИСКАЛ — НАЙДЕНО (опирайся на это, ссылки можно называть):\n{f}")).unwrap_or_default();
+    let files = ctx.focus_files.map(|f| format!("\nПРИЛОЖЕННЫЕ ФАЙЛЫ ОБЪЕКТА (ты их читал — ссылайся на конкретное):\n{f}")).unwrap_or_default();
+    let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
     format!(
-        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}{files}{world}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
         transcript(&recent, all, false),
         if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
         if hook.is_empty() { "последняя реплика" } else { hook }

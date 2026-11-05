@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Archive, Check, Copy, Download, Eye, Files, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Swords, Trash2, TrendingUp, X } from 'lucide-react'
-import type { Agent, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
+import { Archive, Check, Copy, Download, Eye, Files, Github, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import type { Agent, Attachment, Features, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
 import { Markdown } from './Markdown'
 import { MdEditor } from './MdEditor'
+import { Attachments } from './Attachments'
 import { api } from '../api'
 
 interface Props {
@@ -22,6 +23,12 @@ interface Props {
   onDeleteEdge: (id: number) => void
   onSelect: (id: string) => void
   onCreate: (label: string, opts: { type_id?: string; body?: string; props?: Record<string, unknown> }) => void
+  attachments: Attachment[]
+  features: Features
+  onUpload: (id: string, files: File[]) => Promise<unknown>
+  onDeleteFile: (id: string) => void
+  onAutofill: (id: string) => Promise<{ found: boolean; filled?: string[]; card?: { source: string } }>
+  onGithub: (id: string) => Promise<unknown>
 }
 
 function wordCount(s: string) {
@@ -29,7 +36,7 @@ function wordCount(s: string) {
 }
 
 /** Object page: editable markdown note with autosave, properties, triad buttons, notes, links, backlinks. */
-export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect, onCreate }: Props) {
+export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect, onCreate, attachments, features, onUpload, onDeleteFile, onAutofill, onGithub }: Props) {
   const [label, setLabel] = useState(node.label)
   const [body, setBody] = useState(node.body)
   const [editing, setEditing] = useState(() => !node.body.trim())
@@ -38,6 +45,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
   const [myNote, setMyNote] = useState('')
   const [question, setQuestion] = useState('')
   const [backlinks, setBacklinks] = useState<Message[]>([])
+  const [filling, setFilling] = useState<string | null>(null)
   const timer = useRef<number | null>(null)
   const lastSent = useRef({ label: node.label, body: node.body })
 
@@ -129,6 +137,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
   const mine = notes.filter((n) => n.node_id === node.id)
   const links = graph.edges.filter((e) => e.source_id === node.id || e.target_id === node.id)
   const type = types.find((t) => t.id === node.type_id)
+  const lookupKind = node.type_id === 'book' ? 'book' : node.type_id === 'movie' ? 'movie' : ['human', 'place', 'idea', 'note', 'page', 'quote', 'event', 'project'].includes(node.type_id) ? 'wiki' : null
 
   const asMarkdown = () => {
     const fm = [`title: ${node.label}`, `type: ${node.type_id}`, ...Object.entries(node.props).filter(([, v]) => v !== null && v !== '').map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)]
@@ -238,12 +247,48 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           )}
         </div>
 
-        {type && type.schema.props.length > 0 && (
+        {type && (type.schema.props.length > 0 || lookupKind) && (
           <section>
-            <div className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">свойства · {type.name.toLowerCase()}</div>
-            <PropsEditor schema={type.schema.props} values={node.props} nodes={graph.nodes} onChange={(k, v) => onPatch(node.id, { props: { [k]: v } })} />
+            <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+              свойства · {type.name.toLowerCase()}
+              {lookupKind && (lookupKind !== 'movie' || features.tmdb) && (
+                <button
+                  onClick={() => {
+                    setFilling('…')
+                    void onAutofill(node.id)
+                      .then((r) => setFilling(r.found ? `заполнено: ${(r.filled ?? []).join(', ') || 'описание'} (${r.card?.source ?? ''})` : 'ничего не нашлось'))
+                      .catch((e) => setFilling(`ошибка: ${(e as Error).message}`))
+                      .finally(() => window.setTimeout(() => setFilling(null), 4000))
+                  }}
+                  disabled={!!filling}
+                  className="ml-auto flex items-center gap-1 rounded border border-acid/50 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-acid hover:bg-acid/10 disabled:opacity-50"
+                  title={lookupKind === 'book' ? 'OpenLibrary: автор, год, страницы, обложка' : lookupKind === 'movie' ? 'TMDB: год, режиссёр, постер, описание' : 'Википедия: описание и ссылка'}
+                >
+                  <Sparkles size={10} /> {filling ?? 'подтянуть данные'}
+                </button>
+              )}
+              {node.type_id === 'project' && typeof node.props.repo === 'string' && node.props.repo && (
+                <button
+                  onClick={() => {
+                    setFilling('GitHub…')
+                    void onGithub(node.id)
+                      .then(() => setFilling('активность дописана в заметку'))
+                      .catch((e) => setFilling(`ошибка: ${(e as Error).message}`))
+                      .finally(() => window.setTimeout(() => setFilling(null), 4000))
+                  }}
+                  disabled={!!filling}
+                  className="ml-auto flex items-center gap-1 rounded border border-line px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-zinc-300 hover:border-acid hover:text-acid disabled:opacity-50"
+                  title="Коммиты и issues — в раздел «GitHub» заметки"
+                >
+                  <Github size={10} /> {filling ?? 'GitHub'}
+                </button>
+              )}
+            </div>
+            <PropsEditor schema={type.schema.props} values={node.props} nodes={graph.nodes} onChange={(k, v) => onPatch(node.id, { props: { [k]: v } })} onOpen={onSelect} />
           </section>
         )}
+
+        <Attachments nodeId={node.id} attachments={attachments} onUpload={(files) => onUpload(node.id, files)} onDelete={onDeleteFile} />
 
         <section>
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">

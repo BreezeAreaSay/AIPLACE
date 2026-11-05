@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
-import { BookmarkPlus, Dices, Send, X } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import { BookmarkPlus, Dices, Mic, Paperclip, Send, Square, X } from 'lucide-react'
 import { haptic } from '../telegram'
-import type { GraphNode, ObjectType } from '../types'
+import type { Features, GraphNode, ObjectType } from '../types'
+import { api } from '../api'
 
 interface Props {
   disabled: boolean
@@ -15,7 +16,13 @@ interface Props {
   /** Save straight into the library without talking to the room. */
   onCapture: (label: string, typeId: string, body: string) => void
   onSearch: (q: string) => void
+  features: Features
+  /** Upload files as objects; returns their titles for [[links]]. */
+  onAttach: (files: File[]) => Promise<string[]>
 }
+
+type SR = { start: () => void; stop: () => void; lang: string; interimResults: boolean; continuous: boolean; onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null }
+const BrowserSR = (window as unknown as { SpeechRecognition?: new () => SR; webkitSpeechRecognition?: new () => SR }).SpeechRecognition ?? (window as unknown as { webkitSpeechRecognition?: new () => SR }).webkitSpeechRecognition
 
 interface Command {
   names: string[]
@@ -42,7 +49,77 @@ function parseCommand(text: string): { cmd: Command; arg: string } | null {
   return cmd ? { cmd, arg: m[2].trim() } : null
 }
 
-export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo, contextNode, onClearContext, onCapture, onSearch }: Props) {
+export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo, contextNode, onClearContext, onCapture, onSearch, features, onAttach }: Props) {
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [rec, setRec] = useState<'off' | 'rec' | 'busy'>('off')
+  const recorder = useRef<MediaRecorder | null>(null)
+  const sr = useRef<SR | null>(null)
+  const canVoice = features.stt || !!BrowserSR
+
+  const attach = async (files: File[]) => {
+    if (!files.length) return
+    say(`гружу ${files.length}…`)
+    try {
+      const titles = await onAttach(files)
+      setText((t) => `${t}${t && !t.endsWith(' ') ? ' ' : ''}${titles.map((x) => `[[${x}]]`).join(' ')} `)
+      say(`в библиотеке: ${titles.join(', ')}`)
+    } catch (e) {
+      say(`ошибка: ${(e as Error).message}`)
+    }
+  }
+
+  const stopVoice = () => {
+    recorder.current?.stop()
+    sr.current?.stop()
+  }
+  const startVoice = async () => {
+    if (features.stt && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'
+        const mr = new MediaRecorder(stream, { mimeType: mime })
+        const chunks: Blob[] = []
+        mr.ondataavailable = (e) => e.data.size && chunks.push(e.data)
+        mr.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop())
+          setRec('busy')
+          try {
+            const r = await api.stt(new Blob(chunks, { type: mime }))
+            setText((t) => (t ? `${t} ${r.text}` : r.text))
+          } catch (e) {
+            say(`распознавание: ${(e as Error).message}`)
+          } finally {
+            setRec('off')
+          }
+        }
+        recorder.current = mr
+        mr.start()
+        setRec('rec')
+        return
+      } catch (e) {
+        say(`микрофон: ${(e as Error).message}`)
+      }
+    }
+    if (BrowserSR) {
+      const r = new BrowserSR()
+      r.lang = 'ru-RU'
+      r.interimResults = false
+      r.continuous = true
+      let acc = ''
+      r.onresult = (e) => {
+        acc = Array.from({ length: e.results.length }, (_, i) => e.results[i][0].transcript).join(' ')
+        setText((t) => `${t.replace(/ \[голос\].*$/, '')} [голос] ${acc}`.trim())
+      }
+      r.onend = () => {
+        setText((t) => t.replace(' [голос] ', ' ').trim())
+        setRec('off')
+      }
+      r.onerror = () => setRec('off')
+      sr.current = r
+      r.start()
+      setRec('rec')
+    }
+  }
   const [text, setText] = useState('')
   const [flash, setFlash] = useState<string | null>(null)
   const slash = text.startsWith('/')
@@ -123,10 +200,48 @@ export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo
               submit()
             }
           }}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files)
+            if (files.length) {
+              e.preventDefault()
+              void attach(files)
+            }
+          }}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes('Files')) e.preventDefault()
+          }}
+          onDrop={(e) => {
+            if (e.dataTransfer.files.length) {
+              e.preventDefault()
+              void attach(Array.from(e.dataTransfer.files))
+            }
+          }}
           rows={1}
           placeholder={disabled ? 'Они отвечают — можно докинуть ещё, подхватят по ходу…' : 'Скажи что-нибудь в комнату… («/» — команды, Shift+Enter — перенос)'}
           className="max-h-40 min-h-[42px] flex-1 resize-y rounded border border-line bg-panel px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-acid focus:outline-none"
         />
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files) void attach(Array.from(e.target.files))
+            e.target.value = ''
+          }}
+        />
+        <button onClick={() => fileInput.current?.click()} className="flex h-10 w-10 items-center justify-center rounded border border-line text-zinc-400 transition hover:border-acid hover:text-acid" title="Приложить файлы: станут объектами библиотеки и [[ссылками]] в сообщении">
+          <Paperclip size={16} />
+        </button>
+        {canVoice && (
+          <button
+            onClick={() => (rec === 'rec' ? stopVoice() : rec === 'off' ? void startVoice() : undefined)}
+            className={`flex h-10 w-10 items-center justify-center rounded border transition ${rec === 'rec' ? 'animate-pulse border-magenta text-magenta' : 'border-line text-zinc-400 hover:border-acid hover:text-acid'}`}
+            title={rec === 'rec' ? 'Стоп' : features.stt ? 'Надиктовать (Whisper)' : 'Надиктовать (распознавание браузера)'}
+          >
+            {rec === 'rec' ? <Square size={14} /> : <Mic size={16} className={rec === 'busy' ? 'animate-pulse' : ''} />}
+          </button>
+        )}
         <button
           onClick={() => {
             if (text.trim()) capture('note', text.trim())

@@ -26,6 +26,14 @@ pub fn config_path() -> PathBuf {
     triad_home().join(CONFIG_FILE)
 }
 
+/// Uploaded attachments live here, one folder per room.
+pub fn files_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("FILES_DIR") {
+        return PathBuf::from(d);
+    }
+    triad_home().join("files")
+}
+
 /// Load `.env` (cwd, dev convenience) and then the persisted user config. Neither overrides
 /// variables that are already set, which is exactly the precedence we want.
 pub fn load_env_files() {
@@ -129,22 +137,63 @@ impl Config {
     }
 }
 
-/// Hot-swappable LLM settings (changed by `triad setup`, `triad key …` or the UI).
+/// Integration settings the UI may edit (persisted next to the OpenRouter key).
+/// `(key, secret?, hint)` — secrets are masked in `/api/settings`.
+pub const INTEGRATION_KEYS: &[(&str, bool, &str)] = &[
+    ("SEARCH_PROVIDER", false, "ddg | tavily | brave | searxng (ddg работает без ключа)"),
+    ("SEARCH_API_KEY", true, "ключ Tavily или Brave"),
+    ("SEARXNG_URL", false, "https://searx.example.org"),
+    ("TMDB_API_KEY", true, "ключ TMDB v3 для фильмов"),
+    ("WEATHER_CITY", false, "город для Open-Meteo, напр. Москва"),
+    ("CALENDAR_ICS_URL", false, "приватная .ics-ссылка Google/Яндекс календаря"),
+    ("GITHUB_TOKEN", true, "необязательно, для приватных репо и лимитов"),
+    ("TTS_URL", false, "OpenAI-совместимый /audio/speech (пусто — голос браузера)"),
+    ("TTS_API_KEY", true, ""),
+    ("TTS_MODEL", false, "tts-1 | gpt-4o-mini-tts"),
+    ("TTS_VOICES", false, "physicist=onyx,lit_teacher=nova,graffiti=echo"),
+    ("STT_URL", false, "OpenAI-совместимый /audio/transcriptions (Groq: https://api.groq.com/openai/v1/audio/transcriptions)"),
+    ("STT_API_KEY", true, ""),
+    ("STT_MODEL", false, "whisper-large-v3"),
+    ("FEEDS_EVERY_MIN", false, "как часто опрашивать RSS-ленты (мин), по умолчанию 180"),
+];
+
+/// Hot-swappable LLM + integration settings (changed by `triad setup`, `triad key …` or the UI).
 #[derive(Clone, Debug)]
 pub struct LlmSettings {
     pub api_key: Option<String>,
     pub model: String,
     pub director_model: String,
+    pub integrations: BTreeMap<String, String>,
 }
 
 impl LlmSettings {
     pub fn from_env() -> Self {
         let model = env_or("OPENROUTER_MODEL", DEFAULT_MODEL);
+        let integrations = INTEGRATION_KEYS.iter().filter_map(|(k, _, _)| env_opt(k).map(|v| (k.to_string(), v))).collect();
         Self {
             api_key: env_opt("OPENROUTER_API_KEY"),
             director_model: env_or("OPENROUTER_DIRECTOR_MODEL", &model),
             model,
+            integrations,
         }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.integrations.get(key).map(String::as_str).filter(|v| !v.is_empty())
+    }
+
+    pub fn search_provider(&self) -> Option<String> {
+        match self.get("SEARCH_PROVIDER").map(str::to_lowercase) {
+            Some(p) if p == "off" || p == "none" => None,
+            Some(p) => Some(p),
+            None => Some("ddg".into()),
+        }
+    }
+    pub fn tts_enabled(&self) -> bool {
+        self.get("TTS_API_KEY").is_some() || self.get("TTS_URL").is_some()
+    }
+    pub fn stt_enabled(&self) -> bool {
+        self.get("STT_API_KEY").is_some() || self.get("STT_URL").is_some()
     }
 
     pub fn mock_mode(&self) -> bool {
@@ -172,6 +221,9 @@ impl LlmSettings {
             ("OPENROUTER_DIRECTOR_MODEL", self.director_model.clone()),
         ];
         pairs.push(("OPENROUTER_API_KEY", self.api_key.clone().unwrap_or_default()));
+        for (k, _, _) in INTEGRATION_KEYS {
+            pairs.push((k, self.integrations.get(*k).cloned().unwrap_or_default()));
+        }
         let path = save_config_values(&pairs)?;
         for (k, v) in &pairs {
             if v.is_empty() {

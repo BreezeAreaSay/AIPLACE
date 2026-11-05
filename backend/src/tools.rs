@@ -69,15 +69,68 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "room_status".into(),
-            description: "Кто в комнате, их состояние и отношения, текущее время (UTC), сколько игрок молчит.".into(),
+            description: "Кто в комнате, их состояние и отношения, текущее время (UTC), сколько игрок молчит, погода за окном.".into(),
             input_schema: obj(json!({}), &[]),
+        },
+        ToolDef {
+            name: "file_read".into(),
+            description: "Прочитать текст приложенного к объекту файла (pdf, txt, md, csv…) по id вложения из library_get. Кусками по 4000 символов: offset — с какого символа.".into(),
+            input_schema: obj(json!({ "id": { "type": "string" }, "offset": { "type": "integer", "minimum": 0 } }), &["id"]),
+        },
+        ToolDef {
+            name: "web_search".into(),
+            description: "Поиск в интернете: заголовок, ссылка, фрагмент. Для фактов, новостей, цен, дат, цитат — всего, чего нет в библиотеке. Потом можно web_fetch.".into(),
+            input_schema: obj(json!({ "query": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 10 } }), &["query"]),
+        },
+        ToolDef {
+            name: "web_fetch".into(),
+            description: "Открыть страницу по URL и получить её текст (до 6000 символов).".into(),
+            input_schema: obj(json!({ "url": { "type": "string" } }), &["url"]),
+        },
+        ToolDef {
+            name: "lookup".into(),
+            description: "Справочник: kind=book (OpenLibrary: автор, год, страницы, обложка), movie (TMDB: год, режиссёр, постер, описание), wiki (Википедия: люди, места, понятия). Возвращает карточку; чтобы записать — library_create/update с этими свойствами.".into(),
+            input_schema: obj(json!({ "kind": { "type": "string", "enum": ["book", "movie", "wiki"] }, "query": { "type": "string" } }), &["kind", "query"]),
+        },
+        ToolDef {
+            name: "weather_now".into(),
+            description: "Погода за окном сейчас и на завтра (город из настроек).".into(),
+            input_schema: obj(json!({}), &[]),
+        },
+        ToolDef {
+            name: "calendar_upcoming".into(),
+            description: "Что у игрока в календаре на ближайшие дни: сроки задач и слов из библиотеки плюс его личный календарь.".into(),
+            input_schema: obj(json!({ "days": { "type": "integer", "minimum": 1, "maximum": 60 } }), &[]),
+        },
+        ToolDef {
+            name: "feed_fetch".into(),
+            description: "Прочитать RSS/Atom-ленту по URL: свежие заголовки с ссылками и выжимками.".into(),
+            input_schema: obj(json!({ "url": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 20 } }), &["url"]),
+        },
+        ToolDef {
+            name: "github_activity".into(),
+            description: "Что происходит в GitHub-репозитории (owner/name или ссылка): последние коммиты, открытые issues, звёзды.".into(),
+            input_schema: obj(json!({ "repo": { "type": "string" } }), &["repo"]),
         },
     ]
 }
 
-/// OpenAI/OpenRouter `tools` payload.
-pub fn as_openai_tools() -> Vec<Value> {
+/// Tools that are actually usable with the current settings (so the model never sees a dead tool).
+pub fn definitions_enabled(s: &crate::config::LlmSettings) -> Vec<ToolDef> {
+    let f = crate::integrations::features(s);
     definitions()
+        .into_iter()
+        .filter(|t| match t.name.as_str() {
+            "web_search" | "web_fetch" => f.search,
+            "weather_now" => f.weather,
+            _ => true,
+        })
+        .collect()
+}
+
+/// OpenAI/OpenRouter `tools` payload.
+pub fn as_openai_tools(s: &crate::config::LlmSettings) -> Vec<Value> {
+    definitions_enabled(s)
         .into_iter()
         .map(|t| json!({ "type": "function", "function": { "name": t.name, "description": t.description, "parameters": t.input_schema } }))
         .collect()
@@ -94,12 +147,25 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let ty = args.get("type").and_then(|v| v.as_str()).filter(|t| !t.is_empty());
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8).min(20) as usize;
-            let hits = if q.trim().is_empty() && ty.is_none() {
+            let mut hits = if q.trim().is_empty() && ty.is_none() {
                 db::list_nodes(&app.db).await?.into_iter().rev().take(limit).collect()
             } else {
                 db::search_objects(&app.db, q, ty, limit).await?
             };
-            Ok((json!({ "results": hits.iter().map(|n| short(n, &agents)).collect::<Vec<_>>() }), None))
+            let mut via_files: Vec<Value> = vec![];
+            if !q.trim().is_empty() {
+                for (node_id, fname) in db::search_attachments(&app.db, q, 5).await? {
+                    if ty.map(|t| hits.iter().any(|h| h.id == node_id && h.type_id == t)).unwrap_or(true) && !hits.iter().any(|h| h.id == node_id) {
+                        if let Some(n) = db::get_node(&app.db, &node_id).await? {
+                            if ty.map(|t| n.type_id == t).unwrap_or(true) {
+                                via_files.push(json!({ "object": short(&n, &agents), "matched_file": fname }));
+                                hits.push(n);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok((json!({ "results": hits.iter().map(|n| short(n, &agents)).collect::<Vec<_>>(), "matched_in_files": via_files }), None))
         }
         "library_get" => {
             let id = mermaid::safe_id(args.get("id").and_then(|v| v.as_str()).unwrap_or(""));
@@ -107,10 +173,12 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
             let edges = db::edges_of(&app.db, &id).await?;
             let notes = db::notes_for_node(&app.db, &id).await?;
             let mentions = db::messages_mentioning(&app.db, &id, 8).await?;
+            let atts = db::attachments_of(&app.db, &id).await?;
             Ok((
                 json!({
                     "object": short(&n, &agents),
                     "body": n.body,
+                    "attachments": atts.iter().map(|a| json!({ "id": a.id, "name": a.name, "mime": a.mime, "size": a.size, "text_chars": a.text_len, "excerpt": mermaid::truncate_chars(&a.text.split_whitespace().collect::<Vec<_>>().join(" "), 600) })).collect::<Vec<_>>(),
                     "relations": edges.iter().map(|e| json!({ "from": e.source_id, "to": e.target_id, "kind": e.kind, "label": e.relation_label })).collect::<Vec<_>>(),
                     "notes": notes.iter().map(|x| json!({ "author": x.author, "text": x.text })).collect::<Vec<_>>(),
                     "mentioned_in": mentions.iter().map(|m| json!({ "who": crate::prompts::sender_name(&m.sender_id, &agents), "text": mermaid::truncate_chars(&m.content, 160), "at": m.created_at })).collect::<Vec<_>>(),
@@ -192,12 +260,80 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
             let all = db::list_contracts(&app.db).await?;
             Ok((json!({ "contracts": all.iter().take(20).map(|c| json!({ "id": c.id, "title": c.title, "status": c.status, "deadline": c.deadline, "guarantor": c.guarantor_id, "stake": c.stake })).collect::<Vec<_>>() }), None))
         }
+        "file_read" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let Some(a) = db::get_attachment(&app.db, id).await? else { return Ok((json!({ "error": "нет такого вложения" }), None)) };
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let total = a.text.chars().count();
+            let chunk: String = a.text.chars().skip(offset).take(4000).collect();
+            Ok((json!({ "name": a.name, "object_id": a.node_id, "total_chars": total, "offset": offset, "next_offset": if offset + 4000 < total { Some(offset + 4000) } else { None }, "text": if chunk.is_empty() && total == 0 { "(текст не извлечён — это картинка или бинарный файл)".to_string() } else { chunk } }), None))
+        }
+        "web_search" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if q.is_empty() {
+                return Ok((json!({ "error": "нужен query" }), None));
+            }
+            let s = app.llm_settings().await;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            match crate::integrations::search::search(&s, q, limit).await {
+                Ok(hits) => Ok((json!({ "results": hits }), Some(ActionRecord { op: "search".into(), object_id: String::new(), text: format!("искал в сети: {}", mermaid::truncate_chars(q, 60)) }))),
+                Err(e) => Ok((json!({ "error": format!("поиск не удался: {e:#}") }), None)),
+            }
+        }
+        "web_fetch" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            match crate::integrations::search::fetch(url, 6000).await {
+                Ok((title, text)) => Ok((json!({ "title": title, "text": text }), Some(ActionRecord { op: "search".into(), object_id: String::new(), text: format!("прочитал {}", mermaid::truncate_chars(&title, 60)) }))),
+                Err(e) => Ok((json!({ "error": format!("не открылось: {e:#}") }), None)),
+            }
+        }
+        "lookup" => {
+            let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("wiki");
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let s = app.llm_settings().await;
+            match crate::integrations::lookup::lookup(&s, kind, q).await {
+                Ok(Some(c)) => Ok((serde_json::to_value(&c).unwrap_or_default(), Some(ActionRecord { op: "search".into(), object_id: String::new(), text: format!("посмотрел в {}: {}", c.source, mermaid::truncate_chars(&c.title, 50)) }))),
+                Ok(None) => Ok((json!({ "error": "ничего не нашлось" }), None)),
+                Err(e) => Ok((json!({ "error": format!("{e:#}") }), None)),
+            }
+        }
+        "weather_now" => {
+            let s = app.llm_settings().await;
+            let Some(city) = s.get("WEATHER_CITY") else { return Ok((json!({ "error": "город не настроен (WEATHER_CITY)" }), None)) };
+            match crate::integrations::weather::current(city).await {
+                Ok(w) => Ok((json!({ "line": crate::integrations::weather::line(&w), "weather": w }), None)),
+                Err(e) => Ok((json!({ "error": format!("{e:#}") }), None)),
+            }
+        }
+        "calendar_upcoming" => {
+            let days = args.get("days").and_then(|v| v.as_i64()).unwrap_or(7);
+            let ev = crate::integrations::calendar::upcoming(app, days).await?;
+            Ok((json!({ "digest": crate::integrations::calendar::digest(&ev), "events": ev }), None))
+        }
+        "feed_fetch" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+            match crate::integrations::feeds::fetch(url, limit).await {
+                Ok((title, items)) => Ok((json!({ "feed": title, "items": items }), None)),
+                Err(e) => Ok((json!({ "error": format!("{e:#}") }), None)),
+            }
+        }
+        "github_activity" => {
+            let repo = args.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let s = app.llm_settings().await;
+            match crate::integrations::github::activity(&s, repo).await {
+                Ok(text) => Ok((json!({ "activity": text }), Some(ActionRecord { op: "search".into(), object_id: String::new(), text: format!("заглянул в GitHub {}", mermaid::truncate_chars(repo, 40)) }))),
+                Err(e) => Ok((json!({ "error": format!("{e:#}") }), None)),
+            }
+        }
         "room_status" => {
             let relations = db::list_relations(&app.db).await?;
             let since = db::last_user_activity(&app.db).await?;
+            let world = crate::integrations::world_line(app).await;
             Ok((
                 json!({
                     "now_utc": crate::contracts::now_rfc3339(),
+                    "world": world,
                     "player_last_seen_at": since,
                     "members": agents.iter().map(|a| json!({ "id": a.id, "name": a.name, "alive": a.is_alive(), "state": a.inner_state, "respect_user": a.respect_user })).collect::<Vec<_>>(),
                     "relations": relations.iter().map(|r| json!({ "a": r.a_id, "b": r.b_id, "affinity": r.affinity, "label": r.label })).collect::<Vec<_>>(),
@@ -233,11 +369,17 @@ pub fn type_name_acc(types: &[crate::models::ObjectType], type_id: &str) -> Stri
         "movie" => "фильм".into(),
         "recipe" => "рецепт".into(),
         "diary" => "запись в дневнике".into(),
+        "quote" => "цитату".into(),
+        "event" => "событие".into(),
+        "place" => "место".into(),
+        "file" => "файл".into(),
+        "image" => "картинку".into(),
+        "feed" => "ленту".into(),
         other => types.iter().find(|t| t.id == other).map(|t| t.name.to_lowercase()).unwrap_or_else(|| other.to_string()),
     }
 }
 
 /// Compact "where am I" brief so an agent feels the system, not just hears about it.
 pub fn system_brief() -> &'static str {
-    "ГДЕ ТЫ: это Triad Canvas — живая комната. Здесь трое (ты и двое соседей) с характерами, памятью и отношениями, игрок (человек), невидимый Режиссёр, который ставит сцены, и БИБЛИОТЕКА — общая типизированная память комнаты: люди, проекты, задачи, идеи, закладки, книги, ваши собственные проекты. Библиотеку ведёт Архивариус по разговорам, но ты можешь и сам: искать, заводить, менять, закрывать, связывать, оставлять пометки — это твои руки, пользуйся ими, когда это по делу и в характере. Слова игрока — его обещания со сроками и поручителем из вас. Когда игрок молчит, комната живёт сама: вы пишете первыми, спорите, двигаете свои проекты."
+    "ГДЕ ТЫ: это Triad Canvas — живая комната. Здесь трое (ты и двое соседей) с характерами, памятью и отношениями, игрок (человек), невидимый Режиссёр, который ставит сцены, и БИБЛИОТЕКА — общая типизированная память комнаты: люди, проекты, задачи, идеи, закладки, книги, ваши собственные проекты. Библиотеку ведёт Архивариус по разговорам, но ты можешь и сам: искать, заводить, менять, закрывать, связывать, оставлять пометки — это твои руки, пользуйся ими, когда это по делу и в характере. Слова игрока — его обещания со сроками и поручителем из вас. К объектам бывают приложены файлы (pdf, тексты, картинки) — их текст тебе доступен. У комнаты есть окна наружу: поиск в сети, справочники (книги, фильмы, Википедия), погода, календарь игрока, ленты новостей, GitHub — пользуйся ими, когда нужен факт, а не мнение. Когда игрок молчит, комната живёт сама: вы пишете первыми, спорите, двигаете свои проекты, приносите новости."
 }

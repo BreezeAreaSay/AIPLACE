@@ -4,7 +4,7 @@ use std::{convert::Infallible, net::SocketAddr};
 
 use axum::{
     async_trait,
-    extract::{ConnectInfo, FromRequestParts, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Multipart, Path, Query, State},
     http::{header, request::Parts, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -24,7 +24,7 @@ use crate::{
     memory, mermaid,
     models::{
         AskNodeRequest, ChatRequest, CreateEdgeRequest, CreateNodeRequest, CreateTypeRequest, Graph, NoteRequest, PatchNodeRequest,
-        ImportReport, ImportRequest, ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
+        ImportReport, ImportRequest, ResolveContractRequest, RoomEvent, UpdateTypeRequest, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
     },
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
@@ -104,6 +104,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/export.md", get(export_markdown))
         .route("/api/nodes/:id/export.md", get(export_node_markdown))
         .route("/api/import", post(import_markdown))
+        .route("/api/nodes/:id/files", post(upload_to_node))
+        .route("/api/files", post(upload_files))
+        .route("/api/files/:id", get(serve_file).delete(delete_file))
+        .route("/api/files/:id/text", get(file_text))
+        .route("/api/types/:id", axum::routing::patch(update_type).delete(delete_type))
+        .route("/api/lookup", get(lookup))
+        .route("/api/nodes/:id/autofill", post(autofill_node))
+        .route("/api/nodes/:id/github", post(github_into_node))
+        .route("/api/weather", get(weather))
+        .route("/api/calendar.ics", get(calendar_ics))
+        .route("/api/calendar", get(calendar_upcoming))
+        .route("/api/tts", post(tts))
+        .route("/api/stt", post(stt))
+        .route("/api/feeds/poll", post(poll_feeds))
+        .layer(DefaultBodyLimit::max(60 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -129,6 +144,7 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
     let edges = db::list_edges(&app.db).await?;
     let graph_mermaid = mermaid::build_graph(&nodes, &edges);
     let s = app.llm_settings().await;
+    let s_feat = s.clone();
     Ok(RoomState {
         agents: db::list_agents(&app.db).await?,
         messages: db::with_mentions(&app.db, db::recent_messages(&app.db, 80).await?).await?,
@@ -154,11 +170,14 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
         last_seen_message_id: db::meta_get(&app.db, "last_seen").await?.and_then(|v| v.parse().ok()).unwrap_or(0),
         usage: app.llm.usage(),
         heartbeat_minutes: app.cfg.heartbeat_minutes,
+        attachments: db::list_attachments(&app.db).await?,
+        world: crate::integrations::world_line(app).await,
+        features: crate::integrations::features(&s_feat),
     })
 }
 
-async fn list_tools(Room { .. }: Room) -> Json<Vec<crate::tools::ToolDef>> {
-    Json(crate::tools::definitions())
+async fn list_tools(Room { app, .. }: Room) -> Json<Vec<crate::tools::ToolDef>> {
+    Json(crate::tools::definitions_enabled(&app.llm_settings().await))
 }
 
 async fn mcp_info() -> Json<serde_json::Value> {
@@ -198,7 +217,7 @@ async fn mcp_rpc(
         }),
         "notifications/initialized" | "initialized" => return StatusCode::ACCEPTED.into_response(),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": crate::tools::definitions() }),
+        "tools/list" => json!({ "tools": crate::tools::definitions_enabled(&app.llm_settings().await) }),
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -252,8 +271,8 @@ async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
     SettingsView {
         has_key: !s.mock_mode(),
         key_hint: s.key_hint(),
-        model: s.model,
-        director_model: s.director_model,
+        model: s.model.clone(),
+        director_model: s.director_model.clone(),
         editable,
         config_path: crate::config::config_path().display().to_string(),
         version: crate::update::VERSION.into(),
@@ -262,7 +281,29 @@ async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
         director_mode: app.cfg.director_mode.clone(),
         agent_mode: app.cfg.agent_mode.clone(),
         agent_tools: app.cfg.agent_tools.clone(),
+        integrations: crate::config::INTEGRATION_KEYS
+            .iter()
+            .map(|(k, secret, hint)| {
+                let v = s.integrations.get(*k).cloned().unwrap_or_default();
+                crate::models::IntegrationView {
+                    key: k.to_string(),
+                    value: if *secret && !v.is_empty() { mask(&v) } else { v.clone() },
+                    secret: *secret,
+                    set: !v.is_empty(),
+                    hint: hint.to_string(),
+                }
+            })
+            .collect(),
+        features: crate::integrations::features(&s),
     }
+}
+
+fn mask(v: &str) -> String {
+    let n = v.chars().count();
+    if n <= 8 {
+        return "•".repeat(n);
+    }
+    format!("{}…{}", v.chars().take(4).collect::<String>(), v.chars().skip(n - 3).collect::<String>())
 }
 
 async fn list_models(State(app): State<AppState>) -> AppResult<Json<Vec<crate::catalog::ModelInfo>>> {
@@ -298,6 +339,23 @@ async fn post_settings(
     }
     if let Some(m) = patch.director_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()) {
         s.director_model = m;
+    }
+    if let Some(map) = patch.integrations {
+        for (k, v) in map {
+            if !crate::config::INTEGRATION_KEYS.iter().any(|(key, _, _)| *key == k) {
+                continue;
+            }
+            let v = v.trim().to_string();
+            // a masked value echoed back from the UI means "unchanged"
+            if v.contains('•') || (v.contains('…') && v.chars().count() < 12) {
+                continue;
+            }
+            if v.is_empty() {
+                s.integrations.remove(&k);
+            } else {
+                s.integrations.insert(k, v);
+            }
+        }
     }
     if let Err(e) = s.save() {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("не удалось сохранить конфиг: {e:#}")}))));
@@ -401,7 +459,10 @@ async fn create_node(Room { app, editable, user }: Room, Json(req): Json<CreateN
         Some(t) if db::type_exists(&app.db, &t).await? => t,
         _ => crate::types_seed::legacy_type(req.node_type.as_deref().unwrap_or("note")).to_string(),
     };
-    db::upsert_object(&app.db, &id, &label, &type_id, USER_ID, req.body.as_deref(), req.props.as_ref(), req.x, req.y).await?;
+    // An empty body starts from the type's template (if it has one).
+    let template: Option<String> = db::list_types(&app.db).await?.into_iter().find(|t| t.id == type_id).and_then(|t| t.schema.0.get("template").and_then(|x| x.as_str()).map(str::to_string)).filter(|t| !t.trim().is_empty());
+    let body = req.body.as_deref().filter(|b| !b.trim().is_empty()).map(str::to_string).or(template);
+    db::upsert_object(&app.db, &id, &label, &type_id, USER_ID, body.as_deref(), req.props.as_ref(), req.x, req.y).await?;
     db::place_unpositioned_nodes(&app.db).await?;
     emit_graph(&app).await?;
     Ok(Json(build_state(&app, editable, user.as_ref()).await?))
@@ -645,6 +706,310 @@ async fn import_markdown(Room { app, .. }: Room, Json(req): Json<ImportRequest>)
     db::place_unpositioned_nodes(&app.db).await?;
     emit_graph(&app).await?;
     Ok(Json(report))
+}
+
+// ───────────────────────────── Files ─────────────────────────────
+
+struct Upload {
+    name: String,
+    mime: Option<String>,
+    bytes: Vec<u8>,
+}
+
+async fn read_multipart(mut mp: Multipart) -> AppResult<(Vec<Upload>, std::collections::HashMap<String, String>)> {
+    let mut files = vec![];
+    let mut fields = std::collections::HashMap::new();
+    while let Some(field) = mp.next_field().await.map_err(|e| AppError::bad_request(format!("multipart: {e}")))? {
+        let fname = field.file_name().map(str::to_string);
+        let key = field.name().unwrap_or("").to_string();
+        let mime = field.content_type().map(str::to_string);
+        match fname {
+            Some(name) => {
+                let bytes = field.bytes().await.map_err(|e| AppError::bad_request(format!("чтение файла: {e}")))?;
+                files.push(Upload { name, mime, bytes: bytes.to_vec() });
+            }
+            None => {
+                let v = field.text().await.unwrap_or_default();
+                fields.insert(key, v);
+            }
+        }
+    }
+    Ok((files, fields))
+}
+
+async fn emit_attachments(app: &AppState) -> anyhow::Result<()> {
+    app.emit(RoomEvent::Attachments { attachments: db::list_attachments(&app.db).await? });
+    Ok(())
+}
+
+/// Attach files to an existing object.
+async fn upload_to_node(Room { app, .. }: Room, Path(id): Path<String>, mp: Multipart) -> AppResult<Json<Vec<crate::models::Attachment>>> {
+    let id = mermaid::safe_id(&id);
+    if !db::node_exists(&app.db, &id).await? {
+        return Err(AppError::bad_request("нет такого объекта"));
+    }
+    let (files, _) = read_multipart(mp).await?;
+    if files.is_empty() {
+        return Err(AppError::bad_request("нет файлов"));
+    }
+    let mut out = vec![];
+    for f in files {
+        out.push(crate::files::save(&app, &id, &f.name, f.mime.as_deref(), &f.bytes, USER_ID).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?);
+    }
+    emit_attachments(&app).await?;
+    emit_graph(&app).await?;
+    Ok(Json(out))
+}
+
+/// Upload files as new objects: `.md` → import, images → «Картинка», everything else → «Файл»
+/// (or the type given in the `type` field). Returns the created object ids.
+async fn upload_files(Room { app, .. }: Room, mp: Multipart) -> AppResult<Json<serde_json::Value>> {
+    let (files, fields) = read_multipart(mp).await?;
+    if files.is_empty() {
+        return Err(AppError::bad_request("нет файлов"));
+    }
+    let forced_type = fields.get("type").map(|t| mermaid::safe_id(t)).filter(|t| !t.is_empty());
+    let mut ids = vec![];
+    let mut atts = vec![];
+    for f in files {
+        let mime = crate::files::guess_mime(&f.name, f.mime.as_deref());
+        let stem = f.name.rsplit('/').next().unwrap_or(&f.name).rsplit_once('.').map(|(a, _)| a).unwrap_or(&f.name).replace(['_', '-'], " ");
+        let label = mermaid::sanitize_label(stem.trim());
+        let label = if label == "…" { "Файл".to_string() } else { label };
+        let type_id = match &forced_type {
+            Some(t) if db::type_exists(&app.db, t).await? => t.clone(),
+            _ => if crate::files::is_image(&mime) { "image".into() } else { "file".into() },
+        };
+        let mut id = mermaid::safe_id(&label);
+        if db::node_exists(&app.db, &id).await? {
+            id = format!("{id}_{}", chrono::Utc::now().timestamp() % 100_000);
+        }
+        let kind = mime.split('/').next_back().unwrap_or("").to_uppercase();
+        let props = if type_id == "file" { serde_json::json!({ "kind": kind }) } else { serde_json::json!({}) };
+        db::upsert_object(&app.db, &id, &label, &type_id, USER_ID, None, Some(&props), None, None).await?;
+        let a = crate::files::save(&app, &id, &f.name, f.mime.as_deref(), &f.bytes, USER_ID).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+        // a readable document: first lines become the summary / body preview
+        if a.text_len > 0 {
+            let preview = mermaid::truncate_chars(&a.text.split_whitespace().collect::<Vec<_>>().join(" "), 400);
+            db::update_object_meta(&app.db, &id, None, Some(&serde_json::json!({ "summary": preview })), None).await?;
+        }
+        ids.push(id);
+        atts.push(a);
+    }
+    db::place_unpositioned_nodes(&app.db).await?;
+    emit_attachments(&app).await?;
+    emit_graph(&app).await?;
+    Ok(Json(json!({ "ids": ids, "attachments": atts })))
+}
+
+async fn serve_file(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Response> {
+    let Some(a) = db::get_attachment(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого файла")) };
+    let bytes = tokio::fs::read(&a.path).await.map_err(|e| AppError::bad_request(format!("файл пропал с диска: {e}")))?;
+    let inline = crate::files::is_image(&a.mime) || a.mime == "application/pdf" || a.mime.starts_with("text/") || a.mime.starts_with("audio/") || a.mime.starts_with("video/");
+    Ok((
+        [
+            (header::CONTENT_TYPE, a.mime.clone()),
+            (header::CONTENT_DISPOSITION, format!("{}; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, urlencoding(&a.name))),
+            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn file_text(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    let Some(a) = db::get_attachment(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого файла")) };
+    Ok(Json(json!({ "id": a.id, "name": a.name, "chars": a.text_len, "text": a.text })))
+}
+
+async fn delete_file(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<StatusCode> {
+    crate::files::remove(&app, &id).await?;
+    emit_attachments(&app).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ───────────────────────────── Types ─────────────────────────────
+
+fn clean_schema(v: &serde_json::Value) -> serde_json::Value {
+    let props: Vec<serde_json::Value> = v
+        .get("props")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let key = mermaid::safe_id(p.get("key").and_then(|k| k.as_str()).unwrap_or("")).chars().take(32).collect::<String>();
+                    if key.is_empty() {
+                        return None;
+                    }
+                    let label = mermaid::truncate_chars(p.get("label").and_then(|l| l.as_str()).unwrap_or(&key).trim(), 40);
+                    let kind = p.get("kind").and_then(|k| k.as_str()).unwrap_or("text");
+                    let kind = if ["text", "longtext", "number", "checkbox", "date", "datetime", "select", "multiselect", "tags", "rating", "url", "email", "phone", "image", "relation"].contains(&kind) { kind } else { "text" };
+                    let mut out = json!({ "key": key, "label": label, "kind": kind });
+                    if let Some(opts) = p.get("options").and_then(|o| o.as_array()) {
+                        out["options"] = json!(opts.iter().filter_map(|o| o.as_str()).map(|o| mermaid::truncate_chars(o.trim(), 40)).filter(|o| !o.is_empty()).take(30).collect::<Vec<_>>());
+                    }
+                    if let Some(to) = p.get("to").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+                        out["to"] = json!(mermaid::safe_id(to));
+                    }
+                    if let Some(max) = p.get("max").and_then(|m| m.as_i64()) {
+                        out["max"] = json!(max.clamp(2, 10));
+                    }
+                    Some(out)
+                })
+                .take(40)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = json!({ "props": props });
+    if let Some(t) = v.get("template").and_then(|t| t.as_str()) {
+        out["template"] = json!(mermaid::truncate_chars(t, 4000));
+    }
+    out
+}
+
+async fn update_type(Room { app, .. }: Room, Path(id): Path<String>, Json(req): Json<UpdateTypeRequest>) -> AppResult<Json<Vec<crate::models::ObjectType>>> {
+    let id = mermaid::safe_id(&id);
+    if !db::type_exists(&app.db, &id).await? {
+        return Err(AppError::bad_request("нет такого типа"));
+    }
+    let name = req.name.as_deref().map(|n| mermaid::truncate_chars(n.trim(), 40)).filter(|n| n.chars().count() >= 2);
+    let icon = req.icon.as_deref().map(|i| i.trim().chars().take(4).collect::<String>()).filter(|i| !i.is_empty());
+    let color = req.color.as_deref().map(str::trim).filter(|c| c.starts_with('#') && (c.len() == 7 || c.len() == 4)).map(str::to_string);
+    let schema = req.schema.as_ref().map(clean_schema);
+    db::update_type(&app.db, &id, name.as_deref(), icon.as_deref(), color.as_deref(), schema.as_ref()).await?;
+    let types = db::list_types(&app.db).await?;
+    app.emit(RoomEvent::Types { types: types.clone() });
+    Ok(Json(types))
+}
+
+async fn delete_type(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Json<Vec<crate::models::ObjectType>>> {
+    let id = mermaid::safe_id(&id);
+    if ["note", "page", "task", "file", "image"].contains(&id.as_str()) {
+        return Err(AppError::bad_request("этот тип нужен системе"));
+    }
+    db::delete_type(&app.db, &id).await?;
+    let types = db::list_types(&app.db).await?;
+    app.emit(RoomEvent::Types { types: types.clone() });
+    emit_graph(&app).await?;
+    Ok(Json(types))
+}
+
+// ───────────────────────────── World ─────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct LookupQuery {
+    kind: Option<String>,
+    q: String,
+}
+
+async fn lookup(Room { app, .. }: Room, Query(q): Query<LookupQuery>) -> AppResult<Json<serde_json::Value>> {
+    let s = app.llm_settings().await;
+    let card = crate::integrations::lookup::lookup(&s, q.kind.as_deref().unwrap_or("wiki"), &q.q).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "card": card })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AutofillRequest {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+/// Fill an object's props/body from a reference source (book → OpenLibrary, movie → TMDB, else Wikipedia).
+async fn autofill_node(Room { app, .. }: Room, Path(id): Path<String>, Json(req): Json<AutofillRequest>) -> AppResult<Json<serde_json::Value>> {
+    let id = mermaid::safe_id(&id);
+    let Some(n) = db::get_node(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого объекта")) };
+    let kind = req.kind.clone().or_else(|| crate::integrations::lookup::kind_for_type(&n.type_id).map(str::to_string)).unwrap_or_else(|| "wiki".into());
+    let q = req.query.clone().unwrap_or_else(|| {
+        let author = n.props.0.get("author").and_then(|a| a.as_str()).unwrap_or("");
+        if author.is_empty() { n.label.clone() } else { format!("{} {}", n.label, author) }
+    });
+    let s = app.llm_settings().await;
+    let card = crate::integrations::lookup::lookup(&s, &kind, &q).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    let Some(card) = card else { return Ok(Json(json!({ "found": false }))) };
+    // only fill empty props; never overwrite what the player typed
+    let mut props = serde_json::Map::new();
+    for (k, v) in &card.props {
+        let empty = n.props.0.get(k).map(|x| x.is_null() || x.as_str() == Some("")).unwrap_or(true);
+        if empty {
+            props.insert(k.clone(), v.clone());
+        }
+    }
+    if !props.is_empty() {
+        db::update_object_meta(&app.db, &id, None, Some(&serde_json::Value::Object(props.clone())), None).await?;
+    }
+    if !card.body.is_empty() && !n.body.contains(&card.body[..card.body.len().min(40)]) {
+        let body = crate::markdown::append_section(&n.body, Some(&format!("Из {}", card.source)), &format!("{}{}", card.body, card.url.as_ref().map(|u| format!("\n\n[{}]({u})", card.source)).unwrap_or_default()));
+        db::update_node_fields(&app.db, &id, None, Some(&body), None, None).await?;
+    }
+    emit_graph(&app).await?;
+    Ok(Json(json!({ "found": true, "card": card, "filled": props.keys().collect::<Vec<_>>() })))
+}
+
+/// Append GitHub activity for a project's `repo` under "## GitHub".
+async fn github_into_node(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    let id = mermaid::safe_id(&id);
+    let Some(n) = db::get_node(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого объекта")) };
+    let Some(repo) = n.props.0.get("repo").and_then(|r| r.as_str()).filter(|r| !r.trim().is_empty()) else { return Err(AppError::bad_request("у объекта нет свойства repo")) };
+    let s = app.llm_settings().await;
+    let text = crate::integrations::github::activity(&s, repo).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    let stamped = format!("_{}_\n\n{}", chrono::Local::now().format("%d.%m.%Y %H:%M"), text);
+    let body = crate::markdown::append_section(&n.body, Some("GitHub"), &stamped);
+    db::update_node_fields(&app.db, &id, None, Some(&mermaid::truncate_chars(&body, 60_000)), None, None).await?;
+    emit_graph(&app).await?;
+    Ok(Json(json!({ "activity": text })))
+}
+
+async fn weather(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    let s = app.llm_settings().await;
+    let Some(city) = s.get("WEATHER_CITY") else { return Ok(Json(json!({ "configured": false }))) };
+    let w = crate::integrations::weather::current(city).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "configured": true, "line": crate::integrations::weather::line(&w), "weather": w })))
+}
+
+async fn calendar_ics(Room { app, .. }: Room) -> AppResult<Response> {
+    let ics = crate::integrations::calendar::ics(&app).await?;
+    Ok(([(header::CONTENT_TYPE, "text/calendar; charset=utf-8"), (header::CONTENT_DISPOSITION, "inline; filename=\"triad-canvas.ics\"")], ics).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct DaysQuery {
+    days: Option<i64>,
+}
+
+async fn calendar_upcoming(Room { app, .. }: Room, Query(q): Query<DaysQuery>) -> AppResult<Json<serde_json::Value>> {
+    let ev = crate::integrations::calendar::upcoming(&app, q.days.unwrap_or(7)).await?;
+    Ok(Json(json!({ "events": ev, "digest": crate::integrations::calendar::digest(&ev) })))
+}
+
+#[derive(serde::Deserialize)]
+struct TtsRequest {
+    text: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+async fn tts(Room { app, .. }: Room, Json(req): Json<TtsRequest>) -> AppResult<Response> {
+    let s = app.llm_settings().await;
+    let (bytes, ct) = crate::integrations::speech::tts(&s, &req.text, req.agent.as_deref().unwrap_or("")).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "no-store".to_string())], bytes).into_response())
+}
+
+async fn stt(Room { app, .. }: Room, mp: Multipart) -> AppResult<Json<serde_json::Value>> {
+    let (files, _) = read_multipart(mp).await?;
+    let Some(f) = files.into_iter().next() else { return Err(AppError::bad_request("нет аудио")) };
+    let s = app.llm_settings().await;
+    let mime = f.mime.clone().unwrap_or_else(|| "audio/webm".into());
+    let text = crate::integrations::speech::stt(&s, f.bytes, &f.name, &mime).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "text": text })))
+}
+
+async fn poll_feeds(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    let n = crate::integrations::feeds::poll(&app).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    db::meta_set(&app.db, "feeds_last_poll", &chrono::Utc::now().to_rfc3339()).await?;
+    emit_graph(&app).await?;
+    Ok(Json(json!({ "created": n })))
 }
 
 async fn export_markdown(Room { app, .. }: Room) -> AppResult<Response> {

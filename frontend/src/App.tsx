@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, KeyRound, PanelRightClose, PanelRightOpen, RotateCcw, Send, Settings, Zap } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
+import { api } from './api'
 import { ScenePanel } from './components/ScenePanel'
 import { SidePanel, type SideTab } from './components/SidePanel'
 import { AgentProfile } from './components/AgentProfile'
 import { SettingsModal } from './components/SettingsModal'
+import { TypeEditor } from './components/TypeEditor'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -28,6 +30,7 @@ export default function App() {
   const [contextId, setContextId] = useState<string | null>(null)
   const [profileId, setProfileId] = useState<string | null>(null)
   const [libraryQuery, setLibraryQuery] = useState<{ q: string; nonce: number } | null>(null)
+  const [typeEditor, setTypeEditor] = useState<{ open: boolean; id: string | null }>({ open: false, id: null })
   const isDesktop = useMedia('(min-width: 900px)')
 
   const unread = useMemo(() => {
@@ -128,6 +131,15 @@ export default function App() {
       onCreate={(label, opts) => void room.createNode(label, opts)}
       onImport={room.importMd}
       libraryQuery={libraryQuery}
+      attachments={s.attachments}
+      features={s.features}
+      onUpload={room.uploadToNode}
+      onUploadFiles={room.uploadFiles}
+      onDeleteFile={(id) => void room.deleteFile(id)}
+      onAutofill={(id) => room.autofill(id)}
+      onGithub={(id) => room.githubInto(id)}
+      onEditTypes={(id) => setTypeEditor({ open: true, id: id ?? null })}
+      onPollFeeds={room.pollFeeds}
       onCreateType={(name) => void room.createType(name)}
       onPatch={(id, patch) => void room.patchNode(id, patch)}
       onDelete={(id) => {
@@ -185,6 +197,13 @@ export default function App() {
         setSideTab('library')
         setSideOpen(true)
         if (!isDesktop) setMobileTab('side')
+      }}
+      features={s.features}
+      world={s.world}
+      onAttach={async (files) => {
+        const r = await room.uploadFiles(files)
+        const fresh = await api.state()
+        return r.ids.map((id) => fresh.graph.nodes.find((n) => n.id === id)?.label ?? id)
       }}
     />
   )
@@ -279,6 +298,16 @@ export default function App() {
         />
       )}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void room.refresh()} />
+      <TypeEditor
+        open={typeEditor.open}
+        initialId={typeEditor.id}
+        types={s.types}
+        counts={Object.fromEntries(s.types.map((t) => [t.id, s.graph.nodes.filter((n) => n.type_id === t.id && n.archived === 0).length]))}
+        onClose={() => setTypeEditor({ open: false, id: null })}
+        onSave={(id, patch) => void room.updateType(id, patch)}
+        onCreate={(name) => void room.createType(name)}
+        onDelete={(id) => void room.deleteType(id)}
+      />
     </div>
   )
 }

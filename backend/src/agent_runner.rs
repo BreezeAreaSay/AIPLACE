@@ -64,6 +64,16 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         Some(n) => db::notes_for_node(&app.db, &n.id).await?,
         None => Vec::new(),
     };
+    let focus_files: Option<String> = match &focus_node {
+        Some(n) => {
+            let atts = db::attachments_of(&app.db, &n.id).await?;
+            if atts.is_empty() { None } else { Some(crate::files::digest(&atts, 1800)) }
+        }
+        None => None,
+    };
+    let settings = app.llm_settings().await;
+    let world = crate::integrations::world_line(app).await;
+    let can_search = settings.search_provider().is_some();
     let types = db::list_types(&app.db).await?;
     // Objects the agent can act on: by the topic of the last lines + their own things.
     let topic_text: String = messages.iter().rev().take(4).map(|m| m.content.clone()).collect::<Vec<_>>().join(" ");
@@ -95,10 +105,13 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         scene_so_far: &plan.scene_so_far,
         focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
         library: plan.library,
+        focus_files: focus_files.as_deref(),
+        world: world.as_deref(),
+        can_search,
         types: &types,
         relevant: &relevant,
     };
-    let model = app.llm_settings().await.model;
+    let model = settings.model.clone();
     let (ego, speech) = if app.cfg.agent_mode == "single" {
         let msgs = [
             ChatMessage::system(prompts::agent_system(&ctx)),
@@ -186,15 +199,22 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
             String::new()
         }
     };
-    let (ego, hook, query) = prompts::split_thought(&thought_raw);
-    let found: Option<String> = match query {
-        Some(q) => {
-            let hits = db::search_objects(&app.db, &q, None, 6).await.unwrap_or_default();
-            let types = db::list_types(&app.db).await.unwrap_or_default();
-            Some(prompts::library_digest(&hits, &types, agents))
+    let (ego, hook, query, web) = prompts::split_thought(&thought_raw);
+    let mut found_parts: Vec<String> = vec![];
+    if let Some(q) = query {
+        let hits = db::search_objects(&app.db, &q, None, 6).await.unwrap_or_default();
+        let types = db::list_types(&app.db).await.unwrap_or_default();
+        found_parts.push(format!("В БИБЛИОТЕКЕ по «{q}»:\n{}", prompts::library_digest(&hits, &types, agents)));
+    }
+    if let Some(q) = web.filter(|_| ctx.can_search) {
+        app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} ищет в сети: {}", ctx.agent.name, crate::mermaid::truncate_chars(&q, 40)) });
+        let s = app.llm_settings().await;
+        match crate::integrations::search::search(&s, &q, 5).await {
+            Ok(hits) => found_parts.push(format!("В СЕТИ по «{q}»:\n{}", crate::integrations::search::digest(&hits))),
+            Err(e) => tracing::warn!(error = %e, "web search failed"),
         }
-        None => None,
-    };
+    }
+    let found: Option<String> = if found_parts.is_empty() { None } else { Some(found_parts.join("\n")) };
 
     // Native tool calling when the model supports it (or forced): the agent *uses* the system.
     let native = match app.cfg.agent_tools.as_str() {
@@ -252,7 +272,7 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
 async fn speak_with_tools(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent], ego: &str, hook: &str, found: Option<&str>) -> (Option<String>, String) {
     use crate::openrouter::ToolTurn;
     let opts = ChatOpts { temperature: 0.9, max_tokens: 500, json_mode: false, prefill: None, presence_penalty: Some(0.6), frequency_penalty: Some(0.5) };
-    let tools = crate::tools::as_openai_tools();
+    let tools = crate::tools::as_openai_tools(&app.llm_settings().await);
     let mut history: Vec<serde_json::Value> = vec![
         serde_json::json!({ "role": "system", "content": prompts::speak_system_native(ctx) }),
         serde_json::json!({ "role": "user", "content": prompts::speak_user(ctx, agents, ego, hook, found) }),

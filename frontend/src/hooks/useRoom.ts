@@ -92,6 +92,9 @@ export function useRoom() {
         case 'memories':
           setState((s) => (s ? { ...s, memories: ev.memories } : s))
           break
+        case 'attachments':
+          setState((s) => (s ? { ...s, attachments: ev.attachments } : s))
+          break
       }
     }
     const unsub = subscribeEvents(apply, setLive)
@@ -157,6 +160,14 @@ export function useRoom() {
     createNode: (label: string, opts?: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number }) =>
       run('Добавляю объект…', () => api.createNode(label, opts)),
     importMd: (files: { name: string; content: string }[]) => api.importMd(files).then((r) => (void refresh(), r)),
+    uploadToNode: (id: string, files: File[]) => api.uploadToNode(id, files).then((r) => (void refresh(), r)),
+    uploadFiles: (files: File[], type?: string) => api.uploadFiles(files, type).then((r) => (void refresh(), r)),
+    deleteFile: (id: string) => quiet(() => api.deleteFile(id)),
+    updateType: (id: string, patch: Parameters<typeof api.updateType>[1]) => quiet(() => api.updateType(id, patch)),
+    deleteType: (id: string) => quiet(() => api.deleteType(id)),
+    autofill: (id: string, kind?: string, query?: string) => api.autofill(id, kind, query).then((r) => (void refresh(), r)),
+    githubInto: (id: string) => api.githubInto(id).then((r) => (void refresh(), r)),
+    pollFeeds: () => api.pollFeeds().then((r) => (void refresh(), r)),
     createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),
     patchNode: (id: string, patch: Parameters<typeof api.patchNode>[1]) => {
       // optimistic local update so the panel feels instant

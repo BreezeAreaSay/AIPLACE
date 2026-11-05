@@ -121,6 +121,11 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 | `AGENT_MODE` | `pipeline` | `pipeline` (мысль → реплика → пометка) или `single` (один вызов с prefill) |
 | `AGENT_TOOLS` | `auto` | как агенты трогают библиотеку: `native` (function calling OpenAI-формата), `tags` (`<act>` в тексте), `auto` — native, если модель умеет tools по каталогу OpenRouter |
 | `MCP_TOKEN` | — | Bearer-токен для внешних MCP-клиентов на `POST /mcp` (с localhost не нужен) |
+| `SEARCH_PROVIDER`, `SEARCH_API_KEY`, `SEARXNG_URL` | `ddg` | поиск в сети для агентов |
+| `WEATHER_CITY`, `CALENDAR_ICS_URL`, `TMDB_API_KEY`, `GITHUB_TOKEN` | — | погода, твой календарь, фильмы, GitHub |
+| `TTS_URL`, `TTS_API_KEY`, `TTS_MODEL`, `TTS_VOICES`, `STT_URL`, `STT_API_KEY`, `STT_MODEL` | — | озвучка и диктовка (OpenAI-совместимые) |
+| `FEEDS_EVERY_MIN` | `180` | период опроса RSS-лент |
+| `FILES_DIR` | `~/.triad/files` | куда класть вложения |
 | `TICK_ENTROPY_HP` / `TICK_ENTROPY_DOPAMINE` | `2` / `3` | Сколько теряет каждый за автономный тик |
 
 ## Релизы (для мейнтейнера)
@@ -190,6 +195,36 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
   `/дневник` — сохранить в библиотеку молча (первая строка — заголовок, остальное — тело); `/найти слова` —
   поиск; `/спор` — пусть поспорят сами. Кнопка 🔖 рядом с «отправить» — то же, что `/заметка`.
 
+## Файлы, типы и окна наружу
+
+**Файлы.** На объект можно бросить что угодно: картинки, PDF, тексты, CSV, JSON, HTML (кнопка «+ файл» или
+перетаскивание на страницу объекта; скрепка в композере и вставка из буфера делают из файлов новые объекты
+«Файл»/«Картинка» и вставляют `[[ссылки]]` в сообщение; в библиотеку можно сбросить целую папку: `.md` станут
+заметками, остальное — объектами). Картинки — в галерее с просмотром на весь экран. Из PDF и текстов
+извлекается текст: его видят агенты (`library_get` → вложения, `file_read` кусками, `library_search` ищет и
+по тексту файлов), а в разговоре об объекте выдержка попадает прямо в промпт. Хранится в `~/.triad/files/<комната>/`.
+
+**Типы — конструктор.** Кнопка «ползунки» в библиотеке (или двойной клик по типу): название, иконка, цвет,
+**шаблон заметки** (новые объекты типа начинаются с него) и поля. Виды полей: текст, длинный текст, число,
+**рейтинг ★** (1–N), галочка, дата, дата-время, выбор, мультивыбор, теги, ссылка, картинка-url, email,
+телефон, объект (связь на тип). Встроенные типы тоже редактируются; новые встроенные поля добавляются к
+старым комнатам без потери твоих. Агенты получают схему через `library_types` и заполняют поля при
+`library_create`/`library_update` (в том числе ставят оценки).
+
+**Окна наружу** (⚙ → «окна наружу»; все необязательны, включаются по ключу или без него):
+
+| Что | Как включить | Что даёт |
+|---|---|---|
+| Поиск в сети | по умолчанию `ddg` без ключа; `SEARCH_PROVIDER=tavily\|brave\|searxng` + ключ/URL | инструменты `web_search`, `web_fetch`; в tags-режиме агент пишет `ИЩУ В СЕТИ: …` на стадии мысли и получает результаты перед репликой |
+| Погода | `WEATHER_CITY=Москва` (Open-Meteo, без ключа) | строка «за окном» в шапке чата, у Режиссёра и агентов; `weather_now` |
+| Календарь | подписка на `GET /api/calendar.ics` (сроки задач, события, слово, дни рождения) и/или `CALENDAR_ICS_URL` твоего календаря | Режиссёр видит ближайшие события; `calendar_upcoming` |
+| Справочники | книги — OpenLibrary, Википедия — без ключа; фильмы — `TMDB_API_KEY` | кнопка «подтянуть данные» на странице книги/фильма/человека/места заполняет пустые поля и дописывает описание; `lookup` |
+| Ленты | объект типа «Лента» с URL RSS/Atom; `FEEDS_EVERY_MIN` (180) | новые записи становятся закладками с выжимкой; когда ты молчишь, кто-то приносит новость в чат (пульс `news`); `feed_fetch` |
+| GitHub | свойство `repo` у проекта; `GITHUB_TOKEN` не обязателен | кнопка «GitHub» дописывает коммиты и issues в раздел проекта; `github_activity` |
+| Голос | без ключей — голоса браузера (🔊 у реплики, 🎙 в композере через распознавание браузера); `TTS_URL/TTS_API_KEY/TTS_MODEL/TTS_VOICES`, `STT_URL/STT_API_KEY/STT_MODEL` — OpenAI-совместимые | озвучка реплик голосом персонажа, диктовка через Whisper (Groq бесплатно) |
+
+Картинки сейчас только загружаются для просмотра — генерации нет.
+
 ## Агенты чувствуют систему как MCP
 
 Библиотека для агентов — не текст в промпте, а **набор инструментов** в формате MCP (Model Context Protocol).
@@ -203,7 +238,8 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
 
 Инструменты: `library_search` (запрос, тип), `library_get` (объект + свойства + пометки + связи + где всплывал),
 `library_create` (тип, заголовок, свойства, тело), `library_update` (свойства, тело, архив), `library_append` (дописать
-в тело под заголовком, не стирая), `library_link`
+в тело под заголовком, не стирая), `file_read` (текст вложения кусками), `web_search`, `web_fetch`, `lookup`, `weather_now`,
+`calendar_upcoming`, `feed_fetch`, `github_activity`, `library_link`
 (`belongs_to` / `about` / `blocks` / `assigned_to` / `contradicts` / `related`…), `library_note`, `library_types`
 (схемы всех типов), `contracts_list` (слово игрока), `room_status` (кто жив, отношения, когда игрок был).
 Список с JSON-схемами — `GET /api/tools`.
@@ -306,6 +342,13 @@ Claude Desktop (`claude_desktop_config.json`): `{"mcpServers":{"triad":{"url":"h
 | `GET` | `/api/export.md` | вся доска в Markdown |
 | `GET` | `/api/nodes/{id}/export.md` | одна заметка как `.md` с frontmatter, пометками и `[[связями]]` |
 | `POST` | `/api/import` `{files:[{name,content}]}` | импорт `.md`: frontmatter → тип и свойства, `[[ссылки]]` → связи |
+| `POST` | `/api/nodes/{id}/files` · `POST /api/files` (multipart) | приложить файлы к объекту · загрузить файлы как новые объекты |
+| `GET/DELETE` | `/api/files/{id}` · `GET /api/files/{id}/text` | файл · извлечённый текст |
+| `PATCH/DELETE` | `/api/types/{id}` | изменить поля/иконку/шаблон типа · удалить (объекты станут заметками) |
+| `GET` | `/api/lookup?kind=book\|movie\|wiki&q=` · `POST /api/nodes/{id}/autofill` | карточка из справочника · заполнить объект |
+| `POST` | `/api/nodes/{id}/github` | дописать активность репозитория в проект |
+| `GET` | `/api/weather` · `/api/calendar` · `/api/calendar.ics` | погода · ближайшие события · ICS-фид библиотеки |
+| `POST` | `/api/tts` `{text, agent}` · `/api/stt` (multipart) · `/api/feeds/poll` | озвучить · распознать · опросить ленты |
 | `GET` | `/api/tools` | реестр инструментов агентов (MCP-схемы) |
 | `GET`/`POST` | `/mcp` | MCP-сервер: JSON-RPC 2.0 `initialize` / `tools/list` / `tools/call`; auth — localhost или `Authorization: Bearer <MCP_TOKEN>` |
 | `POST` | `/api/schema` | (legacy) Mermaid-схема спора |
@@ -400,6 +443,9 @@ backend/src/
   catalog.rs      каталог моделей OpenRouter для селектора
   tools.rs        MCP-реестр инструментов библиотеки: схемы, исполнитель, бриф «где ты»
   markdown.rs     frontmatter, [[wikilinks]], экспорт заметки, дописывание под заголовок
+  files.rs        вложения: сохранение, извлечение текста (pdf/txt/md/csv/json/html)
+  integrations/   search (ddg/tavily/brave/searxng) · lookup (OpenLibrary/TMDB/Wikipedia) · weather (Open-Meteo)
+                  calendar (ics туда и обратно) · feeds (RSS/Atom) · github · speech (TTS/STT)
   heartbeat.rs    пульс комнаты: действия без игрока, бэкофф, Telegram-пуш
   intake.rs       ссылки → текст → выжимка → объект «Закладка»
   agent_runner.rs ход агента: мысль → инструменты/реплика → пометка, <act>-действия
@@ -412,7 +458,8 @@ frontend/src/
   App.tsx (чат + боковая панель), hooks/useRoom.ts (SSE + REST), api.ts, telegram.ts, types.ts
   components/ ScenePanel · AgentStrip · AgentProfile · MessageBubble (чипы объектов) · Composer
               Markdown (GFM + [[wiki]] + чекбоксы) · MdEditor (панель, автодополнение [[, списки)
-              SidePanel: Library (по типам, импорт .md) · NodePanel (заметка с автосохранением, PropsEditor) · Canvas (граф) ·
+              PropsEditor (рейтинг, теги, мультивыбор…) · TypeEditor (конструктор типов) · Attachments (файлы, галерея)
+              SidePanel: Library (по типам, импорт .md и файлов) · NodePanel (заметка с автосохранением, файлы, автозаполнение) · Canvas (граф) ·
               ContractsPanel · DirectorInspector · RelationsTriangle · SettingsModal · ModelPicker
 .github/workflows/  ci.yml (build+clippy+test) · release.yml (теги v* → бинарники под 5 платформ)
 install.sh / install.ps1   установка последнего релиза одной командой

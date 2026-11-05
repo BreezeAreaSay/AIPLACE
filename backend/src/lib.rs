@@ -11,6 +11,8 @@ pub mod director;
 pub mod error;
 pub mod handlers;
 pub mod heartbeat;
+pub mod files;
+pub mod integrations;
 pub mod intake;
 pub mod markdown;
 pub mod memory;

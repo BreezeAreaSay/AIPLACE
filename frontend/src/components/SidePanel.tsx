@@ -1,4 +1,4 @@
-import type { Agent, AgentMemory, Contract, DirectorLogEntry, Graph, GraphNode, NodeNote, ObjectType, Relation, RoomEventRecord } from '../types'
+import type { Agent, AgentMemory, Attachment, Contract, DirectorLogEntry, Features, Graph, GraphNode, NodeNote, ObjectType, Relation, RoomEventRecord } from '../types'
 import { Library } from './Library'
 import { NodePanel } from './NodePanel'
 import { Canvas } from './Canvas'
@@ -21,6 +21,15 @@ interface Props {
   onCreate: (label: string, opts: { type_id?: string; body?: string; props?: Record<string, unknown>; x?: number; y?: number }) => void
   onImport: (files: { name: string; content: string }[]) => Promise<{ imported: number; updated: number; linked: number }>
   libraryQuery: { q: string; nonce: number } | null
+  attachments: Attachment[]
+  features: Features
+  onUpload: (id: string, files: File[]) => Promise<unknown>
+  onUploadFiles: (files: File[]) => Promise<{ ids: string[] }>
+  onDeleteFile: (id: string) => void
+  onAutofill: (id: string) => Promise<{ found: boolean; filled?: string[]; card?: { source: string } }>
+  onGithub: (id: string) => Promise<unknown>
+  onEditTypes: (id?: string) => void
+  onPollFeeds: () => Promise<{ created: number }>
   onCreateType: (name: string) => void
   onPatch: (id: string, patch: Record<string, unknown>) => void
   onDelete: (id: string) => void
@@ -76,6 +85,9 @@ export function SidePanel(p: Props) {
             onCreate={(label, type_id) => p.onCreate(label, { type_id })}
             onCreateType={p.onCreateType}
             onImport={p.onImport}
+            onUploadFiles={p.onUploadFiles}
+            onEditTypes={p.onEditTypes}
+            onPollFeeds={p.onPollFeeds}
           />
         )}
         {p.tab === 'object' && p.selected && (
@@ -97,6 +109,12 @@ export function SidePanel(p: Props) {
             onDeleteEdge={p.onDeleteEdge}
             onSelect={(id) => p.onSelect(id)}
             onCreate={(label, opts) => p.onCreate(label, opts)}
+            attachments={p.attachments}
+            features={p.features}
+            onUpload={p.onUpload}
+            onDeleteFile={p.onDeleteFile}
+            onAutofill={p.onAutofill}
+            onGithub={p.onGithub}
           />
         )}
         {p.tab === 'object' && !p.selected && <div className="p-4 font-mono text-xs text-zinc-600">Выбери объект в библиотеке, на графе или по чипу в чате.</div>}

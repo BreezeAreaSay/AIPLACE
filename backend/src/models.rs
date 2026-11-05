@@ -80,6 +80,25 @@ pub struct ObjectType {
     pub created_at: String,
 }
 
+/// A file attached to an object (stored on disk under `files_dir()/<room>/`).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Attachment {
+    pub id: String,
+    pub node_id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+    #[serde(skip_serializing)]
+    pub path: String,
+    /// Extracted text (txt/md/csv/json/html/pdf) — what the agents can read.
+    #[serde(skip_serializing)]
+    pub text: String,
+    #[sqlx(default)]
+    pub text_len: i64,
+    pub created_by: String,
+    pub created_at: String,
+}
+
 /// A typed object in the library (the table is still called `graph_nodes` for history).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GraphNode {
@@ -503,6 +522,22 @@ pub struct RoomState {
     pub last_seen_message_id: i64,
     pub usage: crate::openrouter::Usage,
     pub heartbeat_minutes: u64,
+    pub attachments: Vec<Attachment>,
+    /// "За окном": weather + local time line shared with the Caster, or None when not configured.
+    pub world: Option<String>,
+    pub features: Features,
+}
+
+/// Which optional integrations are live (drives UI buttons).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Features {
+    pub search: bool,
+    pub weather: bool,
+    pub calendar: bool,
+    pub tmdb: bool,
+    pub github: bool,
+    pub tts: bool,
+    pub stt: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -519,6 +554,18 @@ pub struct SettingsView {
     pub director_mode: String,
     pub agent_mode: String,
     pub agent_tools: String,
+    /// Integration values; secrets masked to a hint. `(key, value, secret, hint)`.
+    pub integrations: Vec<IntegrationView>,
+    pub features: Features,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationView {
+    pub key: String,
+    pub value: String,
+    pub secret: bool,
+    pub set: bool,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -531,6 +578,21 @@ pub struct SettingsPatch {
     pub model: Option<String>,
     #[serde(default)]
     pub director_model: Option<String>,
+    /// Integration keys to set (empty string clears). Unknown keys are ignored.
+    #[serde(default)]
+    pub integrations: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTypeRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
 }
 
 /// Live events pushed over SSE (`GET /api/events`) while a round is running.
@@ -551,5 +613,6 @@ pub enum RoomEvent {
     Contracts { contracts: Vec<Contract> },
     Relations { relations: Vec<Relation> },
     Memories { memories: Vec<AgentMemory> },
+    Attachments { attachments: Vec<Attachment> },
     Done,
 }

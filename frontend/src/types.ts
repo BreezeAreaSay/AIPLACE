@@ -26,12 +26,54 @@ export interface Message {
   actions: { op: string; object_id: string; text: string }[]
 }
 
+export type PropKind = 'text' | 'longtext' | 'number' | 'checkbox' | 'date' | 'datetime' | 'select' | 'multiselect' | 'tags' | 'rating' | 'url' | 'email' | 'phone' | 'image' | 'relation'
+
+export const PROP_KINDS: { id: PropKind; label: string }[] = [
+  { id: 'text', label: 'текст' },
+  { id: 'longtext', label: 'длинный текст' },
+  { id: 'number', label: 'число' },
+  { id: 'rating', label: 'рейтинг ★' },
+  { id: 'checkbox', label: 'галочка' },
+  { id: 'date', label: 'дата' },
+  { id: 'datetime', label: 'дата и время' },
+  { id: 'select', label: 'выбор' },
+  { id: 'multiselect', label: 'мультивыбор' },
+  { id: 'tags', label: 'теги' },
+  { id: 'url', label: 'ссылка' },
+  { id: 'image', label: 'картинка (url)' },
+  { id: 'email', label: 'email' },
+  { id: 'phone', label: 'телефон' },
+  { id: 'relation', label: 'объект' },
+]
+
 export interface PropSchema {
   key: string
   label: string
-  kind: 'text' | 'date' | 'number' | 'select' | 'checkbox' | 'url' | 'relation' | string
+  kind: PropKind | string
   options?: string[]
   to?: string
+  max?: number
+}
+
+export interface Attachment {
+  id: string
+  node_id: string
+  name: string
+  mime: string
+  size: number
+  text_len: number
+  created_by: string
+  created_at: string
+}
+
+export interface Features {
+  search: boolean
+  weather: boolean
+  calendar: boolean
+  tmdb: boolean
+  github: boolean
+  tts: boolean
+  stt: boolean
 }
 
 export interface ObjectType {
@@ -39,7 +81,7 @@ export interface ObjectType {
   name: string
   icon: string
   color: string
-  schema: { props: PropSchema[] }
+  schema: { props: PropSchema[]; template?: string }
   builtin: number
   created_by: string
   created_at: string
@@ -203,6 +245,9 @@ export interface RoomState {
   last_seen_message_id: number
   usage: { calls_today: number; daily_budget: number }
   heartbeat_minutes: number
+  attachments: Attachment[]
+  world: string | null
+  features: Features
 }
 
 export interface UpdateInfo {
@@ -224,6 +269,8 @@ export interface SettingsView {
   director_mode: string
   agent_mode: string
   agent_tools: string
+  integrations: { key: string; value: string; secret: boolean; set: boolean; hint: string }[]
+  features: Features
 }
 
 export interface SettingsPatch {
@@ -231,6 +278,7 @@ export interface SettingsPatch {
   clear_key?: boolean
   model?: string
   director_model?: string
+  integrations?: Record<string, string>
 }
 
 export type RoomEvent =
@@ -247,6 +295,7 @@ export type RoomEvent =
   | { type: 'contracts'; contracts: Contract[] }
   | { type: 'relations'; relations: Relation[] }
   | { type: 'memories'; memories: AgentMemory[] }
+  | { type: 'attachments'; attachments: Attachment[] }
   | { type: 'done' }
 
 export const AGENT_COLORS: Record<string, string> = {

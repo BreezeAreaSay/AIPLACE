@@ -24,6 +24,8 @@ pub enum LifeKind {
     Argue,
     /// One inhabitant advances their own project and tells about it.
     OwnProject,
+    /// Someone brings a fresh item from the RSS feeds.
+    News,
 }
 
 impl LifeKind {
@@ -32,6 +34,7 @@ impl LifeKind {
             LifeKind::WriteFirst => "write_first",
             LifeKind::Argue => "argue",
             LifeKind::OwnProject => "own_project",
+            LifeKind::News => "news",
         }
     }
 }
@@ -69,6 +72,14 @@ pub async fn run(root: AppState) {
 }
 
 async fn beat_all(root: &AppState) -> Result<()> {
+    // Feeds are polled regardless of the player's presence or the LLM budget (no LLM involved).
+    for id in root.rooms.open_ids().await {
+        if let Ok(app) = root.for_room(&id).await {
+            if let Err(e) = maybe_poll_feeds(&app).await {
+                tracing::warn!(room = %id, error = %e, "feed poll failed");
+            }
+        }
+    }
     if in_quiet_hours(&root.cfg.quiet_hours) {
         return Ok(());
     }
@@ -109,11 +120,13 @@ async fn maybe_beat(app: &AppState) -> Result<()> {
     if alive == 0 {
         return Ok(());
     }
+    let has_news = !crate::integrations::feeds::fresh_news(app, 1).await.unwrap_or_default().is_empty();
     let kind = {
         let mut rng = rand::thread_rng();
         match rng.gen_range(0..100) {
-            0..=44 => LifeKind::WriteFirst,
-            45..=74 => LifeKind::Argue,
+            0..=39 => LifeKind::WriteFirst,
+            40..=64 => LifeKind::Argue,
+            65..=84 if has_news => LifeKind::News,
             _ => LifeKind::OwnProject,
         }
     };
@@ -122,6 +135,14 @@ async fn maybe_beat(app: &AppState) -> Result<()> {
     let _turn = app.turn_lock.lock().await;
     crate::handlers::run_round(app, Trigger::Life(kind)).await?;
     drop(_turn);
+    if matches!(kind, LifeKind::News) {
+        // the freshest items were offered to the Caster; don't offer them twice
+        for n in crate::integrations::feeds::fresh_news(app, 6).await.unwrap_or_default() {
+            let mut p = n.props.0.clone();
+            p["discussed"] = serde_json::Value::Bool(true);
+            let _ = db::update_object_meta(&app.db, &n.id, None, Some(&p), None).await;
+        }
+    }
     db::meta_set(&app.db, "beats_while_away", &(beats_while_away + 1).to_string()).await?;
     let after = db::last_message_id(&app.db).await?;
     if after > before {
@@ -149,6 +170,30 @@ async fn notify_telegram(app: &AppState, after_id: i64) {
     if let Err(e) = client.post(format!("https://api.telegram.org/bot{token}/sendMessage")).json(&body).send().await {
         tracing::warn!(error = %e, "telegram push failed");
     }
+}
+
+/// Poll RSS feeds every `FEEDS_EVERY_MIN` (default 180) minutes.
+pub async fn maybe_poll_feeds(app: &AppState) -> Result<()> {
+    let every: i64 = app.llm_settings().await.get("FEEDS_EVERY_MIN").and_then(|v| v.parse().ok()).unwrap_or(180);
+    if every <= 0 {
+        return Ok(());
+    }
+    let last = db::meta_get(&app.db, "feeds_last_poll").await?;
+    if let Some(min) = last.as_deref().and_then(minutes_since) {
+        if min < every {
+            return Ok(());
+        }
+    }
+    db::meta_set(&app.db, "feeds_last_poll", &Utc::now().to_rfc3339()).await?;
+    let n = crate::integrations::feeds::poll(app).await?;
+    if n > 0 {
+        tracing::info!(room = %app.room_id, new = n, "feeds: new bookmarks");
+        let nodes = db::list_nodes(&app.db).await?;
+        let edges = db::list_edges(&app.db).await?;
+        let mermaid = crate::mermaid::build_graph(&nodes, &edges);
+        app.emit(RoomEvent::Graph { graph: crate::models::Graph { nodes, edges }, mermaid });
+    }
+    Ok(())
 }
 
 /// Reset the away-backoff when the player returns.

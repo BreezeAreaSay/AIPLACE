@@ -158,10 +158,28 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
             }
         }
     }
+    let world = crate::integrations::world_line(app).await;
+    let calendar = if matches!(trigger, Trigger::UserMessage | Trigger::Life(_)) { crate::integrations::calendar_line(app).await } else { None };
+    let news: Vec<(String, String, String)> = if matches!(trigger, Trigger::Life(crate::heartbeat::LifeKind::News)) {
+        crate::integrations::feeds::fresh_news(app, 6).await?.into_iter().map(|n| (n.label.clone(), n.props.0.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(), n.props.0.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string())).collect()
+    } else {
+        vec![]
+    };
+    let focus_files: Option<String> = match &focus_node {
+        Some(n) => {
+            let atts = db::attachments_of(&app.db, &n.id).await?;
+            if atts.is_empty() { None } else { Some(crate::files::digest(&atts, 500)) }
+        }
+        None => None,
+    };
     let caster_in = prompts::CasterInput {
         trigger: trigger.as_str(),
         life_kind,
         own_projects: &own_projects,
+        world: world.as_deref(),
+        calendar: calendar.as_deref(),
+        news: &news,
+        focus_files: focus_files.as_deref(),
         agents: &fresh,
         recent: &messages,
         recent_speakers: &recent_speakers,

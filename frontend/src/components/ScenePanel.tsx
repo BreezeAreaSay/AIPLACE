@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import type { Agent, GraphNode, Message, ObjectType } from '../types'
+import type { Agent, Features, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
 import { AgentStrip } from './AgentStrip'
 import { MessageBubble } from './MessageBubble'
@@ -28,6 +28,9 @@ interface Props {
   onSeen: (messageId: number) => void
   onCapture: (label: string, typeId: string, body: string) => void
   onSearch: (q: string) => void
+  features: Features
+  onAttach: (files: File[]) => Promise<string[]>
+  world: string | null
 }
 
 export function ScenePanel(p: Props) {
@@ -55,7 +58,12 @@ export function ScenePanel(p: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <AgentStrip agents={p.agents} speaking={p.speaking} onOpen={p.onOpenAgent} />
-      {p.mood && <div className="border-b border-line px-3 py-1 font-mono text-[10px] text-zinc-500">в комнате · {p.mood}</div>}
+      {(p.mood || p.world) && (
+        <div className="flex flex-wrap gap-x-3 border-b border-line px-3 py-1 font-mono text-[10px] text-zinc-500">
+          {p.mood && <span>в комнате · {p.mood}</span>}
+          {p.world && <span className="text-zinc-600">{p.world}</span>}
+        </div>
+      )}
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
         {p.messages.map((m) => (
           <div key={m.id}>
@@ -66,7 +74,7 @@ export function ScenePanel(p: Props) {
                 <span className="h-px flex-1 bg-acid/40" />
               </div>
             )}
-            <MessageBubble message={m} agents={p.agents} nodes={p.nodes} types={p.types} showEgo={p.showEgo} onNodeClick={p.onNodeClick} />
+            <MessageBubble message={m} agents={p.agents} nodes={p.nodes} types={p.types} showEgo={p.showEgo} onNodeClick={p.onNodeClick} serverTts={p.features.tts} />
           </div>
         ))}
         {p.streaming && streamAgent && (
@@ -98,6 +106,8 @@ export function ScenePanel(p: Props) {
         types={p.types}
         onCapture={p.onCapture}
         onSearch={p.onSearch}
+        features={p.features}
+        onAttach={p.onAttach}
         onSend={p.onSend}
         onTick={p.onTick}
         showEgo={p.showEgo}

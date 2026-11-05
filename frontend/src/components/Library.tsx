@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, FolderInput, Plus, Search } from 'lucide-react'
+import { Download, FolderInput, Plus, Rss, Search, SlidersHorizontal } from 'lucide-react'
 import type { Agent, GraphNode, ObjectType } from '../types'
 import { AGENT_COLORS } from '../types'
 import { api } from '../api'
@@ -15,6 +15,9 @@ interface Props {
   onCreate: (label: string, typeId: string) => void
   onCreateType: (name: string) => void
   onImport: (files: { name: string; content: string }[]) => Promise<{ imported: number; updated: number; linked: number }>
+  onUploadFiles: (files: File[]) => Promise<{ ids: string[] }>
+  onEditTypes: (id?: string) => void
+  onPollFeeds: () => Promise<{ created: number }>
 }
 
 function propPreview(n: GraphNode, t: ObjectType | undefined): string {
@@ -27,6 +30,16 @@ function propPreview(n: GraphNode, t: ObjectType | undefined): string {
       if (v) parts.push(p.label.toLowerCase())
       continue
     }
+    if (p.kind === 'rating') {
+      const n = Number(v) || 0
+      if (n > 0) parts.push('★'.repeat(n) + '☆'.repeat(Math.max(0, (p.max ?? 5) - n)))
+      continue
+    }
+    if (p.kind === 'tags' || p.kind === 'multiselect') {
+      if (Array.isArray(v) && v.length) parts.push(v.map((x) => `#${x}`).join(' '))
+      continue
+    }
+    if (p.kind === 'image' || p.kind === 'longtext') continue
     if (p.kind === 'date' && typeof v === 'string') {
       const d = new Date(v)
       parts.push(`${p.label.toLowerCase()}: ${isNaN(d.getTime()) ? v : d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}`)
@@ -44,7 +57,7 @@ async function readFiles(list: FileList | File[]): Promise<{ name: string; conte
 }
 
 /** Anytype-style browser: objects grouped by type, searchable, with key properties; `.md` import by drop. */
-export function Library({ nodes, types, agents, selectedId, externalQuery, onSelect, onCreate, onCreateType, onImport }: Props) {
+export function Library({ nodes, types, agents, selectedId, externalQuery, onSelect, onCreate, onCreateType, onImport, onUploadFiles, onEditTypes, onPollFeeds }: Props) {
   const [typeId, setTypeId] = useState<string>('all')
   const [q, setQ] = useState('')
   const [adding, setAdding] = useState(false)
@@ -79,21 +92,28 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
   const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : id === 'mcp' ? 'mcp' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
 
   const doImport = async (list: FileList | File[]) => {
-    const files = await readFiles(list)
-    if (!files.length) {
-      setToast('нужны .md / .txt файлы')
-      window.setTimeout(() => setToast(null), 2000)
-      return
-    }
-    setToast(`импортирую ${files.length}…`)
+    const all = Array.from(list)
+    const mdFiles = await readFiles(all.filter((f) => /\.(md|markdown)$/i.test(f.name)))
+    const others = all.filter((f) => !/\.(md|markdown)$/i.test(f.name))
+    if (!mdFiles.length && !others.length) return
+    setToast(`гружу ${all.length}…`)
+    const parts: string[] = []
     try {
-      const r = await onImport(files)
-      setToast(`+${r.imported} новых · ${r.updated} обновлено · ${r.linked} связей по [[ссылкам]]`)
+      if (mdFiles.length) {
+        const r = await onImport(mdFiles)
+        parts.push(`+${r.imported} заметок · ${r.updated} обновлено · ${r.linked} связей по [[ссылкам]]`)
+      }
+      if (others.length) {
+        const r = await onUploadFiles(others)
+        parts.push(`+${r.ids.length} файлов как объекты`)
+      }
+      setToast(parts.join(' · '))
     } catch (e) {
       setToast(`ошибка: ${(e as Error).message}`)
     }
     window.setTimeout(() => setToast(null), 4000)
   }
+  const feeds = live.filter((n) => n.type_id === 'feed').length
 
   return (
     <div
@@ -124,9 +144,27 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
         <button onClick={() => setAdding((v) => !v)} className="flex items-center gap-1 rounded border border-acid/60 px-2 py-1 font-mono text-[11px] text-acid hover:bg-acid/10" title="Новый объект">
           <Plus size={12} />
         </button>
-        <button onClick={() => fileInput.current?.click()} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Импорт .md (Obsidian, Anytype, просто заметки). Можно перетащить файлы сюда.">
+        <button onClick={() => fileInput.current?.click()} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Загрузить: .md станут заметками, картинки, PDF и прочее — объектами с файлом. Можно перетащить сюда.">
           <FolderInput size={13} />
         </button>
+        <button onClick={() => onEditTypes()} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Типы: поля, рейтинги, шаблоны">
+          <SlidersHorizontal size={13} />
+        </button>
+        {feeds > 0 && (
+          <button
+            onClick={() => {
+              setToast('опрашиваю ленты…')
+              void onPollFeeds()
+                .then((r) => setToast(`ленты: +${r.created} закладок`))
+                .catch((e) => setToast(`ошибка: ${(e as Error).message}`))
+                .finally(() => window.setTimeout(() => setToast(null), 3000))
+            }}
+            className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid"
+            title={`Опросить RSS-ленты сейчас (${feeds})`}
+          >
+            <Rss size={13} />
+          </button>
+        )}
         <a href={api.exportUrl()} download className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Экспорт всей библиотеки в .md">
           <Download size={13} />
         </a>
@@ -134,7 +172,7 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
           ref={fileInput}
           type="file"
           multiple
-          accept=".md,.markdown,.txt,text/markdown,text/plain"
+          accept="*/*"
           className="hidden"
           onChange={(e) => {
             if (e.target.files) void doImport(e.target.files)
@@ -191,7 +229,8 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
               onClick={() => setTypeId(t.id)}
               className={`shrink-0 rounded px-2 py-0.5 ${typeId === t.id ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`}
               style={typeId === t.id ? { color: t.color } : undefined}
-              title={t.builtin ? t.name : `${t.name} — тип завёл ${name(t.created_by)}`}
+              onDoubleClick={() => onEditTypes(t.id)}
+              title={`${t.builtin ? t.name : `${t.name} — тип завёл ${name(t.created_by)}`} · двойной клик — настроить поля`}
             >
               {t.icon} {t.name} · {counts[t.id] ?? 0}
               {!t.builtin && <span className="ml-1 text-[8px] text-acid">new</span>}
@@ -232,7 +271,7 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
       </div>
       {drag && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-void/80 font-mono text-sm text-acid">
-          отпусти — .md-файлы станут объектами, [[ссылки]] — связями
+          отпусти — .md станут заметками, остальное — объектами с файлом
         </div>
       )}
     </div>

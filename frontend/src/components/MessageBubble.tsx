@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { ChevronDown, ChevronRight, Terminal } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, Terminal, Volume2, VolumeX } from 'lucide-react'
+import { api } from '../api'
 import type { Agent, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
 import { Markdown } from './Markdown'
@@ -11,10 +12,92 @@ interface Props {
   types?: ObjectType[]
   showEgo: boolean
   onNodeClick?: (id: string) => void
+  /** Server TTS configured; otherwise the browser's own voices are used. */
+  serverTts?: boolean
 }
 
-export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick }: Props) {
+const VOICE_PREF: Record<string, { pitch: number; rate: number }> = {
+  physicist: { pitch: 0.75, rate: 0.92 },
+  lit_teacher: { pitch: 1.2, rate: 0.95 },
+  graffiti: { pitch: 1.0, rate: 1.12 },
+}
+
+function pickVoice(agentId: string): SpeechSynthesisVoice | null {
+  const ru = speechSynthesis.getVoices().filter((v) => v.lang.toLowerCase().startsWith('ru'))
+  if (!ru.length) return null
+  const female = ru.find((v) => /svetlana|irina|ekaterina|milena|alena|female|женск/i.test(v.name))
+  const male = ru.find((v) => /pavel|dmitry|yuri|male|мужск/i.test(v.name) && !/female/i.test(v.name))
+  if (agentId === 'lit_teacher') return female ?? ru[0]
+  return male ?? ru[ru.length > 1 ? 1 : 0]
+}
+
+/** Strip markdown / stage directions for a cleaner read-aloud. */
+function speakable(text: string) {
+  return text
+    .replace(/\*[^*\n]{1,200}\*/g, '')
+    .replace(/\[\[([^\]|]+)(\|[^\]]+)?\]\]/g, '$1')
+    .replace(/[#*_`>]/g, '')
+    .replace(/\(https?:\/\/\S+\)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function useSpeaker(agentId: string, text: string, serverTts: boolean) {
+  const [state, setState] = useState<'idle' | 'loading' | 'playing'>('idle')
+  const audio = useRef<HTMLAudioElement | null>(null)
+  useEffect(
+    () => () => {
+      audio.current?.pause()
+    },
+    [],
+  )
+  const stop = () => {
+    audio.current?.pause()
+    audio.current = null
+    if ('speechSynthesis' in window) speechSynthesis.cancel()
+    setState('idle')
+  }
+  const play = async () => {
+    const t = speakable(text)
+    if (!t) return
+    if (serverTts) {
+      setState('loading')
+      try {
+        const blob = await api.tts(t, agentId)
+        const a = new Audio(URL.createObjectURL(blob))
+        audio.current = a
+        a.onended = () => setState('idle')
+        await a.play()
+        setState('playing')
+        return
+      } catch {
+        /* fall through to the browser voice */
+      }
+    }
+    if (!('speechSynthesis' in window)) {
+      setState('idle')
+      return
+    }
+    speechSynthesis.cancel()
+    const u = new SpeechSynthesisUtterance(t)
+    u.lang = 'ru-RU'
+    const v = pickVoice(agentId)
+    if (v) u.voice = v
+    const pref = VOICE_PREF[agentId] ?? { pitch: 1, rate: 1 }
+    u.pitch = pref.pitch
+    u.rate = pref.rate
+    u.onend = () => setState('idle')
+    u.onerror = () => setState('idle')
+    speechSynthesis.speak(u)
+    setState('playing')
+  }
+  return { state, play, stop }
+}
+
+export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick, serverTts = false }: Props) {
   const [open, setOpen] = useState(false)
+  const speaker = useSpeaker(message.sender_id, message.content, serverTts)
+  const canSpeak = serverTts || 'speechSynthesis' in window
   const agent = agents.find((a) => a.id === message.sender_id)
   const isUser = message.sender_id === 'user'
   const isSystem = message.sender_id === 'system'
@@ -87,6 +170,15 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
           {to && <span className="font-mono text-[10px] text-zinc-500">→ {to}</span>}
           {message.move && <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-600">{message.move}</span>}
           <span className="text-[10px] font-mono text-zinc-600">{time}</span>
+          {canSpeak && !silent && (
+            <button
+              onClick={() => (speaker.state === 'idle' ? void speaker.play() : speaker.stop())}
+              className={`ml-1 rounded p-0.5 ${speaker.state === 'idle' ? 'text-zinc-600 hover:text-zinc-200' : 'text-acid'}`}
+              title={speaker.state === 'idle' ? (serverTts ? 'Озвучить' : 'Озвучить голосом браузера') : 'Стоп'}
+            >
+              {speaker.state === 'idle' ? <Volume2 size={12} /> : speaker.state === 'loading' ? <Volume2 size={12} className="animate-pulse" /> : <VolumeX size={12} />}
+            </button>
+          )}
         </div>
         {node && <div className="mb-1 flex flex-wrap gap-1">{chip(node, true)}</div>}
         {showEgo && message.ego_thought && (
@@ -116,12 +208,12 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
               return (
                 <button
                   key={i}
-                  onClick={() => onNodeClick?.(a.object_id)}
+                  onClick={() => a.object_id && onNodeClick?.(a.object_id)}
                   className="inline-flex max-w-[280px] items-center gap-1 rounded border border-dashed px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-acid hover:text-acid"
                   style={{ borderColor: `${color}77` }}
                   title="Действие в библиотеке — открыть объект"
                 >
-                  <span style={{ color: t?.color ?? color }}>{a.op === 'link' ? '⇄' : a.op === 'update' ? '✎' : a.op === 'append' ? '✍' : a.op === 'note' ? '✎' : t?.icon ?? '＋'}</span>
+                  <span style={{ color: t?.color ?? color }}>{a.op === 'link' ? '⇄' : a.op === 'update' ? '✎' : a.op === 'append' ? '✍' : a.op === 'note' ? '✎' : a.op === 'search' ? '🔎' : t?.icon ?? '＋'}</span>
                   <span className="truncate">{a.text}</span>
                 </button>
               )

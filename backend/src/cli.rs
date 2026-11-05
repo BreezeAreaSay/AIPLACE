@@ -110,7 +110,7 @@ pub fn setup_wizard() -> Result<LlmSettings> {
         extra.push(("APP_URL", url));
         extra.push(("TELEGRAM_ADMIN_IDS", admin));
     }
-    let settings = LlmSettings { api_key, model, director_model };
+    let settings = LlmSettings { api_key, model, director_model, integrations: LlmSettings::from_env().integrations };
     let path = settings.save()?;
     config::save_config_values(&extra)?;
     for (k, v) in &extra {

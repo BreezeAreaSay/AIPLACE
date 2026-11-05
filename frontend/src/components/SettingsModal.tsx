@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowUpCircle, KeyRound, Lock, X } from 'lucide-react'
+import { ArrowUpCircle, Copy, Globe, KeyRound, Lock, X } from 'lucide-react'
 import { api, API_BASE } from '../api'
 import type { SettingsView } from '../types'
 import { ModelPicker, type ModelInfo } from './ModelPicker'
@@ -9,6 +9,15 @@ interface Props {
   onClose: () => void
   onSaved: () => void
 }
+
+const GROUPS: { title: string; note: string; keys: string[] }[] = [
+  { title: 'Поиск в сети', note: 'ddg работает без ключа; Tavily/Brave точнее', keys: ['SEARCH_PROVIDER', 'SEARCH_API_KEY', 'SEARXNG_URL'] },
+  { title: 'Погода и календарь', note: 'Open-Meteo без ключа; .ics — приватная ссылка твоего календаря', keys: ['WEATHER_CITY', 'CALENDAR_ICS_URL'] },
+  { title: 'Справочники', note: 'книги — OpenLibrary без ключа, Википедия без ключа, фильмы — TMDB', keys: ['TMDB_API_KEY'] },
+  { title: 'GitHub', note: 'публичные репо без токена', keys: ['GITHUB_TOKEN'] },
+  { title: 'Голос', note: 'без ключей — голос браузера; OpenAI/Groq/локальный сервер — по ключу', keys: ['TTS_URL', 'TTS_API_KEY', 'TTS_MODEL', 'TTS_VOICES', 'STT_URL', 'STT_API_KEY', 'STT_MODEL'] },
+  { title: 'Ленты', note: 'объекты типа «Лента» опрашиваются сами', keys: ['FEEDS_EVERY_MIN'] },
+]
 
 export function SettingsModal({ open, onClose, onSaved }: Props) {
   const [view, setView] = useState<SettingsView | null>(null)
@@ -20,6 +29,8 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
   const [ok, setOk] = useState<string | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [catalog, setCatalog] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [integ, setInteg] = useState<Record<string, string>>({})
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (!open || models.length) return
@@ -44,6 +55,7 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
         setView(v)
         setModel(v.model)
         setDirector(v.director_model)
+        setInteg({})
       })
       .catch((e) => setError((e as Error).message))
   }, [open])
@@ -60,9 +72,11 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
         clear_key: clearKey,
         model: model.trim() || undefined,
         director_model: director.trim() || undefined,
+        integrations: Object.keys(integ).length ? integ : undefined,
       })
       setView(v)
       setKey('')
+      setInteg({})
       setOk(clearKey ? 'Ключ удалён — комната в mock-режиме.' : 'Сохранено. Следующий ход пойдёт через OpenRouter.')
       onSaved()
     } catch (e) {
@@ -77,12 +91,12 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 sm:items-center sm:p-4" onClick={onClose}>
       <div
-        className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-xl border border-line bg-void p-4 shadow-2xl sm:rounded-xl"
+        className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-xl border border-line bg-void p-4 shadow-2xl sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center gap-2">
           <KeyRound size={16} className="text-acid" />
-          <h2 className="font-mono text-sm font-bold tracking-widest text-zinc-100">НАСТРОЙКИ LLM</h2>
+          <h2 className="font-mono text-sm font-bold tracking-widest text-zinc-100">НАСТРОЙКИ</h2>
           <button onClick={onClose} className="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-200" aria-label="Закрыть">
             <X size={16} />
           </button>
@@ -138,6 +152,86 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
                 Reader / Caster / Архивариус / Психолог — маленькие JSON-задачи, подойдёт быстрая. Режимы: Режиссёр <code className="text-zinc-300">{view.director_mode}</code>, агенты{' '}
                 <code className="text-zinc-300">{view.agent_mode}</code>, инструменты <code className="text-zinc-300">{view.agent_tools}</code> (native tool calling, если модель умеет; иначе теги).
                 Внешний MCP: <code className="text-zinc-300">POST /mcp</code>.
+              </div>
+            </div>
+
+            <div className="border-t border-line pt-3">
+              <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                <Globe size={12} className="text-acid" /> окна наружу
+                <span className="ml-auto normal-case tracking-normal text-zinc-600">
+                  {Object.entries(view.features)
+                    .filter(([, on]) => on)
+                    .map(([k]) => k)
+                    .join(' · ') || 'ничего не включено'}
+                </span>
+              </div>
+              <div className="space-y-3">
+                {GROUPS.map((g) => (
+                  <div key={g.title}>
+                    <div className="mb-1 text-[11px] text-zinc-300">
+                      {g.title} <span className="text-zinc-600">— {g.note}</span>
+                    </div>
+                    <div className="space-y-1">
+                      {g.keys.map((k) => {
+                        const it = view.integrations.find((i) => i.key === k)
+                        if (!it) return null
+                        const pending = integ[k]
+                        return (
+                          <div key={k} className="grid grid-cols-[150px_1fr_auto] items-center gap-2">
+                            <span className="truncate font-mono text-[10px] text-zinc-500" title={it.hint}>
+                              {k}
+                            </span>
+                            {k === 'SEARCH_PROVIDER' ? (
+                              <select value={pending ?? it.value ?? ''} disabled={!editable} onChange={(e) => setInteg((m) => ({ ...m, [k]: e.target.value }))} className="rounded border border-line bg-panel px-2 py-1 font-mono text-xs text-zinc-100 focus:border-acid focus:outline-none">
+                                <option value="">ddg (без ключа)</option>
+                                <option value="tavily">tavily</option>
+                                <option value="brave">brave</option>
+                                <option value="searxng">searxng</option>
+                                <option value="off">выключить</option>
+                              </select>
+                            ) : (
+                              <input
+                                type={it.secret ? 'password' : 'text'}
+                                autoComplete="off"
+                                value={pending ?? (it.secret ? '' : it.value)}
+                                disabled={!editable}
+                                onChange={(e) => setInteg((m) => ({ ...m, [k]: e.target.value }))}
+                                placeholder={it.secret && it.set ? `установлен · ${it.value}` : it.hint}
+                                className="rounded border border-line bg-panel px-2 py-1 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-acid focus:outline-none disabled:opacity-50"
+                              />
+                            )}
+                            {it.set || pending ? (
+                              <button onClick={() => setInteg((m) => ({ ...m, [k]: '' }))} disabled={!editable} className="text-zinc-600 hover:text-magenta disabled:opacity-40" title="Очистить">
+                                <X size={12} />
+                              </button>
+                            ) : (
+                              <span />
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <div className="rounded border border-line/60 bg-panel/40 px-2 py-1.5 text-[11px] text-zinc-400">
+                  Подписка на календарь библиотеки (сроки задач, события, слово): вставь ссылку в Google / Яндекс / Apple Calendar как «по URL».
+                  <div className="mt-1 flex items-center gap-2">
+                    <code className="truncate text-zinc-200">{api.calendarUrl()}</code>
+                    <button
+                      onClick={() => {
+                        void navigator.clipboard.writeText(api.calendarUrl()).then(() => {
+                          setCopied(true)
+                          window.setTimeout(() => setCopied(false), 1200)
+                        })
+                      }}
+                      className="shrink-0 text-zinc-500 hover:text-acid"
+                      title="Скопировать"
+                    >
+                      <Copy size={12} />
+                    </button>
+                    {copied && <span className="text-acid">скопировано</span>}
+                  </div>
+                </div>
               </div>
             </div>
 

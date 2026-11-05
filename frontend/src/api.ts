@@ -1,4 +1,4 @@
-import type { GraphNode, Message, ObjectType, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
+import type { Attachment, GraphNode, Message, ObjectType, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
 import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
@@ -64,7 +64,58 @@ export interface NodePatch {
   pinned?: boolean
 }
 
+async function upload<T>(path: string, files: File[], fields: Record<string, string> = {}): Promise<T> {
+  const fd = new FormData()
+  for (const [k, v] of Object.entries(fields)) fd.append(k, v)
+  for (const f of files) fd.append('file', f, f.name)
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', body: fd, headers: authHeaders() })
+  const text = await res.text()
+  let data: unknown = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    const body = data as { error?: string } | null
+    throw new ApiError(body?.error ?? `${res.status} ${res.statusText}`, 'http_error', res.status)
+  }
+  return data as T
+}
+
+export interface LookupCard {
+  kind: string
+  title: string
+  props: Record<string, unknown>
+  body: string
+  image_url: string | null
+  url: string | null
+  source: string
+}
+
 export const api = {
+  uploadToNode: (id: string, files: File[]) => upload<Attachment[]>(`/api/nodes/${encodeURIComponent(id)}/files`, files),
+  uploadFiles: (files: File[], type?: string) => upload<{ ids: string[]; attachments: Attachment[] }>('/api/files', files, type ? { type } : {}),
+  fileUrl: (id: string) => `${API_BASE}/api/files/${encodeURIComponent(id)}`,
+  fileText: (id: string) => request<{ id: string; name: string; chars: number; text: string }>(`/api/files/${encodeURIComponent(id)}/text`),
+  deleteFile: (id: string) => request<void>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  updateType: (id: string, patch: { name?: string; icon?: string; color?: string; schema?: { props: unknown[]; template?: string } }) =>
+    request<ObjectType[]>(`/api/types/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteType: (id: string) => request<ObjectType[]>(`/api/types/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  lookup: (kind: string, q: string) => request<{ card: LookupCard | null }>(`/api/lookup?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(q)}`),
+  autofill: (id: string, kind?: string, query?: string) =>
+    request<{ found: boolean; card?: LookupCard; filled?: string[] }>(`/api/nodes/${encodeURIComponent(id)}/autofill`, { method: 'POST', body: JSON.stringify({ kind, query }) }),
+  githubInto: (id: string) => request<{ activity: string }>(`/api/nodes/${encodeURIComponent(id)}/github`, { method: 'POST', body: '{}' }),
+  weather: () => request<{ configured: boolean; line?: string }>('/api/weather'),
+  calendarUrl: () => `${window.location.origin}${API_BASE}/api/calendar.ics`,
+  calendar: (days = 7) => request<{ events: { when: string; all_day: boolean; title: string; place: string; source: string }[]; digest: string }>(`/api/calendar?days=${days}`),
+  tts: async (text: string, agent: string) => {
+    const res = await fetch(`${API_BASE}/api/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ text, agent }) })
+    if (!res.ok) throw new ApiError((await res.text()) || 'tts', 'http_error', res.status)
+    return res.blob()
+  },
+  stt: (blob: Blob) => upload<{ text: string }>('/api/stt', [new File([blob], 'voice.webm', { type: blob.type || 'audio/webm' })]),
+  pollFeeds: () => request<{ created: number }>('/api/feeds/poll', { method: 'POST', body: '{}' }),
   health: () => request<Health>('/api/health'),
   state: () => request<RoomState>('/api/state'),
   chat: (message: string, nodeId?: string | null) =>
