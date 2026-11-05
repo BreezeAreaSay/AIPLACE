@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { api } from '../api'
-import type { Agent, Features, GraphNode, Message, ObjectType } from '../types'
+import type { Agent, Features, GraphNode, Message, ObjectType, Proposal } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
 import { AgentStrip } from './AgentStrip'
 import { MessageBubble } from './MessageBubble'
@@ -18,7 +18,7 @@ interface Props {
   showEgo: boolean
   onToggleEgo: () => void
   disabled: boolean
-  onSend: (text: string, nodeId?: string | null) => void
+  onSend: (text: string, nodeId?: string | null, replyTo?: number | null) => void
   onTick: () => void
   contextNode: GraphNode | null
   onClearContext: () => void
@@ -39,6 +39,11 @@ interface Props {
   onLoadAround: (id: number) => Promise<void>
   onEditMessage: (id: number, content: string) => void
   onDeleteMessage: (id: number) => void
+  onReact: (id: number, emoji: string) => void
+  onDm: (agentId: string) => void
+  proposals: Proposal[]
+  onAcceptProposal: (id: number) => Promise<unknown>
+  onRejectProposal: (id: number) => Promise<unknown>
 }
 
 export function ScenePanel(p: Props) {
@@ -64,6 +69,7 @@ export function ScenePanel(p: Props) {
     return () => clearTimeout(t)
   }, [lastId, onSeen])
 
+  const [replyTo, setReplyTo] = useState<{ id: number; who: string; text: string } | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<Message[]>([])
@@ -161,7 +167,7 @@ export function ScenePanel(p: Props) {
                 <span className="h-px flex-1 bg-acid/40" />
               </div>
             )}
-            <MessageBubble message={m} agents={p.agents} nodes={p.nodes} types={p.types} showEgo={p.showEgo} onNodeClick={p.onNodeClick} serverTts={p.features.tts} onEdit={p.onEditMessage} onDelete={p.onDeleteMessage} highlight={jump === m.id} />
+            <MessageBubble message={m} agents={p.agents} nodes={p.nodes} types={p.types} showEgo={p.showEgo} onNodeClick={p.onNodeClick} serverTts={p.features.tts} onEdit={p.onEditMessage} onDelete={p.onDeleteMessage} highlight={jump === m.id} onReact={p.onReact} onReply={(msg) => setReplyTo({ id: msg.id, who: msg.sender_id === 'user' ? 'ты' : p.agents.find((a) => a.id === msg.sender_id)?.name.split(' ')[0] ?? msg.sender_id, text: msg.content.slice(0, 120) })} onDm={p.onDm} messages={p.messages} proposals={p.proposals} onAcceptProposal={p.onAcceptProposal} onRejectProposal={p.onRejectProposal} />
           </div>
         ))}
         {p.streaming && streamAgent && (
@@ -195,6 +201,8 @@ export function ScenePanel(p: Props) {
         onSearch={p.onSearch}
         features={p.features}
         onAttach={p.onAttach}
+        replyTo={replyTo}
+        onClearReply={() => setReplyTo(null)}
         onSend={p.onSend}
         onTick={p.onTick}
         showEgo={p.showEgo}

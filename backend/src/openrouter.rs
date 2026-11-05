@@ -486,6 +486,47 @@ impl LlmClient {
     }
 }
 
+impl LlmClient {
+    /// Vision: describe an image for the inhabitants (data URL inline). Returns plain text.
+    pub async fn describe_image(&self, model: &str, bytes: &[u8], mime: &str, prompt: &str) -> Result<String> {
+        let key = self.settings.read().await.api_key.clone().ok_or_else(|| anyhow!("no api key"))?;
+        if !self.budget_left() {
+            bail!("daily LLM budget exhausted");
+        }
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let body = json!({
+            "model": model,
+            "max_tokens": 500,
+            "temperature": 0.3,
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{data}") } }
+            ]}]
+        });
+        self.roll_day();
+        self.calls_today.fetch_add(1, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let result: Result<String> = async {
+            let resp = self.http.post("https://openrouter.ai/api/v1/chat/completions").bearer_auth(&key).header("HTTP-Referer", &self.app_url).header("X-Title", "Triad Canvas").json(&body).send().await.context("openrouter request failed")?;
+            let status = resp.status();
+            let raw = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                bail!("openrouter {status}: {}", crate::mermaid::truncate_chars(&raw, 300));
+            }
+            let v: Value = serde_json::from_str(&raw).context("non-JSON")?;
+            let text = v.pointer("/choices/0/message/content").cloned().map(content_to_text).unwrap_or_default();
+            if text.trim().is_empty() {
+                bail!("empty vision reply");
+            }
+            Ok(text)
+        }
+        .await;
+        self.record("vision", model, started, prompt.chars().count(), &result);
+        result
+    }
+}
+
 fn today() -> i64 {
     chrono::Utc::now().format("%Y%m%d").to_string().parse().unwrap_or(0)
 }

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, subscribeEvents } from '../api'
 import { registerAgents, type Message, type RoomEvent, type RoomState } from '../types'
 
+export type Dms = Record<string, Message[]>
+
 export type Busy = { stage: string; detail: string } | null
 
 function mergeMessages(prev: Message[], incoming: Message[]): Message[] {
@@ -18,6 +20,8 @@ export function useRoom() {
   const [live, setLive] = useState(false)
   const [gate, setGate] = useState<{ code: string; message: string; bot: string | null } | null>(null)
   const [streaming, setStreaming] = useState<{ agent: string; text: string } | null>(null)
+  const [dms, setDms] = useState<Dms>({})
+  const [dmBusy, setDmBusy] = useState<string | null>(null)
   const inflight = useRef(false)
   const seenSent = useRef(0)
 
@@ -58,7 +62,15 @@ export function useRoom() {
           break
         case 'message':
           setStreaming(null)
-          setState((s) => (s ? { ...s, messages: mergeMessages(s.messages, [ev.message]) } : s))
+          if (ev.message.channel) {
+            const ch = ev.message.channel
+            setDms((d) => ({ ...d, [ch]: mergeMessages(d[ch] ?? [], [ev.message]) }))
+          } else {
+            setState((s) => (s ? { ...s, messages: mergeMessages(s.messages, [ev.message]) } : s))
+          }
+          break
+        case 'proposals':
+          setState((s) => (s ? { ...s, proposals: ev.proposals } : s))
           break
         case 'stream_start':
           setStreaming({ agent: ev.agent, text: '' })
@@ -152,11 +164,11 @@ export function useRoom() {
     streaming,
     markSeen,
     refresh,
-    send: async (text: string, nodeId?: string | null) => {
+    send: async (text: string, nodeId?: string | null, replyTo?: number | null) => {
       // Sending is always allowed: mid-round lines land immediately and get a follow-up round.
       setError(null)
       try {
-        const s = await api.chat(text, nodeId)
+        const s = await api.chat(text, nodeId, replyTo)
         setState((prev) => (prev ? { ...s, messages: mergeMessages(prev.messages, s.messages) } : s))
       } catch (e) {
         setError((e as Error).message)
@@ -185,6 +197,28 @@ export function useRoom() {
       setState((s) => (s ? { ...s, messages: mergeMessages(s.messages, around) } : s))
     },
     editMessage: (id: number, content: string) => quiet(() => api.editMessage(id, content)),
+    react: (id: number, emoji: string) => quiet(() => api.react(id, emoji)),
+    dms,
+    dmBusy,
+    loadDm: async (agent: string, older = false) => {
+      const before = older ? dms[agent]?.[0]?.id : undefined
+      const list = await api.dm(agent, before)
+      setDms((d) => ({ ...d, [agent]: mergeMessages(list, older ? (d[agent] ?? []) : []) }))
+    },
+    sendDm: async (agent: string, text: string, replyTo?: number | null) => {
+      setDmBusy(agent)
+      setError(null)
+      try {
+        const pair = await api.dmSend(agent, text, replyTo)
+        setDms((d) => ({ ...d, [agent]: mergeMessages(d[agent] ?? [], pair) }))
+      } catch (e) {
+        setError((e as Error).message)
+      } finally {
+        setDmBusy(null)
+      }
+    },
+    acceptProposal: (id: number) => api.acceptProposal(id).then((r) => (void refresh(), r)),
+    rejectProposal: (id: number) => api.rejectProposal(id).then((r) => (void refresh(), r)),
     deleteMessage: (id: number) => quiet(() => api.deleteMessage(id)),
     createAgent: (body: Parameters<typeof api.createAgent>[0]) => api.createAgent(body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),
     patchAgent: (id: string, body: Parameters<typeof api.patchAgent>[1]) => api.patchAgent(id, body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),

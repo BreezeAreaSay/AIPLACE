@@ -58,6 +58,34 @@ export interface Message {
   node_id: string | null
   objects: string[]
   actions: { op: string; object_id: string; text: string }[]
+  reply_to: number | null
+  channel: string
+  reactions: Record<string, string[]>
+}
+
+export interface Proposal {
+  id: number
+  agent_id: string
+  kind: string
+  payload: Record<string, unknown>
+  reason: string
+  status: string
+  message_id: number | null
+  created_at: string
+}
+
+export interface RoomInfo {
+  id: string
+  name: string
+  created_at: string
+  open: boolean
+}
+
+export interface SnapshotInfo {
+  name: string
+  bytes: number
+  created_at: string
+  kind: string
 }
 
 export type PropKind = 'text' | 'longtext' | 'number' | 'checkbox' | 'date' | 'datetime' | 'select' | 'multiselect' | 'tags' | 'rating' | 'url' | 'email' | 'phone' | 'image' | 'relation'
@@ -290,6 +318,8 @@ export interface RoomState {
   repo_dir: string | null
   exe_path: string
   run_mode: string
+  proposals: Proposal[]
+  vision: boolean
 }
 
 export interface CallLog {
@@ -371,6 +401,7 @@ export type RoomEvent =
   | { type: 'memories'; memories: AgentMemory[] }
   | { type: 'attachments'; attachments: Attachment[] }
   | { type: 'message_deleted'; id: number }
+  | { type: 'proposals'; proposals: Proposal[] }
   | { type: 'done' }
 
 export const AGENT_COLORS: Record<string, string> = {

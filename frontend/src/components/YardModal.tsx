@@ -12,6 +12,8 @@ interface Props {
   onClose: () => void
   onCreate: (body: Parameters<typeof api.createAgent>[0]) => Promise<unknown>
   onPatch: (id: string, body: Parameters<typeof api.patchAgent>[1]) => Promise<unknown>
+  onDm?: (id: string) => void
+  dmUnread?: Record<string, number>
 }
 
 const PALETTE = ['#CCFF00', '#00F0FF', '#FF0055', '#f0abfc', '#fbbf24', '#c084fc', '#fb7185', '#fdba74', '#a3e635', '#7dd3fc', '#86efac', '#fde68a', '#67e8f9', '#f9a8d4', '#5eead4', '#c9c9d1']
@@ -22,7 +24,7 @@ type Draft = { name: string; archetype: string; system_core: string; color: stri
 const inp = 'w-full rounded border border-line bg-panel px-2 py-1 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-acid focus:outline-none'
 
 /** «Двор»: who lives here. Invite from a role preset or write your own; edit character, model, voice; send away / bring back. */
-export function YardModal({ open, agents, roomModel, onClose, onCreate, onPatch }: Props) {
+export function YardModal({ open, agents, roomModel, onClose, onCreate, onPatch, onDm, dmUnread = {} }: Props) {
   const [tab, setTab] = useState<'cast' | 'invite'>('cast')
   const [roles, setRoles] = useState<RolePreset[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -205,6 +207,11 @@ export function YardModal({ open, agents, roomModel, onClose, onCreate, onPatch 
                         <button onClick={() => startEdit(a)} className="rounded border border-line px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-acid hover:text-acid">
                           настроить
                         </button>
+                        {onDm && a.hp > 0 && (
+                          <button onClick={() => onDm(a.id)} className="rounded border border-line px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-acid hover:text-acid" title="Личные сообщения">
+                            ✉ лично{(dmUnread[a.id] ?? 0) > 0 ? ` · ${dmUnread[a.id]}` : ''}
+                          </button>
+                        )}
                         {a.hp <= 0 && (
                           <button onClick={() => void run(() => onPatch(a.id, { revive: true }), () => undefined)} disabled={busy} className="rounded border border-acid/50 px-2 py-0.5 font-mono text-[10px] text-acid hover:bg-acid/10">
                             вернуть к жизни

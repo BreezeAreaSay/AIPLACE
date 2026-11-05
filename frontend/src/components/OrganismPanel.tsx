@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Activity, BookOpen, Leaf, RefreshCw, Sparkles } from 'lucide-react'
-import type { Agent, GraphNode, ObjectType } from '../types'
+import { Activity, BookOpen, Leaf, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react'
+import type { Agent, GraphNode, ObjectType, Proposal } from '../types'
+import { ProposalCard } from './ProposalCard'
 import { AGENT_COLORS } from '../types'
 import { api, type OrganismState } from '../api'
 
@@ -12,6 +13,10 @@ interface Props {
   onSelect: (id: string) => void
   onTend: (nodeId?: string) => Promise<unknown>
   onChronicle: () => Promise<unknown>
+  onAudit: () => Promise<unknown>
+  proposals: Proposal[]
+  onAcceptProposal: (id: number) => Promise<unknown>
+  onRejectProposal: (id: number) => Promise<unknown>
 }
 
 function Tile({ label, value, tone, hint }: { label: string; value: number | string; tone?: 'good' | 'warn' | 'bad'; hint?: string }) {
@@ -25,7 +30,7 @@ function Tile({ label, value, tone, hint }: { label: string; value: number | str
 }
 
 /** Пульс библиотеки: как о ней заботятся, что требует внимания, что жители сделали сами. */
-export function OrganismPanel({ agents, nodes, types, disabled, onSelect, onTend, onChronicle }: Props) {
+export function OrganismPanel({ agents, nodes, types, disabled, onSelect, onTend, onChronicle, onAudit, proposals, onAcceptProposal, onRejectProposal }: Props) {
   const [st, setSt] = useState<OrganismState | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -84,6 +89,21 @@ export function OrganismPanel({ agents, nodes, types, disabled, onSelect, onTend
           <Tile label="файлов не прочитано" value={h.undigested_files} tone={h.undigested_files ? 'bad' : 'good'} />
           <Tile label="задач открыто" value={h.open_tasks} hint={`просрочено: ${h.overdue_tasks}`} tone={h.overdue_tasks ? 'warn' : undefined} />
           <Tile label="закладок не читано" value={h.unread_bookmarks} />
+        </div>
+      </section>
+
+      <section>
+        <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+          <ShieldCheck size={11} /> предложения жителей · {proposals.length}
+          <button onClick={() => void run('audit', onAudit, 'аудит проведён')} disabled={disabled || !!busy} className="ml-auto rounded border border-line px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-zinc-300 hover:border-acid hover:text-acid disabled:opacity-40">
+            {busy === 'audit' ? 'смотрят…' : 'аудит: дубли, пустышки, теги'}
+          </button>
+        </div>
+        {proposals.length === 0 && <div className="text-[11px] text-zinc-600">Пока предложений нет. Жители предлагают слить дубли, убрать пустышки, завести сущности и типы — ты подтверждаешь.</div>}
+        <div className="space-y-1">
+          {proposals.map((p) => (
+            <ProposalCard key={p.id} proposal={p} agents={agents} nodes={nodes} types={types} onAccept={onAcceptProposal} onReject={onRejectProposal} onOpen={onSelect} />
+          ))}
         </div>
       </section>
 

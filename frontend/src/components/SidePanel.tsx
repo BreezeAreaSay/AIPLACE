@@ -1,4 +1,4 @@
-import type { Agent, AgentMemory, Attachment, Contract, DirectorLogEntry, Features, Graph, GraphNode, NodeNote, ObjectType, Relation, RoomEventRecord } from '../types'
+import type { Agent, AgentMemory, Attachment, Contract, DirectorLogEntry, Features, Graph, GraphNode, NodeNote, ObjectType, Proposal, Relation, RoomEventRecord } from '../types'
 import { Library } from './Library'
 import { NodePanel } from './NodePanel'
 import { Canvas } from './Canvas'
@@ -33,6 +33,10 @@ interface Props {
   onPollFeeds: () => Promise<{ created: number }>
   onTend: (nodeId?: string) => Promise<unknown>
   onChronicle: () => Promise<unknown>
+  onAudit: () => Promise<unknown>
+  proposals: Proposal[]
+  onAcceptProposal: (id: number) => Promise<unknown>
+  onRejectProposal: (id: number) => Promise<unknown>
   onCreateType: (name: string) => void
   onPatch: (id: string, patch: Record<string, unknown>) => void
   onDelete: (id: string) => void
@@ -59,7 +63,7 @@ export function SidePanel(p: Props) {
     ['library', `Библиотека · ${live}`],
     ['object', p.selected ? `◇ ${p.selected.label.length > 18 ? p.selected.label.slice(0, 18) + '…' : p.selected.label}` : 'Объект'],
     ['graph', 'Граф'],
-    ['organism', '♥ Организм'],
+    ['organism', `♥ Организм${p.proposals.length ? ` · ${p.proposals.length}` : ''}`],
     ['contracts', `Слово${openContracts ? ` · ${openContracts}` : ''}`],
     ['director', 'Режиссёр'],
   ]
@@ -128,7 +132,7 @@ export function SidePanel(p: Props) {
         )}
         {p.tab === 'organism' && (
           <div className="h-full overflow-y-auto">
-            <OrganismPanel agents={p.agents} nodes={p.graph.nodes} types={p.types} disabled={p.disabled} onSelect={(id) => p.onSelect(id)} onTend={p.onTend} onChronicle={p.onChronicle} />
+            <OrganismPanel agents={p.agents} nodes={p.graph.nodes} types={p.types} disabled={p.disabled} onSelect={(id) => p.onSelect(id)} onTend={p.onTend} onChronicle={p.onChronicle} onAudit={p.onAudit} proposals={p.proposals} onAcceptProposal={p.onAcceptProposal} onRejectProposal={p.onRejectProposal} />
           </div>
         )}
         {p.tab === 'contracts' && (

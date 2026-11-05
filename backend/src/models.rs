@@ -132,6 +132,33 @@ pub struct Message {
     /// Library actions the speaker performed with this line (JSON array of {op, object_id, text}).
     #[serde(default)]
     pub actions: sqlx::types::Json<Vec<ActionRecord>>,
+    /// Message this one answers (quote in the UI).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reply_to: Option<i64>,
+    /// "" = the yard; an agent id = a private conversation with that inhabitant.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub channel: String,
+    /// emoji → who reacted.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reactions: sqlx::types::Json<std::collections::BTreeMap<String, Vec<String>>>,
+}
+
+/// Something an inhabitant proposes to change in the library; you accept or reject.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Proposal {
+    pub id: i64,
+    pub agent_id: String,
+    /// merge | archive | tag | link | create | new_type | retitle | retype
+    pub kind: String,
+    pub payload: sqlx::types::Json<serde_json::Value>,
+    pub reason: String,
+    /// pending | accepted | rejected
+    pub status: String,
+    pub message_id: Option<i64>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -476,6 +503,9 @@ pub struct ChatRequest {
     /// Optional canvas node the player is talking about.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Answering a specific line.
+    #[serde(default)]
+    pub reply_to: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -611,6 +641,9 @@ pub struct RoomState {
     pub repo_dir: Option<String>,
     pub exe_path: String,
     pub run_mode: String,
+    pub proposals: Vec<Proposal>,
+    /// Director model can see images (uploads get described).
+    pub vision: bool,
     pub update_status: crate::selfupdate::UpdateStatus,
     /// "За окном": weather + local time line shared with the Caster, or None when not configured.
     pub world: Option<String>,
@@ -704,5 +737,6 @@ pub enum RoomEvent {
     Memories { memories: Vec<AgentMemory> },
     Attachments { attachments: Vec<Attachment> },
     MessageDeleted { id: i64 },
+    Proposals { proposals: Vec<Proposal> },
     Done,
 }

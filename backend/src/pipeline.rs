@@ -111,7 +111,13 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
                         continue;
                     }
                     let ty = r.get("type").and_then(|t| t.as_str()).unwrap_or("note");
-                    ("library_create", json!({ "type": ty, "title": title }), format!("завести «{title}»"))
+                    let when = r.get("when").and_then(|w| w.as_str()).filter(|w| w.len() >= 10).map(|w| w[..10].to_string());
+                    let props = match (ty, when) {
+                        ("task", Some(d)) => json!({ "due": d, "status": "не начата" }),
+                        ("event", Some(d)) => json!({ "date": d }),
+                        _ => json!({}),
+                    };
+                    ("library_create", json!({ "type": ty, "title": title, "props": props }), format!("завести «{title}»"))
                 }
                 _ => continue,
             };

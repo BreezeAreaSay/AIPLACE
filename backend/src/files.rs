@@ -92,6 +92,15 @@ pub async fn save(app: &AppState, node_id: &str, name: &str, declared_mime: Opti
     tokio::fs::write(&path, bytes).await.with_context(|| format!("cannot write {}", path.display()))?;
     let mime = guess_mime(name, declared_mime);
     let mut text = if is_image(&mime) { String::new() } else { extract_text(name, &mime, bytes) };
+    if text.is_empty() && is_image(&mime) && bytes.len() <= 8 * 1024 * 1024 {
+        let s = app.llm_settings().await;
+        if !s.mock_mode() && app.catalog.supports_vision(s.api_key.as_deref(), &s.director_model).await {
+            match app.llm.describe_image(&s.director_model, bytes, &mime, "Опиши это изображение подробно и по делу на русском: что на нём, стиль, детали, текст, если есть, настроение. 5–10 предложений. Это описание прочитают персонажи, которые сами картинку не видят.").await {
+                Ok(d) => text = format!("Описание изображения «{name}» (глазами модели {}):\n\n{}", s.director_model, d.trim()),
+                Err(e) => tracing::warn!(error = %e, "image description failed"),
+            }
+        }
+    }
     if text.is_empty() && mime.starts_with("audio/") {
         let s = app.llm_settings().await;
         if s.stt_enabled() {

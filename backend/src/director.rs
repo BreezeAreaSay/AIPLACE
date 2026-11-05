@@ -502,10 +502,16 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
 
 /// After the main beats in a big yard: the bystanders' short reactions, one cheap JSON call.
 /// Returns (speaker, addressee, text) lines, posted by the caller.
-pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)], player_line: &str, main_speakers: &[String], stakes: &[(String, i32, Vec<&'static str>)]) -> Result<Vec<(String, String, String)>> {
+pub struct ChorusOut {
+    pub lines: Vec<(String, String, String)>,
+    /// (speaker, emoji, on: "user" | agent id)
+    pub reactions: Vec<(String, String, String)>,
+}
+
+pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)], player_line: &str, main_speakers: &[String], stakes: &[(String, i32, Vec<&'static str>)]) -> Result<ChorusOut> {
     let bystanders: Vec<&Agent> = agents.iter().filter(|a| a.is_alive() && !main_speakers.contains(&a.id)).collect();
     if bystanders.is_empty() {
-        return Ok(vec![]);
+        return Ok(ChorusOut { lines: vec![], reactions: vec![] });
     }
     let cast = bystanders
         .iter()
@@ -516,7 +522,7 @@ pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)]
         .collect::<Vec<_>>()
         .join("\n");
     let scene = round.iter().map(|(w, t)| format!("[{w}]: {}", mermaid::truncate_chars(t, 400))).collect::<Vec<_>>().join("\n");
-    let system = format!("{} Ты — хор двора. Основные реплики уже сказаны; теперь остальные, кто стоял рядом, вставляют по короткой фразе — или молчат. Верни ТОЛЬКО JSON: {{\"lines\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"text\": \"до 14 слов\"}}]}}.\nПравила: 0–3 вставки, каждая — в характере и манере речи этого персонажа, цепляется за КОНКРЕТНОЕ слово из реплик (подкол, согласие, междометие, уточняющий вопрос, ремарка в *звёздочках*); не повторяй сказанное; выше ставка — больше шанс вставить; у кого ставка отрицательная — молчит; если вставлять нечего — пустой список. Без имён в начале фраз. По-русски.", CHORUS_MARK);
+    let system = format!("{} Ты — хор двора. Основные реплики уже сказаны; теперь остальные, кто стоял рядом, вставляют по короткой фразе — или молчат. Верни ТОЛЬКО JSON: {{\"lines\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"text\": \"до 14 слов\"}}], \"reactions\": [{{\"speaker\": \"id\", \"emoji\": \"один эмодзи\", \"on\": \"user|id основного говорящего\"}}]}}.\nreactions — 0–3 молчаливые реакции эмодзи на реплику игрока или основного говорящего (как в мессенджере): тот, кто не вставил слово, может отреагировать; не ставь реакцию сам себе.\nПравила: 0–3 вставки, каждая — в характере и манере речи этого персонажа, цепляется за КОНКРЕТНОЕ слово из реплик (подкол, согласие, междометие, уточняющий вопрос, ремарка в *звёздочках*); не повторяй сказанное; выше ставка — больше шанс вставить; у кого ставка отрицательная — молчит; если вставлять нечего — пустой список. Без имён в начале фраз. По-русски.", CHORUS_MARK);
     let user = format!("РЕПЛИКА ИГРОКА: «{}»\nОСНОВНЫЕ РЕПЛИКИ РАУНДА:\n{}\nКТО СТОИТ РЯДОМ:\n{}", mermaid::truncate_chars(player_line, 500), scene, cast);
     let model = app.llm_settings().await.director_model;
     let opts = crate::openrouter::ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: true, prefill: None, presence_penalty: Some(0.4), frequency_penalty: Some(0.4) };
@@ -537,7 +543,17 @@ pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)]
         };
         out.push((sp, to, mermaid::truncate_chars(text, 160)));
     }
-    Ok(out)
+    let mut reactions = vec![];
+    for r in v.get("reactions").and_then(|l| l.as_array()).map(|a| a.iter().take(3).collect::<Vec<_>>()).unwrap_or_default() {
+        let sp = mermaid::normalize_author(r.get("speaker").and_then(|x| x.as_str()).unwrap_or(""));
+        let emoji: String = r.get("emoji").and_then(|x| x.as_str()).unwrap_or("").trim().chars().take(2).collect();
+        let on = mermaid::normalize_author(r.get("on").and_then(|x| x.as_str()).unwrap_or("user"));
+        if emoji.is_empty() || !agents.iter().any(|a| a.id == sp && a.is_alive()) || on == sp {
+            continue;
+        }
+        reactions.push((sp, emoji, on));
+    }
+    Ok(ChorusOut { lines: out, reactions })
 }
 
 pub const CHORUS_MARK: &str = "[STAGE-CHORUS]";

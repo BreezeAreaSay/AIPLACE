@@ -24,20 +24,24 @@ fn rating(key: &str, label: &str) -> Value {
 fn tags() -> Value {
     json!({ "key": "tags", "label": "Теги", "kind": "tags" })
 }
+fn summary() -> Value {
+    json!({ "key": "summary", "label": "Смысл", "kind": "longtext" })
+}
 fn multi(key: &str, label: &str, options: &[&str]) -> Value {
     json!({ "key": key, "label": label, "kind": "multiselect", "options": options })
 }
 
 pub fn seeds() -> Vec<TypeSeed> {
     vec![
-        TypeSeed { id: "page", name: "Страница", icon: "📄", color: "#9a9ca8", schema: json!({ "props": [tags()] }) },
-        TypeSeed { id: "note", name: "Заметка", icon: "📝", color: "#c9c9d1", schema: json!({ "props": [tags()] }) },
+        TypeSeed { id: "page", name: "Страница", icon: "📄", color: "#9a9ca8", schema: json!({ "props": [summary(), tags()] }) },
+        TypeSeed { id: "note", name: "Заметка", icon: "📝", color: "#c9c9d1", schema: json!({ "props": [summary(), tags()] }) },
         TypeSeed {
             id: "task",
             name: "Задача",
             icon: "☐",
             color: "#CCFF00",
             schema: json!({ "props": [
+                summary(),
                 p("done", "Готово", "checkbox"),
                 p("due", "Срок", "date"),
                 sel("priority", "Приоритет", &["низкий", "средний", "высокий"]),
@@ -53,7 +57,7 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Проект",
             icon: "◆",
             color: "#00F0FF",
-            schema: json!({ "props": [sel("status", "Статус", &["идея", "в работе", "пауза", "готово"]), p("due", "Срок", "date"), p("progress", "Прогресс %", "number"), p("repo", "GitHub репо", "text"), p("url", "Ссылка", "url"), tags()],
+            schema: json!({ "props": [summary(), sel("status", "Статус", &["идея", "в работе", "пауза", "готово"]), p("due", "Срок", "date"), p("progress", "Прогресс %", "number"), p("repo", "GitHub репо", "text"), p("url", "Ссылка", "url"), tags()],
                 "template": "## Зачем\n\n## Следующий шаг\n\n- [ ] \n\n## Лог\n" }),
         },
         TypeSeed {
@@ -61,7 +65,7 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Человек",
             icon: "◯",
             color: "#FF0055",
-            schema: json!({ "props": [p("role", "Роль", "text"), p("company", "Компания", "text"), p("relation_to_me", "Кто мне", "text"), p("email", "Email", "email"), p("phone", "Телефон", "phone"), p("birthday", "День рождения", "date"), p("contact", "Контакт", "text"), rating("closeness", "Близость"), tags()] }),
+            schema: json!({ "props": [summary(), p("role", "Роль", "text"), p("company", "Компания", "text"), p("relation_to_me", "Кто мне", "text"), p("email", "Email", "email"), p("phone", "Телефон", "phone"), p("birthday", "День рождения", "date"), p("contact", "Контакт", "text"), rating("closeness", "Близость"), tags()] }),
         },
         TypeSeed {
             id: "bookmark",
@@ -75,21 +79,21 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Идея",
             icon: "✦",
             color: "#f0abfc",
-            schema: json!({ "props": [sel("status", "Статус", &["сырая", "зреет", "проверена", "отброшена"]), rating("excitement", "Горит"), tags()] }),
+            schema: json!({ "props": [summary(), sel("status", "Статус", &["сырая", "зреет", "проверена", "отброшена"]), rating("excitement", "Горит"), tags()] }),
         },
         TypeSeed {
             id: "goal",
             name: "Цель",
             icon: "◎",
             color: "#fbbf24",
-            schema: json!({ "props": [p("progress", "Прогресс %", "number"), p("due", "Срок", "date"), sel("status", "Статус", &["поставлена", "в работе", "достигнута", "брошена"]), multi("areas", "Сферы", &["здоровье", "деньги", "работа", "отношения", "творчество", "ум", "дом"]), tags()] }),
+            schema: json!({ "props": [summary(), p("progress", "Прогресс %", "number"), p("due", "Срок", "date"), sel("status", "Статус", &["поставлена", "в работе", "достигнута", "брошена"]), multi("areas", "Сферы", &["здоровье", "деньги", "работа", "отношения", "творчество", "ум", "дом"]), tags()] }),
         },
         TypeSeed {
             id: "book",
             name: "Книга",
             icon: "📖",
             color: "#c084fc",
-            schema: json!({ "props": [p("author", "Автор", "text"), p("year", "Год", "number"), p("pages", "Страниц", "number"), sel("status", "Статус", &["хочу", "читаю", "прочитал", "бросил"]), rating("rating", "Оценка"), p("cover_url", "Обложка", "image"), p("isbn", "ISBN", "text"), p("url", "Ссылка", "url"), tags()],
+            schema: json!({ "props": [summary(), p("author", "Автор", "text"), p("year", "Год", "number"), p("pages", "Страниц", "number"), sel("status", "Статус", &["хочу", "читаю", "прочитал", "бросил"]), rating("rating", "Оценка"), p("cover_url", "Обложка", "image"), p("isbn", "ISBN", "text"), p("url", "Ссылка", "url"), tags()],
                 "template": "## О чём\n\n## Цитаты\n\n## Что взял\n" }),
         },
         TypeSeed {
@@ -97,14 +101,14 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Фильм",
             icon: "🎬",
             color: "#fb7185",
-            schema: json!({ "props": [p("director", "Режиссёр", "text"), p("year", "Год", "number"), sel("status", "Статус", &["хочу", "посмотрел", "бросил"]), rating("rating", "Оценка"), p("poster_url", "Постер", "image"), p("runtime", "Минут", "number"), p("url", "Ссылка", "url"), tags()] }),
+            schema: json!({ "props": [summary(), p("director", "Режиссёр", "text"), p("year", "Год", "number"), sel("status", "Статус", &["хочу", "посмотрел", "бросил"]), rating("rating", "Оценка"), p("poster_url", "Постер", "image"), p("runtime", "Минут", "number"), p("url", "Ссылка", "url"), tags()] }),
         },
         TypeSeed {
             id: "recipe",
             name: "Рецепт",
             icon: "🍳",
             color: "#fdba74",
-            schema: json!({ "props": [p("time", "Время", "text"), p("servings", "Порций", "number"), rating("rating", "Оценка"), multi("diet", "Диета", &["веган", "вегетарианское", "без глютена", "без лактозы", "острое"]), p("url", "Источник", "url"), tags()],
+            schema: json!({ "props": [summary(), p("time", "Время", "text"), p("servings", "Порций", "number"), rating("rating", "Оценка"), multi("diet", "Диета", &["веган", "вегетарианское", "без глютена", "без лактозы", "острое"]), p("url", "Источник", "url"), tags()],
                 "template": "## Ингредиенты\n\n- \n\n## Шаги\n\n1. \n" }),
         },
         TypeSeed {
@@ -112,7 +116,7 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Запись дневника",
             icon: "📓",
             color: "#a3e635",
-            schema: json!({ "props": [p("date", "Дата", "date"), rating("mood", "Настроение"), rating("energy", "Энергия"), tags()],
+            schema: json!({ "props": [summary(), p("date", "Дата", "date"), rating("mood", "Настроение"), rating("energy", "Энергия"), tags()],
                 "template": "## Что было\n\n## Что понял\n\n## Завтра\n" }),
         },
         TypeSeed {
@@ -120,21 +124,21 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Цитата",
             icon: "❝",
             color: "#fde68a",
-            schema: json!({ "props": [p("author", "Автор", "text"), json!({ "key": "source", "label": "Источник", "kind": "relation" }), rating("rating", "Оценка"), tags()] }),
+            schema: json!({ "props": [summary(), p("author", "Автор", "text"), json!({ "key": "source", "label": "Источник", "kind": "relation" }), rating("rating", "Оценка"), tags()] }),
         },
         TypeSeed {
             id: "event",
             name: "Событие",
             icon: "📅",
             color: "#67e8f9",
-            schema: json!({ "props": [p("date", "Когда", "datetime"), p("place", "Где", "text"), p("url", "Ссылка", "url"), json!({ "key": "with", "label": "С кем", "kind": "relation", "to": "human" }), tags()] }),
+            schema: json!({ "props": [summary(), p("date", "Когда", "datetime"), p("place", "Где", "text"), p("url", "Ссылка", "url"), json!({ "key": "with", "label": "С кем", "kind": "relation", "to": "human" }), tags()] }),
         },
         TypeSeed {
             id: "place",
             name: "Место",
             icon: "📍",
             color: "#86efac",
-            schema: json!({ "props": [p("address", "Адрес", "text"), sel("kind", "Что это", &["кафе", "бар", "парк", "магазин", "музей", "город", "другое"]), rating("rating", "Оценка"), p("visited", "Был", "checkbox"), p("url", "Карта", "url"), tags()] }),
+            schema: json!({ "props": [summary(), p("address", "Адрес", "text"), sel("kind", "Что это", &["кафе", "бар", "парк", "магазин", "музей", "город", "другое"]), rating("rating", "Оценка"), p("visited", "Был", "checkbox"), p("url", "Карта", "url"), tags()] }),
         },
         TypeSeed {
             id: "file",
@@ -148,14 +152,14 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Картинка",
             icon: "🖼",
             color: "#f9a8d4",
-            schema: json!({ "props": [p("caption", "Подпись", "text"), p("taken", "Когда", "date"), rating("rating", "Оценка"), tags()] }),
+            schema: json!({ "props": [summary(), p("caption", "Подпись", "text"), p("taken", "Когда", "date"), rating("rating", "Оценка"), tags()] }),
         },
         TypeSeed {
             id: "feed",
             name: "Лента",
             icon: "📡",
             color: "#5eead4",
-            schema: json!({ "props": [p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), p("owner", "Кто читает (id персонажа)", "text"), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
+            schema: json!({ "props": [summary(), p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), p("owner", "Кто читает (id персонажа)", "text"), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
         },
     ]
 }

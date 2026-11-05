@@ -1,4 +1,4 @@
-import type { Agent, Attachment, CallLog, GraphNode, Message, ObjectType, RolePreset, RoomEvent, RoomState, SettingsPatch, SettingsView, SourceUpdate, UpdateStatus } from './types'
+import type { Agent, Attachment, CallLog, GraphNode, Message, Proposal, RoomInfo, SnapshotInfo, ObjectType, RolePreset, RoomEvent, RoomState, SettingsPatch, SettingsView, SourceUpdate, UpdateStatus } from './types'
 import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
@@ -14,9 +14,28 @@ export class ApiError extends Error {
   }
 }
 
+export const ROOM_KEY = 'triad.room'
+export function currentRoom(): string {
+  try {
+    return localStorage.getItem(ROOM_KEY) || 'local'
+  } catch {
+    return 'local'
+  }
+}
+export function setCurrentRoom(id: string) {
+  try {
+    localStorage.setItem(ROOM_KEY, id)
+  } catch {
+    /* ignore */
+  }
+}
+
 function authHeaders(): Record<string, string> {
   const d = initData()
-  return d ? { Authorization: `tma ${d}` } : {}
+  const h: Record<string, string> = d ? { Authorization: `tma ${d}` } : {}
+  const room = currentRoom()
+  if (room !== 'local') h['X-Triad-Room'] = room
+  return h
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -118,7 +137,7 @@ export const api = {
   chronicle: () => request<{ id: string | null }>('/api/organism/chronicle', { method: 'POST', body: '{}' }),
   uploadToNode: (id: string, files: File[]) => upload<Attachment[]>(`/api/nodes/${encodeURIComponent(id)}/files`, files),
   uploadFiles: (files: File[], type?: string) => upload<{ ids: string[]; attachments: Attachment[] }>('/api/files', files, type ? { type } : {}),
-  fileUrl: (id: string) => `${API_BASE}/api/files/${encodeURIComponent(id)}`,
+  fileUrl: (id: string) => `${API_BASE}/api/files/${encodeURIComponent(id)}${currentRoom() !== 'local' ? `?room=${currentRoom()}` : ''}`,
   fileText: (id: string) => request<{ id: string; name: string; chars: number; text: string }>(`/api/files/${encodeURIComponent(id)}/text`),
   deleteFile: (id: string) => request<void>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updateType: (id: string, patch: { name?: string; icon?: string; color?: string; schema?: { props: unknown[]; template?: string } }) =>
@@ -129,7 +148,7 @@ export const api = {
     request<{ found: boolean; card?: LookupCard; filled?: string[] }>(`/api/nodes/${encodeURIComponent(id)}/autofill`, { method: 'POST', body: JSON.stringify({ kind, query }) }),
   githubInto: (id: string) => request<{ activity: string }>(`/api/nodes/${encodeURIComponent(id)}/github`, { method: 'POST', body: '{}' }),
   weather: () => request<{ configured: boolean; line?: string }>('/api/weather'),
-  calendarUrl: () => `${window.location.origin}${API_BASE}/api/calendar.ics`,
+  calendarUrl: () => `${window.location.origin}${API_BASE}/api/calendar.ics${currentRoom() !== 'local' ? `?room=${currentRoom()}` : ''}`,
   calendar: (days = 7) => request<{ events: { when: string; all_day: boolean; title: string; place: string; source: string }[]; digest: string }>(`/api/calendar?days=${days}`),
   tts: async (text: string, agent: string) => {
     const res = await fetch(`${API_BASE}/api/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ text, agent }) })
@@ -145,7 +164,7 @@ export const api = {
   editMessage: (id: number, content: string) => request<Message>(`/api/messages/${id}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
   deleteMessage: (id: number) => request<void>(`/api/messages/${id}`, { method: 'DELETE' }),
   llmLog: () => request<CallLog[]>('/api/llm/log'),
-  backupUrl: () => `${API_BASE}/api/backup.zip`,
+  backupUrl: () => `${API_BASE}/api/backup.zip${currentRoom() !== 'local' ? `?room=${currentRoom()}` : ''}`,
   restore: (file: File) => upload<{ staged: boolean; manifest: Record<string, unknown>; message: string }>('/api/restore', [file]),
   restoreCancel: () => request<void>('/api/restore', { method: 'DELETE' }),
   updateCheck: () => request<SourceUpdate>('/api/update/check', { method: 'POST', body: '{}' }),
@@ -158,8 +177,24 @@ export const api = {
     request<Agent[]>(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   health: () => request<Health>('/api/health'),
   state: () => request<RoomState>('/api/state'),
-  chat: (message: string, nodeId?: string | null) =>
-    request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message, node_id: nodeId ?? null }) }),
+  chat: (message: string, nodeId?: string | null, replyTo?: number | null) =>
+    request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message, node_id: nodeId ?? null, reply_to: replyTo ?? null }) }),
+  react: (id: number, emoji: string) => request<Message>(`/api/messages/${id}/react`, { method: 'POST', body: JSON.stringify({ emoji }) }),
+  dm: (agent: string, before?: number) => request<Message[]>(`/api/dm/${encodeURIComponent(agent)}${before ? `?before=${before}` : ''}`),
+  dmSend: (agent: string, message: string, replyTo?: number | null) => request<Message[]>(`/api/dm/${encodeURIComponent(agent)}`, { method: 'POST', body: JSON.stringify({ message, reply_to: replyTo ?? null }) }),
+  dmOverview: () => request<{ channels: { agent: string; unread: number; last: Message | null }[] }>('/api/dm'),
+  proposals: (status = 'pending') => request<Proposal[]>(`/api/proposals?status=${status}`),
+  acceptProposal: (id: number) => request<{ ok: boolean; result: string }>(`/api/proposals/${id}/accept`, { method: 'POST', body: '{}' }),
+  rejectProposal: (id: number) => request<{ ok: boolean }>(`/api/proposals/${id}/reject`, { method: 'POST', body: '{}' }),
+  audit: () => request<{ proposals: number }>('/api/organism/audit', { method: 'POST', body: '{}' }),
+  rooms: () => request<RoomInfo[]>('/api/rooms'),
+  createRoom: (name: string) => request<RoomInfo>('/api/rooms', { method: 'POST', body: JSON.stringify({ name }) }),
+  renameRoom: (id: string, name: string) => request<RoomInfo[]>(`/api/rooms/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteRoom: (id: string) => request<RoomInfo[]>(`/api/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  snapshots: () => request<SnapshotInfo[]>('/api/snapshots'),
+  createSnapshot: () => request<SnapshotInfo>('/api/snapshots', { method: 'POST', body: '{}' }),
+  restoreSnapshot: (name: string) => request<{ staged: boolean }>(`/api/snapshots/${encodeURIComponent(name)}/restore`, { method: 'POST', body: '{}' }),
+  deleteSnapshot: (name: string) => request<void>(`/api/snapshots/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   createNode: (label: string, opts: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number } = {}) =>
     request<RoomState>('/api/nodes', { method: 'POST', body: JSON.stringify({ label, ...opts }) }),
   types: () => request<ObjectType[]>('/api/types'),
@@ -194,7 +229,11 @@ export const api = {
 /** Subscribe to live room events (SSE). Returns an unsubscribe function. */
 export function subscribeEvents(onEvent: (ev: RoomEvent) => void, onStatus?: (ok: boolean) => void): () => void {
   const d = initData()
-  const es = new EventSource(`${API_BASE}/api/events${d ? `?tma=${encodeURIComponent(d)}` : ''}`)
+  const params = new URLSearchParams()
+  if (d) params.set('tma', d)
+  if (currentRoom() !== 'local') params.set('room', currentRoom())
+  const qs = params.toString()
+  const es = new EventSource(`${API_BASE}/api/events${qs ? `?${qs}` : ''}`)
   es.onopen = () => onStatus?.(true)
   es.onerror = () => onStatus?.(false)
   es.onmessage = (e) => {

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, KeyRound, PanelRightClose, PanelRightOpen, RotateCcw, Send, Settings, Users, Zap } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, Command, KeyRound, Menu, Minus, PanelRightClose, PanelRightOpen, Plus, RotateCcw, Send, Settings, Users, Zap } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
 import { api } from './api'
 import { ScenePanel } from './components/ScenePanel'
@@ -9,6 +9,9 @@ import { SettingsModal } from './components/SettingsModal'
 import { TypeEditor } from './components/TypeEditor'
 import { YardModal } from './components/YardModal'
 import { Onboarding } from './components/Onboarding'
+import { CommandPalette, type PaletteCommand } from './components/CommandPalette'
+import { RoomSwitcher } from './components/RoomSwitcher'
+import { DmPanel } from './components/DmPanel'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -21,11 +24,33 @@ function useMedia(query: string) {
   return m
 }
 
+function usePersisted<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [v, setV] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? (JSON.parse(raw) as T) : initial
+    } catch {
+      return initial
+    }
+  })
+  const set = (nv: T) => {
+    setV(nv)
+    try {
+      localStorage.setItem(key, JSON.stringify(nv))
+    } catch {
+      /* ignore */
+    }
+  }
+  return [v, set]
+}
+
 export default function App() {
   const room = useRoom()
-  const [showEgo, setShowEgo] = useState(true)
+  const [showEgo, setShowEgo] = usePersisted('triad.ego', true)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [sideOpen, setSideOpen] = useState(true)
+  const [sideOpen, setSideOpen] = usePersisted('triad.side', true)
+  const [sideWidth, setSideWidth] = usePersisted('triad.sideWidth', 520)
+  const [scale, setScale] = usePersisted('triad.scale', 1)
   const [sideTab, setSideTab] = useState<SideTab>('library')
   const [mobileTab, setMobileTab] = useState<'side' | 'scene'>('scene')
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -35,8 +60,14 @@ export default function App() {
   const [typeEditor, setTypeEditor] = useState<{ open: boolean; id: string | null }>({ open: false, id: null })
   const [yardOpen, setYardOpen] = useState(false)
   const [wizard, setWizard] = useState<boolean | null>(null)
+  const [palette, setPalette] = useState(false)
+  const [menu, setMenu] = useState(false)
+  const [dm, setDm] = useState<string | null>(null)
+  const [dmUnread, setDmUnread] = useState<Record<string, number>>({})
   const isDesktop = useMedia('(min-width: 900px)')
+  const dragging = useRef(false)
 
+  // first run
   useEffect(() => {
     if (!room.state || wizard !== null) return
     let seen = false
@@ -48,6 +79,21 @@ export default function App() {
     const st = room.state
     setWizard(!seen && st.settings_editable && st.mock_mode && st.messages.filter((m) => m.sender_id === 'user').length === 0)
   }, [room.state, wizard])
+
+  // UI zoom (Ctrl +/-/0), persisted
+  useEffect(() => {
+    const root = document.getElementById('root') as HTMLElement | null
+    if (root) (root.style as unknown as { zoom: string }).zoom = String(scale)
+  }, [scale])
+
+  // DM unread badges
+  useEffect(() => {
+    if (!room.state) return
+    const load = () => void api.dmOverview().then((o) => setDmUnread(Object.fromEntries(o.channels.map((c) => [c.agent, c.unread])))).catch(() => undefined)
+    load()
+    const t = setInterval(load, 20_000)
+    return () => clearInterval(t)
+  }, [room.state?.messages.length, room.dms])
 
   const unread = useMemo(() => {
     const st = room.state
@@ -64,7 +110,6 @@ export default function App() {
     return room.state?.agents.find((a) => d.startsWith(a.name))?.id ?? null
   }, [room.busy, room.state])
 
-  // Objects touched in the last round glow for a moment on the graph.
   const hotIds = useMemo(() => {
     const s = room.state
     if (!s) return new Set<string>()
@@ -78,6 +123,72 @@ export default function App() {
     }
     return ids
   }, [room.state])
+
+  const openDm = useCallback(
+    (agentId: string) => {
+      setDm(agentId)
+      void room.loadDm(agentId)
+      if (!isDesktop) setMobileTab('scene')
+    },
+    [room, isDesktop],
+  )
+
+  // keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey
+      const tag = (e.target as HTMLElement | null)?.tagName
+      const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPalette((v) => !v)
+      } else if (mod && e.key.toLowerCase() === 'b') {
+        e.preventDefault()
+        setSideOpen(!sideOpen)
+      } else if (mod && (e.key === '=' || e.key === '+')) {
+        e.preventDefault()
+        setScale(Math.min(1.6, Math.round((scale + 0.1) * 10) / 10))
+      } else if (mod && e.key === '-') {
+        e.preventDefault()
+        setScale(Math.max(0.7, Math.round((scale - 0.1) * 10) / 10))
+      } else if (mod && e.key === '0') {
+        e.preventDefault()
+        setScale(1)
+      } else if (!typing && e.key === '/' && !mod) {
+        e.preventDefault()
+        ;(document.querySelector('main textarea') as HTMLTextAreaElement | null)?.focus()
+      } else if (e.key === 'Escape' && dm) {
+        setDm(null)
+      } else if (mod && /^[1-6]$/.test(e.key)) {
+        e.preventDefault()
+        const tabs: SideTab[] = ['library', 'object', 'graph', 'organism', 'contracts', 'director']
+        setSideTab(tabs[Number(e.key) - 1])
+        setSideOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [sideOpen, scale, dm, setSideOpen, setScale])
+
+  // resizable aside
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      if (!dragging.current) return
+      const w = Math.min(window.innerWidth * 0.65, Math.max(360, window.innerWidth - e.clientX))
+      setSideWidth(Math.round(w))
+    }
+    const up = () => {
+      dragging.current = false
+      document.body.style.cursor = ''
+      document.querySelector('.resize-handle')?.classList.remove('active')
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    return () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+  }, [setSideWidth])
 
   if (room.gate) {
     const link = room.gate.bot ? `https://t.me/${room.gate.bot}` : null
@@ -121,6 +232,8 @@ export default function App() {
   const profile = profileId ? s.agents.find((a) => a.id === profileId) ?? null : null
   const mood = s.last_director?.output.room_mood ?? null
   const liveCount = s.graph.nodes.filter((n) => n.archived === 0).length
+  const dmAgent = dm ? s.agents.find((a) => a.id === dm) ?? null : null
+  const dmTotal = Object.values(dmUnread).reduce((a, b) => a + b, 0)
 
   const selectNode = (id: string | null) => {
     setSelectedId(id)
@@ -131,6 +244,32 @@ export default function App() {
       if (!isDesktop) setMobileTab('side')
     }
   }
+  const jumpMessage = (id: number) => {
+    setDm(null)
+    void room.loadAround(id).then(() => setTimeout(() => document.getElementById(`msg-${id}`)?.scrollIntoView({ block: 'center' }), 80))
+  }
+
+  const commands: PaletteCommand[] = [
+    { id: 'new-note', title: 'Новая заметка', hint: 'в библиотеку', run: () => void room.createNode('Новая заметка', { type_id: 'note' }) },
+    { id: 'new-task', title: 'Новая задача', run: () => void room.createNode('Новая задача', { type_id: 'task' }) },
+    { id: 'yard', title: 'Двор: жители и роли', keys: '', run: () => setYardOpen(true) },
+    { id: 'settings', title: 'Настройки', hint: 'ключ, модели, окна наружу, бэкап, обновление', run: () => setSettingsOpen(true) },
+    { id: 'types', title: 'Типы объектов', hint: 'поля, рейтинги, шаблоны', run: () => setTypeEditor({ open: true, id: null }) },
+    { id: 'organism', title: 'Организм', hint: 'пульс библиотеки', keys: 'Ctrl+4', run: () => { setSideTab('organism'); setSideOpen(true) } },
+    { id: 'graph', title: 'Граф', keys: 'Ctrl+3', run: () => { setSideTab('graph'); setSideOpen(true) } },
+    { id: 'tidy', title: 'Прибрать библиотеку', hint: 'жители разберут самое важное', run: () => void api.tend().then(() => room.refresh()) },
+    { id: 'audit', title: 'Аудит библиотеки', hint: 'дубли, пустышки, теги — с подтверждением', run: () => void api.audit().then(() => room.refresh()) },
+    { id: 'chronicle', title: 'Написать хронику дня', run: () => void api.chronicle().then(() => room.refresh()) },
+    { id: 'snapshot', title: 'Снимок комнаты', hint: 'бэкап в ~/.triad/backups', run: () => void api.createSnapshot().then(() => room.refresh()) },
+    { id: 'tick', title: 'Пусть поспорят сами', run: () => void room.tick() },
+    { id: 'side', title: sideOpen ? 'Скрыть боковую панель' : 'Показать боковую панель', keys: 'Ctrl+B', run: () => setSideOpen(!sideOpen) },
+    { id: 'zoom-in', title: 'Крупнее', keys: 'Ctrl +', run: () => setScale(Math.min(1.6, Math.round((scale + 0.1) * 10) / 10)) },
+    { id: 'zoom-out', title: 'Мельче', keys: 'Ctrl −', run: () => setScale(Math.max(0.7, Math.round((scale - 0.1) * 10) / 10)) },
+    { id: 'zoom-reset', title: 'Масштаб 100%', keys: 'Ctrl 0', run: () => setScale(1) },
+    { id: 'export', title: 'Экспорт библиотеки в .md', run: () => window.open(api.exportUrl(), '_blank') },
+    { id: 'wizard', title: 'Мастер первого запуска', run: () => setWizard(true) },
+    ...s.agents.filter((a) => a.active !== 0).map((a) => ({ id: `dm-${a.id}`, title: `Написать лично: ${a.name}`, hint: 'личные сообщения', run: () => openDm(a.id) })),
+  ]
 
   const side = (
     <SidePanel
@@ -158,6 +297,10 @@ export default function App() {
       onPollFeeds={room.pollFeeds}
       onTend={(id) => api.tend(id).then((r) => (void room.refresh(), r))}
       onChronicle={() => api.chronicle().then((r) => (void room.refresh(), r))}
+      onAudit={() => api.audit().then((r) => (void room.refresh(), r))}
+      proposals={s.proposals}
+      onAcceptProposal={room.acceptProposal}
+      onRejectProposal={room.rejectProposal}
       onCreateType={(name) => void room.createType(name)}
       onPatch={(id, patch) => void room.patchNode(id, patch)}
       onDelete={(id) => {
@@ -186,69 +329,120 @@ export default function App() {
     />
   )
 
-  const scene = (
-    <ScenePanel
-      agents={s.agents}
-      messages={s.messages}
-      nodes={s.graph.nodes}
-      types={s.types}
-      busy={room.busy}
-      speaking={speaking}
-      showEgo={showEgo}
-      onToggleEgo={() => setShowEgo((v) => !v)}
-      disabled={disabled}
-      onSend={(t, nodeId) => void room.send(t, nodeId)}
-      onTick={() => void room.tick()}
-      contextNode={contextNode}
-      onClearContext={() => setContextId(null)}
-      onNodeClick={selectNode}
-      onOpenAgent={setProfileId}
-      mood={mood}
-      lastSeen={s.last_seen_message_id}
-      streaming={room.streaming}
-      onSeen={room.markSeen}
-      onCapture={(label, typeId, body) => {
-        void room.createNode(label, { type_id: typeId, body: body || undefined })
-      }}
-      onSearch={(q) => {
-        setLibraryQuery({ q, nonce: Date.now() })
-        setSideTab('library')
-        setSideOpen(true)
-        if (!isDesktop) setMobileTab('side')
-      }}
-      features={s.features}
-      world={s.world}
-      onYard={() => setYardOpen(true)}
-      messageCount={s.message_count}
-      onLoadOlder={room.loadOlder}
-      onLoadAround={room.loadAround}
-      onEditMessage={(id, c) => void room.editMessage(id, c)}
-      onDeleteMessage={(id) => void room.deleteMessage(id)}
-      onAttach={async (files) => {
-        const r = await room.uploadFiles(files)
-        const fresh = await api.state()
-        return r.ids.map((id) => fresh.graph.nodes.find((n) => n.id === id)?.label ?? id)
-      }}
-    />
-  )
+  const scene =
+    dm && dmAgent ? (
+      <DmPanel
+        agent={dmAgent}
+        agents={s.agents}
+        messages={room.dms[dm] ?? []}
+        nodes={s.graph.nodes}
+        types={s.types}
+        busy={room.dmBusy === dm}
+        serverTts={s.features.tts}
+        onBack={() => setDm(null)}
+        onSend={(t, r) => room.sendDm(dm, t, r)}
+        onLoadOlder={() => room.loadDm(dm, true)}
+        onReact={(id, e) => void room.react(id, e)}
+        onDelete={(id) => void room.deleteMessage(id)}
+        onNodeClick={selectNode}
+      />
+    ) : (
+      <ScenePanel
+        agents={s.agents}
+        messages={s.messages}
+        nodes={s.graph.nodes}
+        types={s.types}
+        busy={room.busy}
+        speaking={speaking}
+        showEgo={showEgo}
+        onToggleEgo={() => setShowEgo(!showEgo)}
+        disabled={disabled}
+        onSend={(t, nodeId, replyTo) => void room.send(t, nodeId, replyTo)}
+        onTick={() => void room.tick()}
+        contextNode={contextNode}
+        onClearContext={() => setContextId(null)}
+        onNodeClick={selectNode}
+        onOpenAgent={setProfileId}
+        mood={mood}
+        lastSeen={s.last_seen_message_id}
+        streaming={room.streaming}
+        onSeen={room.markSeen}
+        onCapture={(label, typeId, body) => {
+          void room.createNode(label, { type_id: typeId, body: body || undefined })
+        }}
+        onSearch={(q) => {
+          setLibraryQuery({ q, nonce: Date.now() })
+          setSideTab('library')
+          setSideOpen(true)
+          if (!isDesktop) setMobileTab('side')
+        }}
+        features={s.features}
+        world={s.world}
+        onYard={() => setYardOpen(true)}
+        messageCount={s.message_count}
+        onLoadOlder={room.loadOlder}
+        onLoadAround={room.loadAround}
+        onEditMessage={(id, c) => void room.editMessage(id, c)}
+        onDeleteMessage={(id) => void room.deleteMessage(id)}
+        onReact={(id, e) => void room.react(id, e)}
+        onDm={openDm}
+        proposals={s.proposals}
+        onAcceptProposal={room.acceptProposal}
+        onRejectProposal={room.rejectProposal}
+        onAttach={async (files) => {
+          const r = await room.uploadFiles(files)
+          const fresh = await api.state()
+          return r.ids.map((id) => fresh.graph.nodes.find((n) => n.id === id)?.label ?? id)
+        }}
+      />
+    )
 
+  const iconBtn = 'rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid'
 
   return (
     <div className="scanlines relative flex flex-col bg-void" style={{ height: 'var(--app-height, 100%)' }}>
       <header className="relative z-20 flex items-center gap-2 border-b border-line bg-void/95 px-3 py-1.5" style={{ paddingTop: 'calc(0.375rem + var(--tg-safe-top))' }}>
+        <div className="relative">
+          <button onClick={() => setMenu((v) => !v)} className={iconBtn} title="Меню">
+            <Menu size={13} />
+          </button>
+          {menu && (
+            <div className="absolute left-0 top-full z-50 mt-1 w-64 rounded border border-line bg-void p-1 text-xs shadow-2xl" onMouseLeave={() => setMenu(false)}>
+              {[
+                ['Палитра команд', 'Ctrl+K', () => setPalette(true)],
+                ['Двор: жители', '', () => setYardOpen(true)],
+                ['Типы объектов', '', () => setTypeEditor({ open: true, id: null })],
+                ['Организм', 'Ctrl+4', () => { setSideTab('organism'); setSideOpen(true) }],
+                ['Настройки', '', () => setSettingsOpen(true)],
+                ['Снимок комнаты', '', () => void api.createSnapshot().then(() => room.refresh())],
+                ['Экспорт библиотеки .md', '', () => window.open(api.exportUrl(), '_blank')],
+                ['Мастер первого запуска', '', () => setWizard(true)],
+                ['Стереть комнату…', '', () => { if (confirm('Стереть комнату и заселить Триаду заново?')) void room.reset() }],
+              ].map(([t, k, fn]) => (
+                <button
+                  key={t as string}
+                  onClick={() => {
+                    setMenu(false)
+                    ;(fn as () => void)()
+                  }}
+                  className="flex w-full items-center justify-between rounded px-2 py-1 text-left text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  <span>{t as string}</span>
+                  {k && <kbd className="font-mono text-[9px] text-zinc-600">{k as string}</kbd>}
+                </button>
+              ))}
+              <div className="mt-1 border-t border-line px-2 pt-1 font-mono text-[9px] text-zinc-600">/ — в композер · Ctrl+B панель · Ctrl +/− масштаб · Ctrl+1…6 вкладки</div>
+            </div>
+          )}
+        </div>
         <Zap size={15} className="text-acid" />
-        <span className="font-mono text-xs font-bold tracking-[0.25em] text-zinc-100">TRIAD CANVAS</span>
-        <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
-          {liveCount} объектов · {s.types.length} типов{s.room_id !== 'local' ? ` · ${s.room_id}` : ''}
-          {s.usage.daily_budget > 0 && ` · вызовов сегодня ${s.usage.calls_today}/${s.usage.daily_budget}`}
-          {s.heartbeat_minutes > 0 && ` · пульс каждые ${s.heartbeat_minutes} мин тишины`}
+        <span className="hidden font-mono text-xs font-bold tracking-[0.25em] text-zinc-100 sm:inline">TRIAD CANVAS</span>
+        <RoomSwitcher />
+        <span className="hidden font-mono text-[10px] text-zinc-600 lg:inline">
+          {liveCount} объектов · {s.types.length} типов
+          {s.usage.daily_budget > 0 && ` · вызовов ${s.usage.calls_today}/${s.usage.daily_budget}`}
         </span>
         <div className="ml-auto flex items-center gap-1.5 font-mono text-[10px]">
-          {s.update && (
-            <button onClick={() => setSettingsOpen(true)} className="hidden rounded border border-acid/60 px-1.5 py-0.5 text-acid sm:inline" title="Доступна новая версия">
-              ↑ v{s.update.latest}
-            </button>
-          )}
           {s.source_update && s.source_update.behind > 0 && (
             <button onClick={() => setSettingsOpen(true)} className="rounded border border-acid/60 px-1.5 py-0.5 text-acid hover:bg-acid/10" title={`Новые коммиты в origin/${s.source_update.branch}: обновиться из приложения`}>
               ↑ +{s.source_update.behind}
@@ -256,27 +450,44 @@ export default function App() {
           )}
           {s.mock_mode && (
             <button onClick={() => setSettingsOpen(true)} className="rounded border border-magenta/50 px-1.5 py-0.5 text-magenta hover:bg-magenta/10" title="Нет ключа OpenRouter — ответы шаблонные">
-              MOCK LLM
+              MOCK
             </button>
           )}
-          <span className={room.live ? 'text-acid' : 'text-zinc-600'}>{room.live ? '● live' : '○ offline'}</span>
-          <button onClick={() => setYardOpen(true)} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Двор: жители, роли, модели, голоса">
-            <Users size={12} />
+          <span className={room.live ? 'text-acid' : 'text-zinc-600'} title={room.live ? 'живое соединение' : 'нет соединения'}>
+            {room.live ? '●' : '○'}
+          </span>
+          <button onClick={() => setPalette(true)} className={`${iconBtn} hidden sm:flex items-center gap-1`} title="Палитра команд (Ctrl+K)">
+            <Command size={11} /> <span>K</span>
           </button>
-          <button onClick={() => setSettingsOpen(true)} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Ключ и модели">
+          <div className="hidden items-center gap-0.5 sm:flex" title="Масштаб интерфейса">
+            <button onClick={() => setScale(Math.max(0.7, Math.round((scale - 0.1) * 10) / 10))} className={iconBtn}>
+              <Minus size={11} />
+            </button>
+            <button onClick={() => setScale(1)} className="w-9 text-center text-zinc-500 hover:text-zinc-200">
+              {Math.round(scale * 100)}%
+            </button>
+            <button onClick={() => setScale(Math.min(1.6, Math.round((scale + 0.1) * 10) / 10))} className={iconBtn}>
+              <Plus size={11} />
+            </button>
+          </div>
+          <button onClick={() => setYardOpen(true)} className={`${iconBtn} relative`} title="Двор: жители, роли, модели, голоса">
+            <Users size={12} />
+            {dmTotal > 0 && <span className="absolute -right-1 -top-1 rounded-full bg-acid px-1 text-[8px] font-bold text-void">{dmTotal}</span>}
+          </button>
+          <button onClick={() => setSettingsOpen(true)} className={iconBtn} title="Настройки">
             <Settings size={12} />
           </button>
           <button
             onClick={() => {
               if (confirm('Стереть комнату и заселить Триаду заново?')) void room.reset()
             }}
-            className="rounded border border-line p-1 text-zinc-500 hover:border-magenta hover:text-magenta"
+            className="hidden rounded border border-line p-1 text-zinc-500 hover:border-magenta hover:text-magenta sm:block"
             title="Новая комната"
           >
             <RotateCcw size={12} />
           </button>
           {isDesktop && (
-            <button onClick={() => setSideOpen((v) => !v)} className="rounded border border-line p-1 text-zinc-400 hover:text-zinc-100" title={sideOpen ? 'Свернуть библиотеку' : 'Показать библиотеку'}>
+            <button onClick={() => setSideOpen(!sideOpen)} className="rounded border border-line p-1 text-zinc-400 hover:text-zinc-100" title={sideOpen ? 'Свернуть панель (Ctrl+B)' : 'Показать панель (Ctrl+B)'}>
               {sideOpen ? <PanelRightClose size={12} /> : <PanelRightOpen size={12} />}
             </button>
           )}
@@ -324,14 +535,31 @@ export default function App() {
           <main className="flex min-w-0 flex-1 justify-center">
             <div className="flex h-full w-full max-w-3xl flex-col">{scene}</div>
           </main>
-          {sideOpen && <aside className="w-[520px] shrink-0 border-l border-line">{side}</aside>}
+          {sideOpen && (
+            <>
+              <div
+                className="resize-handle shrink-0"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  dragging.current = true
+                  document.body.style.cursor = 'col-resize'
+                  ;(e.currentTarget as HTMLElement).classList.add('active')
+                }}
+                onDoubleClick={() => setSideWidth(520)}
+                title="Тянуть, чтобы менять ширину · двойной клик — сброс"
+              />
+              <aside className="shrink-0 border-l border-line" style={{ width: sideWidth }}>
+                {side}
+              </aside>
+            </>
+          )}
         </div>
       ) : (
         <>
           <div className="min-h-0 flex-1">{mobileTab === 'side' ? side : scene}</div>
           <nav className="grid grid-cols-2 border-t border-line bg-void font-mono text-[11px]" style={{ paddingBottom: 'var(--tg-safe-bottom)' }}>
             <button onClick={() => setMobileTab('scene')} className={`py-2 ${mobileTab === 'scene' ? 'text-acid' : 'text-zinc-500'}`}>
-              ☰ Чат
+              ☰ {dm ? 'Личка' : 'Чат'}
             </button>
             <button onClick={() => setMobileTab('side')} className={`py-2 ${mobileTab === 'side' ? 'text-acid' : 'text-zinc-500'}`}>
               ◇ Библиотека · {liveCount}
@@ -348,6 +576,11 @@ export default function App() {
           relations={s.relations}
           messages={s.messages}
           onClose={() => setProfileId(null)}
+          onDm={() => {
+            setProfileId(null)
+            openDm(profile.id)
+          }}
+          dmUnread={dmUnread[profile.id] ?? 0}
         />
       )}
       <SettingsModal
@@ -376,7 +609,7 @@ export default function App() {
         onCreateAgent={room.createAgent}
         onPatchAgent={room.patchAgent}
       />
-      <YardModal open={yardOpen} agents={s.agents} roomModel={s.model} onClose={() => setYardOpen(false)} onCreate={room.createAgent} onPatch={room.patchAgent} />
+      <YardModal open={yardOpen} agents={s.agents} roomModel={s.model} onClose={() => setYardOpen(false)} onCreate={room.createAgent} onPatch={room.patchAgent} onDm={(id) => { setYardOpen(false); openDm(id) }} dmUnread={dmUnread} />
       <TypeEditor
         open={typeEditor.open}
         initialId={typeEditor.id}
@@ -387,6 +620,7 @@ export default function App() {
         onCreate={(name) => void room.createType(name)}
         onDelete={(id) => void room.deleteType(id)}
       />
+      <CommandPalette open={palette} onClose={() => setPalette(false)} nodes={s.graph.nodes} types={s.types} agents={s.agents} commands={commands} onOpenNode={selectNode} onJumpMessage={jumpMessage} />
     </div>
   )
 }

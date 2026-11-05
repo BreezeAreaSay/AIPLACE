@@ -20,9 +20,17 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
     if system.contains("[STAGE-CHORUS]") {
         let ids: Vec<String> = regex::Regex::new(r"\(id (\w+)\)").ok().map(|r| r.captures_iter(user).map(|c| c[1].to_string()).collect()).unwrap_or_default();
         let lines: Vec<serde_json::Value> = ids.iter().take(2).enumerate().map(|(i, id)| json!({ "speaker": id, "addressee": if i == 0 { "user" } else { ids[0].as_str() }, "text": if i == 0 { "[MOCK] *хмыкает* Ну-ну, посмотрим." } else { "[MOCK] Опять ты за своё." } })).collect();
-        json!({ "lines": lines }).to_string()
+        let reactions: Vec<serde_json::Value> = ids.iter().skip(2).take(1).map(|id| json!({ "speaker": id, "emoji": "🔥", "on": "user" })).collect();
+        json!({ "lines": lines, "reactions": reactions }).to_string()
     } else if system.contains("[STAGE-GARDENER]") {
         stage_gardener(user)
+    } else if system.contains("[AUDIT]") {
+        let dupe = regex::Regex::new(r"\d+%: (\w+) \[.*?⇄ (\w+) \[").ok().and_then(|r| r.captures(user).map(|c| (c[1].to_string(), c[2].to_string())));
+        let junk = regex::Regex::new(r"ПУСТЫШКИ[^\n]*\n  (\w+) \[").ok().and_then(|r| r.captures(user).map(|c| c[1].to_string()));
+        let mut props = vec![];
+        if let Some((a, b)) = dupe { props.push(json!({ "kind": "merge", "src": a, "dst": b, "reason": "[MOCK] одно и то же" })); }
+        if let Some(j) = junk { props.push(json!({ "kind": "archive", "id": j, "reason": "[MOCK] пустышка" })); }
+        json!({ "proposals": props, "say": "[MOCK] Прошёлся по полкам: нашёл дубль и пустышку, предлагаю прибрать." }).to_string()
     } else if system.contains("[STAGE-CHRONICLE]") {
         json!({ "title": "тихий день с одним файлом", "text": "Игрок принёс файл, двор его прочитал и разложил по полкам. Главная тема дня — [[Осциллограф С1-94]]: Аркадий настаивает на цифрах, остальные — на смысле.\n\n- слово про лампу остаётся открытым\n- в библиотеке стало на два объекта больше", "mood": 3, "tomorrow": "спросить игрока, купил ли он лампу" }).to_string()
     } else if system.contains("[STAGE-READER]") {
@@ -380,7 +388,7 @@ mod integration {
     use crate::prompts::{director_user, DirectorContext};
 
     fn msg(id: i64, who: &str, text: &str, ego: Option<&str>) -> Message {
-        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None, objects: vec![], actions: sqlx::types::Json(vec![]) }
+        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None, objects: vec![], actions: sqlx::types::Json(vec![]), reply_to: None, channel: String::new(), reactions: sqlx::types::Json(Default::default()) }
     }
 
     #[test]

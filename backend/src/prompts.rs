@@ -333,6 +333,8 @@ pub struct AgentContext<'a> {
     pub can_search: bool,
     /// "ИГРОК: имя — о себе", when the player filled the profile.
     pub player: Option<&'a str>,
+    /// Private conversation with the player (no neighbours hear it).
+    pub private: bool,
     /// Object types the agent may use in <act> tags.
     pub types: &'a [crate::models::ObjectType],
     /// Objects relevant to the moment (by topic + the agent's own), with ids, so actions can target them.
@@ -641,8 +643,8 @@ pub fn reader_system(agents: &[Agent]) -> String {
         "{READER_MARK} Ты — Читатель комнаты. Твоя единственная работа: понять последнюю реплику игрока и вернуть маленький JSON. Персонажи: {cast}.\n\
 Правила: promises — ТОЛЬКО если игрок сам обещает сам что-то сделать (просьбы к персонажам и вопросы — не обещания); deadline — абсолютный ISO-8601 UTC от текущего времени или null; contract_reports — если игрок отчитывается по открытому слову (done | failed), мутный отчёт — не включай. feeds: насколько реплика кормит профиль каждого, от -2 (нытьё/пустота) до 2 (прямое попадание).\n\
 memory_query — если игрок спрашивает о СВОЕЙ памяти/библиотеке («что я обещал Ивану», «что у меня по проекту», «какие книги хотел»): text — ключевые слова, type — id типа или null; иначе null.\n\
-requests — ЯВНЫЕ просьбы игрока, которые комната должна ВЫПОЛНИТЬ, а не обсудить: kind — search (найди/погугли/проверь в интернете), wiki (найди в википедии, что такое X), weather (какая погода), create (заведи/создай/запиши объект: type — id типа: human|place|task|idea|book|movie|event|note|bookmark|quote; title — название), lookup_book / lookup_movie (найди книгу/фильм). query — что именно искать/как назвать. Если просьб нет — пустой список. Вопрос «можете ли вы искать?» — тоже request search с query по теме разговора.\n\
-Отвечай ТОЛЬКО JSON: {{\"topic\": \"2-5 слов\", \"player_intent\": \"одна фраза\", \"question_to_agents\": true/false, \"feeds\": {{{feeds}}}, \"promises\": [{{\"title\": \"…\", \"deadline\": \"2026-11-07T20:00:00Z\"}}], \"contract_reports\": [{{\"id\": 3, \"status\": \"done\"}}], \"node_refs\": [\"id_узла\"], \"memory_query\": {{\"text\": \"Иван срок\", \"type\": \"task\"}}, \"requests\": [{{\"kind\": \"wiki\", \"query\": \"замок Нойхаузен\", \"type\": null, \"title\": null}}]}}"
+requests — ЯВНЫЕ просьбы игрока, которые комната должна ВЫПОЛНИТЬ, а не обсудить: kind — search (найди/погугли/проверь в интернете), wiki (найди в википедии, что такое X), weather (какая погода), create (заведи/создай/запиши/поставь в календарь: type — id типа: human|place|task|idea|book|movie|event|note|bookmark|quote; title — название; when — дата ISO YYYY-MM-DD, если назван день: «в воскресенье» → ближайшее воскресенье от СЕЙЧАС), lookup_book / lookup_movie (найди книгу/фильм). query — что именно искать/как назвать. Если просьб нет — пустой список. Вопрос «можете ли вы искать?» — тоже request search с query по теме разговора.\n\
+Отвечай ТОЛЬКО JSON: {{\"topic\": \"2-5 слов\", \"player_intent\": \"одна фраза\", \"question_to_agents\": true/false, \"feeds\": {{{feeds}}}, \"promises\": [{{\"title\": \"…\", \"deadline\": \"2026-11-07T20:00:00Z\"}}], \"contract_reports\": [{{\"id\": 3, \"status\": \"done\"}}], \"node_refs\": [\"id_узла\"], \"memory_query\": {{\"text\": \"Иван срок\", \"type\": \"task\"}}, \"requests\": [{{\"kind\": \"wiki\", \"query\": \"замок Нойхаузен\", \"type\": null, \"title\": null, \"when\": null}}]}}"
     )
 }
 
@@ -855,8 +857,9 @@ pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
     let files = ctx.focus_files.map(|f| format!("\nК НЕМУ ПРИЛОЖЕНО (ты это читал):\n{f}")).unwrap_or_default();
     let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
     let player = ctx.player.map(|p| format!("\n{p}")).unwrap_or_default();
+    let private = if ctx.private { "\nЭТО ЛИЧНЫЙ РАЗГОВОР с игроком: соседи не слышат, можно говорить то, чего не скажешь при всех." } else { "" };
     let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (точные факты, на них можно опираться):\n{l}")).unwrap_or_default();
-    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{files}{world}{player}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
+    format!("{}:\n{}{scene}{memory}{focus}{files}{world}{player}{private}{library}\n\nТвоя мысль, {}:", if ctx.private { "ЛИЧНАЯ ПЕРЕПИСКА" } else { "СТЕНОГРАММА" }, transcript(&recent, all, false), ctx.agent.name)
 }
 
 /// Split the think-stage output into (thought, hook phrase, library query, web query).
@@ -968,8 +971,10 @@ pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str, 
     let files = ctx.focus_files.map(|f| format!("\nПРИЛОЖЕННЫЕ ФАЙЛЫ ОБЪЕКТА (ты их читал — ссылайся на конкретное):\n{f}")).unwrap_or_default();
     let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
     let player = ctx.player.map(|p| format!("\n{p} Обращайся по имени, когда уместно.")).unwrap_or_default();
+    let private = if ctx.private { "\nЭТО ЛИЧНЫЙ РАЗГОВОР с игроком один на один: без сцены и соседей, отвечай ему прямо, можно длиннее и откровеннее." } else { "" };
     format!(
-        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}{files}{world}{player}\n\nТВОЯ МЫСЛЬ (для себя, в реплике её не повторяй дословно): {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        "{}:\n{}{scene}{own}{library}{found}{files}{world}{player}{private}\n\nТВОЯ МЫСЛЬ (для себя, в реплике её не повторяй дословно): {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        if ctx.private { "ЛИЧНАЯ ПЕРЕПИСКА" } else { "СТЕНОГРАММА" },
         transcript(&recent, all, false),
         if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
         if hook.is_empty() { "последняя реплика" } else { hook }

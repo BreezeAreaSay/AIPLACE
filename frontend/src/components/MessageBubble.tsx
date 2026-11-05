@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Pencil, Terminal, Trash2, Volume2, VolumeX, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, CornerUpLeft, Lock, Pencil, SmilePlus, Terminal, Trash2, Volume2, VolumeX, X } from 'lucide-react'
+import type { Proposal } from '../types'
+import { ProposalCard } from './ProposalCard'
 import { api } from '../api'
 import type { Agent, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
@@ -17,6 +19,75 @@ interface Props {
   onEdit?: (id: number, content: string) => void
   onDelete?: (id: number) => void
   highlight?: boolean
+  onReact?: (id: number, emoji: string) => void
+  onReply?: (m: Message) => void
+  onDm?: (agentId: string) => void
+  /** For resolving reply_to quotes. */
+  messages?: Message[]
+  proposals?: Proposal[]
+  onAcceptProposal?: (id: number) => Promise<unknown>
+  onRejectProposal?: (id: number) => Promise<unknown>
+}
+
+const QUICK = ['👍', '🔥', '❤️', '😂', '🤔', '👀', '💀', '🙏']
+
+function Reactions({ m, agents, onReact }: { m: Message; agents: Agent[]; onReact?: (id: number, emoji: string) => void }) {
+  const [pick, setPick] = useState(false)
+  const entries = Object.entries(m.reactions ?? {})
+  const who = (id: string) => (id === 'user' ? 'ты' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {entries.map(([emoji, users]) => (
+        <button
+          key={emoji}
+          onClick={() => onReact?.(m.id, emoji)}
+          className={`flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] ${users.includes('user') ? 'border-acid/60 bg-acid/10' : 'border-line bg-panel hover:border-zinc-500'}`}
+          title={users.map(who).join(', ')}
+        >
+          <span>{emoji}</span>
+          <span className="font-mono text-[9px] text-zinc-400">{users.length}</span>
+        </button>
+      ))}
+      {onReact && (
+        <span className="relative">
+          <button onClick={() => setPick((v) => !v)} className={`rounded-full border border-dashed border-line p-0.5 text-zinc-600 hover:border-zinc-500 hover:text-zinc-300 ${entries.length === 0 ? 'hidden group-hover:inline-flex' : 'inline-flex'}`} title="Реакция">
+            <SmilePlus size={12} />
+          </button>
+          {pick && (
+            <span className="absolute bottom-full left-0 z-20 mb-1 flex gap-0.5 rounded border border-line bg-void px-1 py-0.5 shadow-xl">
+              {QUICK.map((e) => (
+                <button
+                  key={e}
+                  onClick={() => {
+                    onReact(m.id, e)
+                    setPick(false)
+                  }}
+                  className="rounded px-1 text-base hover:bg-zinc-800"
+                >
+                  {e}
+                </button>
+              ))}
+            </span>
+          )}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Quote({ id, messages, agents }: { id: number | null; messages?: Message[]; agents: Agent[] }) {
+  if (!id || !messages) return null
+  const q = messages.find((x) => x.id === id)
+  if (!q) return null
+  const who = q.sender_id === 'user' ? 'ты' : agents.find((a) => a.id === q.sender_id)?.name.split(' ')[0] ?? q.sender_id
+  return (
+    <button onClick={() => document.getElementById(`msg-${q.id}`)?.scrollIntoView({ block: 'center' })} className="mb-1 flex w-full items-baseline gap-1.5 overflow-hidden rounded border-l-2 bg-black/30 px-2 py-0.5 text-left text-[11px]" style={{ borderColor: AGENT_COLORS[q.sender_id] ?? '#666' }}>
+      <span className="shrink-0 font-mono text-[10px]" style={{ color: AGENT_COLORS[q.sender_id] ?? '#888' }}>
+        {who}
+      </span>
+      <span className="truncate text-zinc-400">{q.content}</span>
+    </button>
+  )
 }
 
 const VOICE_PREF: Record<string, { pitch: number; rate: number }> = {
@@ -97,7 +168,8 @@ function useSpeaker(agentId: string, text: string, serverTts: boolean) {
   return { state, play, stop }
 }
 
-export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick, serverTts = false, onEdit, onDelete, highlight }: Props) {
+export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick, serverTts = false, onEdit, onDelete, highlight, onReact, onReply, onDm, messages, proposals = [], onAcceptProposal, onRejectProposal }: Props) {
+  const mine = proposals.filter((p) => p.message_id === message.id && p.status === 'pending')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(message.content)
@@ -146,6 +218,7 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
       <div className="group flex flex-col items-end">
         {nodeChip}
         <div className={`max-w-[90%] rounded-lg rounded-br-sm border bg-zinc-800/70 px-3 py-2 text-sm text-zinc-100 ${highlight ? 'border-acid shadow-glow' : 'border-zinc-600'}`}>
+          <Quote id={message.reply_to} messages={messages} agents={agents} />
           {editing ? (
             <div className="min-w-[260px]">
               <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.min(8, draft.split('\n').length + 1)} className="w-full resize-y rounded border border-line bg-void px-2 py-1 text-sm text-zinc-100 focus:border-acid focus:outline-none" autoFocus />
@@ -169,7 +242,13 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
               <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
             </div>
           )}
+          <Reactions m={message} agents={agents} onReact={onReact} />
           <div className="mt-1 flex items-center justify-end gap-2 text-right text-[10px] font-mono text-zinc-500">
+            {onReply && (
+              <button onClick={() => onReply(message)} className="hidden text-zinc-600 hover:text-zinc-200 group-hover:inline" title="Ответить на это">
+                <CornerUpLeft size={11} />
+              </button>
+            )}
             {!editing && onEdit && (
               <button onClick={() => { setDraft(message.content); setEditing(true) }} className="hidden text-zinc-600 hover:text-zinc-200 group-hover:inline" title="Править">
                 <Pencil size={11} />
@@ -235,13 +314,36 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
           </div>
         )}
         <div
-          className={`rounded-lg rounded-tl-sm border px-3 py-2 text-sm leading-relaxed ${silent ? 'border-dashed bg-transparent text-zinc-400' : 'bg-panel text-zinc-100'}`}
+          className={`rounded-lg rounded-tl-sm border px-3 py-2 text-sm leading-relaxed ${silent ? 'border-dashed bg-transparent text-zinc-400' : message.move === 'вставка' ? 'bg-panel/60 text-zinc-200' : 'bg-panel text-zinc-100'}`}
           style={{ borderColor: `${color}55` }}
         >
+          <Quote id={message.reply_to} messages={messages} agents={agents} />
           <div className="break-words">
             <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
           </div>
         </div>
+        <div className="flex items-start gap-2">
+          <Reactions m={message} agents={agents} onReact={onReact} />
+          <div className="ml-auto mt-1 hidden items-center gap-1.5 group-hover:flex">
+            {onReply && (
+              <button onClick={() => onReply(message)} className="flex items-center gap-0.5 font-mono text-[10px] text-zinc-600 hover:text-zinc-200" title="Ответить на эту реплику">
+                <CornerUpLeft size={11} /> ответить
+              </button>
+            )}
+            {onDm && message.channel === '' && (
+              <button onClick={() => onDm(message.sender_id)} className="flex items-center gap-0.5 font-mono text-[10px] text-zinc-600 hover:text-zinc-200" title="Написать лично">
+                <Lock size={10} /> в личку
+              </button>
+            )}
+          </div>
+        </div>
+        {mine.length > 0 && (
+          <div className="mt-1.5 space-y-1">
+            {mine.map((p) => (
+              <ProposalCard key={p.id} proposal={p} agents={agents} nodes={nodes} types={types} onAccept={onAcceptProposal ?? (async () => undefined)} onReject={onRejectProposal ?? (async () => undefined)} onOpen={onNodeClick} />
+            ))}
+          </div>
+        )}
         {(message.actions ?? []).length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
             {message.actions.map((a, i) => {

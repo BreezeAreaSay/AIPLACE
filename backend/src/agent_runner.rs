@@ -26,6 +26,9 @@ pub struct TurnPlan<'a> {
     /// Actions the pipeline already performed on the player's explicit request; shown as
     /// chips on this line.
     pub pre_records: Vec<crate::models::ActionRecord>,
+    /// Private conversation (agent id) instead of the yard.
+    pub channel: Option<String>,
+    pub reply_to: Option<i64>,
 }
 
 /// Output of the think stage.
@@ -68,7 +71,7 @@ struct TurnData {
     model: String,
 }
 
-async fn load_turn(app: &AppState, agent_id: &str, focus: Option<&str>, dying: bool) -> Result<TurnData> {
+async fn load_turn(app: &AppState, agent_id: &str, focus: Option<&str>, dying: bool, channel: Option<&str>) -> Result<TurnData> {
     let agents = db::list_agents(&app.db).await?;
     let agent = agents
         .iter()
@@ -79,7 +82,10 @@ async fn load_turn(app: &AppState, agent_id: &str, focus: Option<&str>, dying: b
         return Err(anyhow!("{} is dead and cannot speak", agent.name));
     }
     let others: Vec<_> = agents.iter().filter(|a| a.id != agent_id).cloned().collect();
-    let messages = db::recent_messages(&app.db, app.cfg.context_messages).await?;
+    let messages = match channel {
+        Some(ch) => db::channel_messages(&app.db, ch, app.cfg.context_messages, None).await?,
+        None => db::recent_messages(&app.db, app.cfg.context_messages).await?,
+    };
     let nodes = db::list_nodes(&app.db).await?;
     let own_recent: Vec<String> = messages
         .iter()
@@ -153,6 +159,7 @@ impl TurnData {
             player: self.player.as_deref(),
             types: &self.types,
             relevant: &self.relevant,
+            private: plan.channel.is_some(),
         }
     }
 }
@@ -162,14 +169,14 @@ pub async fn pre_think(app: &AppState, agent_id: &str, beat: &crate::models::Bea
     if app.cfg.agent_mode == "single" {
         return None;
     }
-    let data = load_turn(app, agent_id, focus_node, false).await.ok()?;
-    let plan = TurnPlan { beat: Some(beat), scene_so_far: vec![], room_mood, focus_node, library, pre: None, pre_records: vec![] };
+    let data = load_turn(app, agent_id, focus_node, false, None).await.ok()?;
+    let plan = TurnPlan { beat: Some(beat), scene_so_far: vec![], room_mood, focus_node, library, pre: None, pre_records: vec![], channel: None, reply_to: None };
     let ctx = data.ctx(&plan, false);
     Some(think(app, &data.model, &ctx, &data.agents).await)
 }
 
 async fn run_agent_inner(app: &AppState, agent_id: &str, mut plan: TurnPlan<'_>, dying: bool) -> Result<Message> {
-    let data = load_turn(app, agent_id, plan.focus_node, dying).await?;
+    let data = load_turn(app, agent_id, plan.focus_node, dying, plan.channel.as_deref()).await?;
     let agent = data.agent.clone();
     let agents = data.agents.clone();
     let types = data.types.clone();
@@ -206,14 +213,16 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, mut plan: TurnPlan<'_>,
     let speech = if speech.trim().is_empty() { "*молчит*".to_string() } else { speech };
     let addressee = plan.beat.and_then(|b| b.addressee.clone());
     let mv = plan.beat.and_then(|b| b.r#move.clone());
-    let msg = db::insert_message_full(
+    let msg = db::insert_message_in(
         &app.db,
+        plan.channel.as_deref().unwrap_or(""),
         agent_id,
         ego.as_deref(),
         &speech,
-        addressee.as_deref(),
+        addressee.as_deref().or(if plan.channel.is_some() { Some("user") } else { None }),
         mv.as_deref(),
         plan.focus_node,
+        plan.reply_to,
     )
     .await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
@@ -230,7 +239,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, mut plan: TurnPlan<'_>,
         let graph = crate::models::Graph { nodes: db::list_nodes(&app.db).await?, edges: db::list_edges(&app.db).await? };
         let mermaid = crate::mermaid::build_graph(&graph.nodes, &graph.edges);
         app.emit(RoomEvent::Graph { graph, mermaid });
-        let updated = db::with_mentions(&app.db, vec![db::recent_messages(&app.db, 1).await?.remove(0)]).await?.remove(0);
+        let updated = db::with_mentions(&app.db, vec![db::get_message(&app.db, msg.id).await?.unwrap_or(msg.clone())]).await?.remove(0);
         app.emit(RoomEvent::Message { message: updated.clone() });
         updated
     };

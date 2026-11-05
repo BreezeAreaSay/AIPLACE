@@ -18,6 +18,7 @@ pub struct ModelInfo {
     pub free: bool,
     pub json_mode: bool,
     pub tools: bool,
+    pub vision: bool,
 }
 
 #[derive(Default)]
@@ -40,6 +41,15 @@ struct RawModel {
     pricing: Option<RawPricing>,
     #[serde(default)]
     supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<RawArch>,
+}
+#[derive(Deserialize)]
+struct RawArch {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    modality: Option<String>,
 }
 #[derive(Deserialize)]
 struct RawPricing {
@@ -58,6 +68,13 @@ impl Catalog {
     pub async fn supports_tools(&self, api_key: Option<&str>, model: &str) -> bool {
         match self.models(api_key).await {
             Ok(list) => list.iter().find(|m| m.id == model).map(|m| m.tools).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    pub async fn supports_vision(&self, api_key: Option<&str>, model: &str) -> bool {
+        match self.models(api_key).await {
+            Ok(list) => list.iter().find(|m| m.id == model).map(|m| m.vision).unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -87,8 +104,14 @@ impl Catalog {
                     .map(|p| p.iter().any(|x| x == "response_format" || x == "structured_outputs"))
                     .unwrap_or(false);
                 let tools = m.supported_parameters.as_ref().map(|p| p.iter().any(|x| x == "tools" || x == "tool_choice")).unwrap_or(false);
+                let vision = m
+                    .architecture
+                    .as_ref()
+                    .map(|a| a.input_modalities.as_ref().map(|v| v.iter().any(|x| x == "image")).unwrap_or(false) || a.modality.as_deref().map(|m| m.starts_with("text+image")).unwrap_or(false))
+                    .unwrap_or(false);
                 ModelInfo {
                     tools,
+                    vision,
                     name: if m.name.is_empty() { m.id.clone() } else { m.name },
                     id: m.id,
                     context_length: m.context_length.unwrap_or(0),

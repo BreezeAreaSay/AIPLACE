@@ -263,7 +263,9 @@ export function Library({ nodes, types, agents, selectedId, externalQuery, onSel
                     {name(n.created_by)}
                   </span>
                 </div>
-                {(preview || n.body) && <div className="truncate text-[11px] text-zinc-500">{preview || n.body.replace(/[#*`>_[\]]/g, '')}</div>}
+                {(typeof n.props.summary === 'string' && n.props.summary.trim()) || preview || n.body ? (
+                  <div className="truncate text-[11px] text-zinc-500">{typeof n.props.summary === 'string' && n.props.summary.trim() ? n.props.summary : preview || n.body.replace(/[#*`>_[\]]/g, '')}</div>
+                ) : null}
               </div>
             </button>
           )

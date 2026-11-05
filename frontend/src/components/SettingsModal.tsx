@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowUpCircle, Copy, Download, Globe, GitBranch, KeyRound, Lock, RefreshCw, Upload, Wand2, X } from 'lucide-react'
 import { api, API_BASE } from '../api'
-import type { SettingsView, SourceUpdate } from '../types'
+import type { SettingsView, SnapshotInfo, SourceUpdate } from '../types'
 import { ModelPicker, type ModelInfo } from './ModelPicker'
 
 interface Props {
@@ -27,6 +27,11 @@ const GROUPS: { title: string; note: string; keys: string[] }[] = [
 
 export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePending, onWizard, repoDir, exePath }: Props) {
   const [restoreMsg, setRestoreMsg] = useState<string | null>(null)
+  const [snaps, setSnaps] = useState<SnapshotInfo[]>([])
+  const loadSnaps = () => void api.snapshots().then(setSnaps).catch(() => setSnaps([]))
+  useEffect(() => {
+    if (open) loadSnaps()
+  }, [open])
   const [su, setSu] = useState<SourceUpdate | null>(sourceUpdate)
   const [suBusy, setSuBusy] = useState<'idle' | 'check' | 'run' | 'gone'>('idle')
   const [suErr, setSuErr] = useState<string | null>(null)
@@ -322,6 +327,54 @@ export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePen
                 </div>
               )}
               <div className="mt-1 text-[10px] text-zinc-600">В архиве база комнаты и все вложения. Положи в облако или перенеси на другую машину.</div>
+              <div className="mt-2">
+                <div className="mb-1 flex items-center gap-2 font-mono text-[10px] text-zinc-500">
+                  снимки на этой машине · {snaps.length} <span className="text-zinc-600">(~/.triad/backups, авто раз в день, хранится 14)</span>
+                  <button
+                    onClick={() =>
+                      void api
+                        .createSnapshot()
+                        .then(() => loadSnaps())
+                        .catch((e) => setRestoreMsg(`ошибка: ${(e as Error).message}`))
+                    }
+                    className="ml-auto rounded border border-line px-2 py-0.5 text-[10px] text-zinc-300 hover:border-acid hover:text-acid"
+                  >
+                    + снимок сейчас
+                  </button>
+                </div>
+                <div className="max-h-40 space-y-0.5 overflow-y-auto">
+                  {snaps.slice(0, 20).map((sn) => (
+                    <div key={sn.name} className="flex items-center gap-2 rounded border border-line/60 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                      <span className="truncate">{sn.name}</span>
+                      <span className="shrink-0 text-zinc-600">{Math.round(sn.bytes / 1024)} КБ</span>
+                      <button
+                        onClick={() => {
+                          if (!confirm(`Откатить комнату к снимку ${sn.name}? Применится при следующем запуске, текущая база останется рядом.`)) return
+                          void api
+                            .restoreSnapshot(sn.name)
+                            .then(() => {
+                              setRestoreMsg('Снимок подготовлен — перезапусти приложение.')
+                              onSaved()
+                            })
+                            .catch((e) => setRestoreMsg(`ошибка: ${(e as Error).message}`))
+                        }}
+                        disabled={!editable}
+                        className="ml-auto shrink-0 text-zinc-500 hover:text-acid disabled:opacity-40"
+                      >
+                        откатить
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (confirm('Удалить снимок?')) void api.deleteSnapshot(sn.name).then(loadSnaps)
+                        }}
+                        className="shrink-0 text-zinc-600 hover:text-magenta"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <div className="border-t border-line pt-3">

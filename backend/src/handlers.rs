@@ -68,7 +68,19 @@ impl FromRequestParts<AppState> for Room {
             }
             _ => {}
         }
-        let room_id = user.as_ref().map(telegram::room_id_for).unwrap_or_else(|| LOCAL_ROOM.to_string());
+        let requested = parts
+            .headers
+            .get("x-triad-room")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| parts.uri.query().and_then(|q| form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "room").map(|(_, v)| v.to_string())))
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
+        let room_id = match (&user, requested) {
+            (Some(u), _) => telegram::room_id_for(u),
+            (None, Some(r)) if r == LOCAL_ROOM || r.starts_with("yard_") => r,
+            _ => LOCAL_ROOM.to_string(),
+        };
         let app = state.for_room(&room_id).await?;
         let admin = user.as_ref().map(|u| state.cfg.telegram_admin_ids.contains(&u.id)).unwrap_or(false);
         let editable = state.cfg.allow_remote_settings || admin || loopback;
@@ -124,6 +136,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/messages/:id", axum::routing::patch(edit_message).delete(delete_message))
         .route("/api/llm/log", get(llm_log))
         .route("/api/organism", get(organism_state))
+        .route("/api/organism/audit", post(organism_audit))
+        .route("/api/proposals", get(list_proposals))
+        .route("/api/proposals/:id/accept", post(accept_proposal))
+        .route("/api/proposals/:id/reject", post(reject_proposal))
+        .route("/api/messages/:id/react", post(react_message))
+        .route("/api/dm/:agent", get(dm_history).post(dm_send))
+        .route("/api/dm", get(dm_overview))
+        .route("/api/rooms", get(rooms_list).post(rooms_create))
+        .route("/api/rooms/:id", axum::routing::patch(rooms_rename).delete(rooms_delete))
+        .route("/api/snapshots", get(snapshots_list).post(snapshots_create))
+        .route("/api/snapshots/:name/restore", post(snapshots_restore))
+        .route("/api/snapshots/:name", delete(snapshots_delete))
         .route("/api/organism/tend", post(organism_tend))
         .route("/api/organism/chronicle", post(organism_chronicle))
         .route("/api/backup.zip", get(backup_zip))
@@ -190,6 +214,8 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
         message_count: db::message_count(&app.db).await?,
         restore_pending: crate::backup::pending_info(&app.room_id),
         repo_dir: crate::selfupdate::find_repo_dir().map(|p| p.display().to_string()),
+        proposals: db::list_proposals(&app.db, Some("pending"), 30).await?,
+        vision: !s_feat.mock_mode() && app.catalog.supports_vision(s_feat.api_key.as_deref(), &s_feat.director_model).await,
         exe_path: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
         run_mode: crate::selfupdate::mode().into(),
         player_name: s_feat.get("PLAYER_NAME").map(str::to_string),
@@ -329,9 +355,10 @@ fn mask(v: &str) -> String {
     format!("{}…{}", v.chars().take(4).collect::<String>(), v.chars().skip(n - 3).collect::<String>())
 }
 
-async fn list_models(State(app): State<AppState>) -> AppResult<Json<Vec<crate::catalog::ModelInfo>>> {
+async fn list_models(State(app): State<AppState>) -> Json<Vec<crate::catalog::ModelInfo>> {
     let key = app.llm_settings().await.api_key;
-    Ok(Json(app.catalog.models(key.as_deref()).await?))
+    // Offline / blocked network must not break the settings UI: an empty catalog still lets you type an id.
+    Json(app.catalog.models(key.as_deref()).await.unwrap_or_default())
 }
 
 async fn get_settings(Room { app, editable, .. }: Room) -> Json<SettingsView> {
@@ -401,7 +428,11 @@ async fn chat(Room { app, editable, user }: Room, Json(req): Json<ChatRequest>) 
         _ => None,
     };
     // The line lands immediately — even mid-round, so the next beats see it in the transcript.
-    let msg = db::insert_message_full(&app.db, USER_ID, None, text, None, None, node_id.as_deref()).await?;
+    let reply_to = match req.reply_to {
+        Some(id) => db::get_message(&app.db, id).await?.map(|_| id),
+        None => None,
+    };
+    let msg = db::insert_message_in(&app.db, "", USER_ID, None, text, None, None, node_id.as_deref(), reply_to).await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
     crate::heartbeat::player_is_back(&app).await?;
     let turn = match app.turn_lock.try_lock() {
@@ -1195,6 +1226,158 @@ async fn organism_chronicle(Room { app, .. }: Room) -> AppResult<Json<serde_json
     Ok(Json(json!({ "id": id })))
 }
 
+// ───────────────────────────── Messenger: reactions, DMs ─────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ReactRequest {
+    emoji: String,
+}
+
+async fn react_message(Room { app, .. }: Room, Path(id): Path<i64>, Json(req): Json<ReactRequest>) -> AppResult<Json<crate::models::Message>> {
+    let emoji: String = req.emoji.trim().chars().take(4).collect();
+    if emoji.is_empty() {
+        return Err(AppError::bad_request("нужен emoji"));
+    }
+    let Some(m) = db::toggle_reaction(&app.db, id, &emoji, USER_ID).await? else { return Err(AppError::bad_request("нет такого сообщения")) };
+    let full = db::with_mentions(&app.db, vec![m]).await?.remove(0);
+    app.emit(RoomEvent::Message { message: full.clone() });
+    Ok(Json(full))
+}
+
+#[derive(serde::Deserialize)]
+struct DmQuery {
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn dm_history(Room { app, .. }: Room, Path(agent): Path<String>, Query(q): Query<DmQuery>) -> AppResult<Json<Vec<crate::models::Message>>> {
+    let agent = mermaid::safe_id(&agent);
+    Ok(Json(db::with_mentions(&app.db, db::channel_messages(&app.db, &agent, q.limit.unwrap_or(60).clamp(1, 200), q.before).await?).await?))
+}
+
+async fn dm_overview(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    let unread = db::dm_unread(&app.db).await?;
+    let agents = db::list_agents(&app.db).await?;
+    let mut out = vec![];
+    for a in agents {
+        let last = db::channel_messages(&app.db, &a.id, 1, None).await?.pop();
+        out.push(json!({ "agent": a.id, "unread": unread.iter().find(|(c, _)| c == &a.id).map(|(_, n)| *n).unwrap_or(0), "last": last }));
+    }
+    Ok(Json(json!({ "channels": out })))
+}
+
+/// A private line to one inhabitant: they answer alone (think → speak → tools), no Caster.
+async fn dm_send(Room { app, .. }: Room, Path(agent): Path<String>, Json(req): Json<ChatRequest>) -> AppResult<Json<Vec<crate::models::Message>>> {
+    let agent = mermaid::safe_id(&agent);
+    let agents = db::list_agents(&app.db).await?;
+    let Some(a) = agents.iter().find(|a| a.id == agent) else { return Err(AppError::bad_request("нет такого жителя")) };
+    if !a.is_alive() {
+        return Err(AppError::bad_request(format!("{} сейчас не отвечает", a.name)));
+    }
+    let text = req.message.trim();
+    if text.is_empty() || text.chars().count() > 4000 {
+        return Err(AppError::bad_request("пустое или слишком длинное"));
+    }
+    let msg = db::insert_message_in(&app.db, &agent, USER_ID, None, text, Some(&agent), None, None, req.reply_to).await?;
+    app.emit(RoomEvent::Message { message: msg.clone() });
+    let _turn = app.turn_lock.lock().await;
+    app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} отвечает лично…", a.name) });
+    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: None, library: None, pre: None, pre_records: vec![], channel: Some(agent.clone()), reply_to: Some(msg.id) };
+    let reply = agent_runner::run_agent(&app, &agent, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    app.emit(RoomEvent::Done);
+    Ok(Json(vec![msg, reply]))
+}
+
+// ───────────────────────────── Proposals ─────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ProposalsQuery {
+    status: Option<String>,
+}
+
+async fn list_proposals(Room { app, .. }: Room, Query(q): Query<ProposalsQuery>) -> AppResult<Json<Vec<crate::models::Proposal>>> {
+    Ok(Json(db::list_proposals(&app.db, q.status.as_deref(), 100).await?))
+}
+
+async fn accept_proposal(Room { app, .. }: Room, Path(id): Path<i64>) -> AppResult<Json<serde_json::Value>> {
+    let Some(p) = db::get_proposal(&app.db, id).await? else { return Err(AppError::bad_request("нет такого предложения")) };
+    if p.status != "pending" {
+        return Err(AppError::bad_request("уже решено"));
+    }
+    let result = crate::organism::apply_proposal(&app, &p).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    db::set_proposal_status(&app.db, id, "accepted").await?;
+    db::insert_event(&app.db, "proposal_accepted", &json!({ "id": id, "kind": p.kind, "agent": p.agent_id })).await?;
+    emit_graph(&app).await?;
+    app.emit(RoomEvent::Types { types: db::list_types(&app.db).await? });
+    app.emit(RoomEvent::Proposals { proposals: db::list_proposals(&app.db, Some("pending"), 30).await? });
+    Ok(Json(json!({ "ok": true, "result": result })))
+}
+
+async fn reject_proposal(Room { app, .. }: Room, Path(id): Path<i64>) -> AppResult<Json<serde_json::Value>> {
+    let Some(p) = db::get_proposal(&app.db, id).await? else { return Err(AppError::bad_request("нет такого предложения")) };
+    db::set_proposal_status(&app.db, id, "rejected").await?;
+    db::insert_event(&app.db, "proposal_rejected", &json!({ "id": id, "kind": p.kind, "agent": p.agent_id })).await?;
+    app.emit(RoomEvent::Proposals { proposals: db::list_proposals(&app.db, Some("pending"), 30).await? });
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn organism_audit(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    if app.turn_lock.try_lock().is_err() {
+        return Err(AppError::bad_request("идёт раунд — чуть позже"));
+    }
+    let _turn = app.turn_lock.lock().await;
+    let n = crate::organism::audit(&app).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    app.emit(RoomEvent::Done);
+    Ok(Json(json!({ "proposals": n })))
+}
+
+// ───────────────────────────── Rooms (local yards) & snapshots ─────────────────────────────
+
+async fn rooms_list(State(app): State<AppState>) -> AppResult<Json<Vec<crate::rooms::RoomInfo>>> {
+    Ok(Json(app.rooms.list_local().await?))
+}
+
+#[derive(serde::Deserialize)]
+struct RoomNameRequest {
+    name: String,
+}
+
+async fn rooms_create(State(app): State<AppState>, Json(req): Json<RoomNameRequest>) -> AppResult<Json<crate::rooms::RoomInfo>> {
+    Ok(Json(app.rooms.create_local(&req.name).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?))
+}
+
+async fn rooms_rename(State(app): State<AppState>, Path(id): Path<String>, Json(req): Json<RoomNameRequest>) -> AppResult<Json<Vec<crate::rooms::RoomInfo>>> {
+    app.rooms.rename_local(&id, &req.name).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(app.rooms.list_local().await?))
+}
+
+async fn rooms_delete(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Vec<crate::rooms::RoomInfo>>> {
+    app.rooms.delete_local(&id).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(app.rooms.list_local().await?))
+}
+
+async fn snapshots_list(Room { app, .. }: Room) -> AppResult<Json<Vec<crate::backup::SnapshotInfo>>> {
+    Ok(Json(crate::backup::list_snapshots(&app.room_id)?))
+}
+
+async fn snapshots_create(Room { app, .. }: Room) -> AppResult<Json<crate::backup::SnapshotInfo>> {
+    Ok(Json(crate::backup::snapshot(&app, "manual").await?))
+}
+
+async fn snapshots_restore(Room { app, editable, .. }: Room, Path(name): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    if !editable {
+        return Err(AppError::bad_request("только с машины, где запущено приложение"));
+    }
+    let bytes = crate::backup::read_snapshot(&app.room_id, &name).map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    let manifest = crate::backup::stage_restore(&app.room_id, &bytes).map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "staged": true, "manifest": manifest })))
+}
+
+async fn snapshots_delete(Room { app, .. }: Room, Path(name): Path<String>) -> AppResult<StatusCode> {
+    crate::backup::delete_snapshot(&app.room_id, &name).map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ───────────────────────────── Backup / restore ─────────────────────────────
 
 async fn backup_zip(Room { app, .. }: Room) -> AppResult<Response> {
@@ -1459,6 +1642,8 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
             library: library_text.as_deref(),
             pre: thoughts.get(i).cloned().flatten(),
             pre_records: std::mem::take(&mut pre_records),
+            channel: None,
+            reply_to: None,
         };
         match agent_runner::run_agent(app, &beat.speaker, plan_turn).await {
             Ok(m) => scene_so_far.push((name, m.content)),
@@ -1474,10 +1659,20 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
         let st = director::stakes(&agents, &last_user, &db::recent_messages(&app.db, 12).await?, &recent_sp, &[]);
         app.emit(RoomEvent::Status { stage: "agent".into(), detail: "остальные вставляют по слову…".into() });
         match director::chorus(app, &agents, &scene_so_far, &last_user, &main, &st).await {
-            Ok(lines) => {
-                for (sp, to, text) in lines {
+            Ok(out) => {
+                let recent = db::recent_messages(&app.db, 20).await?;
+                for (sp, emoji, on) in out.reactions {
+                    let target = recent.iter().rev().find(|m| m.sender_id == on);
+                    if let Some(t) = target {
+                        if let Some(m) = db::toggle_reaction(&app.db, t.id, &emoji, &sp).await? {
+                            app.emit(RoomEvent::Message { message: db::with_mentions(&app.db, vec![m]).await?.remove(0) });
+                        }
+                    }
+                }
+                for (sp, to, text) in out.lines {
                     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-                    let msg = db::insert_message_full(&app.db, &sp, None, &text, Some(&to), Some("вставка"), focus_node.as_deref()).await?;
+                    let reply_to = if to != "user" && to != "room" { recent.iter().rev().find(|m| m.sender_id == to).map(|m| m.id) } else { None };
+                    let msg = db::insert_message_in(&app.db, "", &sp, None, &text, Some(&to), Some("вставка"), focus_node.as_deref(), reply_to).await?;
                     app.emit(RoomEvent::Message { message: msg.clone() });
                     scene_so_far.push((prompts::sender_name(&sp, &agents), text));
                 }

@@ -78,6 +78,9 @@ async fn beat_all(root: &AppState) -> Result<()> {
             if let Err(e) = maybe_poll_feeds(&app).await {
                 tracing::warn!(room = %id, error = %e, "feed poll failed");
             }
+            if let Err(e) = maybe_snapshot(&app).await {
+                tracing::warn!(room = %id, error = %e, "snapshot failed");
+            }
         }
     }
     // Evening chronicle and file digestion don't need the player to be away — only budget.
@@ -136,6 +139,22 @@ async fn maybe_beat(app: &AppState) -> Result<()> {
     let has_news = !crate::integrations::feeds::fresh_news(app, 1).await.unwrap_or_default().is_empty();
     let needs_care = !crate::organism::needs_care(app, 1).await.unwrap_or_default().is_empty();
     let roll = rand::thread_rng().gen_range(0..100);
+    // Occasionally (and only when nothing is pending) the yard audits itself and asks you.
+    if roll >= 90 && db::list_proposals(&app.db, Some("pending"), 1).await.map(|p| p.is_empty()).unwrap_or(false) {
+        if app.turn_lock.try_lock().is_err() {
+            return Ok(());
+        }
+        let _turn = app.turn_lock.lock().await;
+        match crate::organism::audit(app).await {
+            Ok(n) if n > 0 => tracing::info!(room = %app.room_id, proposals = n, "heartbeat: audit"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "audit failed"),
+        }
+        drop(_turn);
+        db::meta_set(&app.db, "beats_while_away", &(beats_while_away + 1).to_string()).await?;
+        app.emit(RoomEvent::Done);
+        return Ok(());
+    }
     // Every third quiet beat (when there is something to tend) is care, not talk: one small call.
     if needs_care && roll < 33 {
         if app.turn_lock.try_lock().is_err() {
@@ -208,6 +227,21 @@ async fn notify_telegram(app: &AppState, after_id: i64) {
     if let Err(e) = client.post(format!("https://api.telegram.org/bot{token}/sendMessage")).json(&body).send().await {
         tracing::warn!(error = %e, "telegram push failed");
     }
+}
+
+/// One automatic snapshot per day (kept 14), independent of models and budget.
+pub async fn maybe_snapshot(app: &AppState) -> Result<()> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if db::meta_get(&app.db, "snapshot_date").await?.as_deref() == Some(today.as_str()) {
+        return Ok(());
+    }
+    if db::message_count(&app.db).await? < 3 {
+        return Ok(());
+    }
+    db::meta_set(&app.db, "snapshot_date", &today).await?;
+    let s = crate::backup::snapshot(app, "auto").await?;
+    tracing::info!(room = %app.room_id, name = %s.name, "daily snapshot");
+    Ok(())
 }
 
 /// Once a day after 20:00 local, if the day had any life: the yard writes its chronicle.

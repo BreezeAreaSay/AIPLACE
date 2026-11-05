@@ -1,6 +1,6 @@
 [package]
 name = "triad-canvas-backend"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "Triad Canvas — autonomous multi-agent cyberpsychology room (Axum backend, dual-target: local / Telegram Mini Apps)"
 
@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 pdf-extract = "0.7"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 form_urlencoded = "1"

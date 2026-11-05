@@ -130,6 +130,16 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             text       TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS proposals (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id   TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            payload    TEXT NOT NULL DEFAULT '{}',
+            reason     TEXT NOT NULL DEFAULT '',
+            status     TEXT NOT NULL DEFAULT 'pending',
+            message_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
         CREATE TABLE IF NOT EXISTS attachments (
             id         TEXT PRIMARY KEY,
             node_id    TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
@@ -165,6 +175,9 @@ pub async fn migrate(pool: &Db) -> Result<()> {
         ("messages", "move", "TEXT"),
         ("messages", "node_id", "TEXT"),
         ("messages", "actions", "TEXT NOT NULL DEFAULT '[]'"),
+        ("messages", "reply_to", "INTEGER"),
+        ("messages", "channel", "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "reactions", "TEXT NOT NULL DEFAULT '{}'"),
         ("graph_nodes", "body", "TEXT NOT NULL DEFAULT ''"),
         ("graph_nodes", "x", "REAL"),
         ("graph_nodes", "y", "REAL"),
@@ -588,13 +601,131 @@ pub async fn insert_message_full(
 /// Last `limit` messages in chronological order.
 pub async fn recent_messages(pool: &Db, limit: usize) -> Result<Vec<Message>> {
     let mut rows = sqlx::query_as::<_, Message>(
-        "SELECT * FROM messages ORDER BY id DESC LIMIT ?",
+        "SELECT * FROM messages WHERE channel = '' ORDER BY id DESC LIMIT ?",
     )
     .bind(limit as i64)
     .fetch_all(pool)
     .await?;
     rows.reverse();
     Ok(rows)
+}
+
+/// A private conversation with one inhabitant (newest `limit`, chronological).
+pub async fn channel_messages(pool: &Db, channel: &str, limit: usize, before: Option<i64>) -> Result<Vec<Message>> {
+    let mut rows = sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE channel = ? AND id < ? ORDER BY id DESC LIMIT ?")
+        .bind(channel)
+        .bind(before.unwrap_or(i64::MAX))
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Unread private lines per channel (agent lines after the player's last line in that channel).
+pub async fn dm_unread(pool: &Db) -> Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
+        "SELECT channel, COUNT(*) FROM messages m WHERE channel <> '' AND sender_id <> 'user'
+         AND id > COALESCE((SELECT MAX(id) FROM messages u WHERE u.channel = m.channel AND u.sender_id = 'user'), 0)
+         GROUP BY channel",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_message_in(pool: &Db, channel: &str, sender_id: &str, ego_thought: Option<&str>, content: &str, addressee: Option<&str>, mv: Option<&str>, node_id: Option<&str>, reply_to: Option<i64>) -> Result<Message> {
+    let res = sqlx::query("INSERT INTO messages (sender_id, ego_thought, content, addressee, \"move\", node_id, channel, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(sender_id)
+        .bind(ego_thought)
+        .bind(content)
+        .bind(addressee)
+        .bind(mv)
+        .bind(node_id)
+        .bind(channel)
+        .bind(reply_to)
+        .execute(pool)
+        .await?;
+    Ok(sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = ?").bind(res.last_insert_rowid()).fetch_one(pool).await?)
+}
+
+/// Toggle an emoji reaction by `who` on a message; returns the updated message.
+pub async fn toggle_reaction(pool: &Db, id: i64, emoji: &str, who: &str) -> Result<Option<Message>> {
+    let Some(m) = get_message(pool, id).await? else { return Ok(None) };
+    let mut map = m.reactions.0.clone();
+    let list = map.entry(emoji.to_string()).or_default();
+    if let Some(pos) = list.iter().position(|w| w == who) {
+        list.remove(pos);
+    } else {
+        list.push(who.to_string());
+    }
+    map.retain(|_, v| !v.is_empty());
+    sqlx::query("UPDATE messages SET reactions = ? WHERE id = ?").bind(serde_json::to_string(&map)?).bind(id).execute(pool).await?;
+    get_message(pool, id).await
+}
+
+// ───────────────────────────── Proposals ─────────────────────────────
+
+pub async fn insert_proposal(pool: &Db, agent_id: &str, kind: &str, payload: &serde_json::Value, reason: &str, message_id: Option<i64>) -> Result<i64> {
+    let res = sqlx::query("INSERT INTO proposals (agent_id, kind, payload, reason, message_id) VALUES (?, ?, ?, ?, ?)")
+        .bind(agent_id)
+        .bind(kind)
+        .bind(payload.to_string())
+        .bind(reason)
+        .bind(message_id)
+        .execute(pool)
+        .await?;
+    Ok(res.last_insert_rowid())
+}
+
+pub async fn list_proposals(pool: &Db, status: Option<&str>, limit: usize) -> Result<Vec<crate::models::Proposal>> {
+    Ok(match status {
+        Some(st) => sqlx::query_as::<_, crate::models::Proposal>("SELECT * FROM proposals WHERE status = ? ORDER BY id DESC LIMIT ?").bind(st).bind(limit as i64).fetch_all(pool).await?,
+        None => sqlx::query_as::<_, crate::models::Proposal>("SELECT * FROM proposals ORDER BY id DESC LIMIT ?").bind(limit as i64).fetch_all(pool).await?,
+    })
+}
+
+pub async fn get_proposal(pool: &Db, id: i64) -> Result<Option<crate::models::Proposal>> {
+    Ok(sqlx::query_as::<_, crate::models::Proposal>("SELECT * FROM proposals WHERE id = ?").bind(id).fetch_optional(pool).await?)
+}
+
+pub async fn set_proposal_status(pool: &Db, id: i64, status: &str) -> Result<()> {
+    sqlx::query("UPDATE proposals SET status = ? WHERE id = ?").bind(status).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn set_proposal_message(pool: &Db, id: i64, message_id: i64) -> Result<()> {
+    sqlx::query("UPDATE proposals SET message_id = ? WHERE id = ?").bind(message_id).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// Fold `src` into `dst`: relations, mentions, attachments, notes move over; body is appended;
+/// empty props are filled; `src` is archived (nothing is deleted).
+pub async fn merge_objects(pool: &Db, src: &str, dst: &str) -> Result<()> {
+    if src == dst {
+        return Ok(());
+    }
+    let (Some(s), Some(d)) = (get_node(pool, src).await?, get_node(pool, dst).await?) else { anyhow::bail!("нет такого объекта") };
+    sqlx::query("UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?").bind(dst).bind(src).execute(pool).await?;
+    sqlx::query("UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?").bind(dst).bind(src).execute(pool).await?;
+    sqlx::query("DELETE FROM graph_edges WHERE source_id = target_id").execute(pool).await?;
+    sqlx::query("UPDATE OR IGNORE mentions SET object_id = ? WHERE object_id = ?").bind(dst).bind(src).execute(pool).await?;
+    sqlx::query("UPDATE attachments SET node_id = ? WHERE node_id = ?").bind(dst).bind(src).execute(pool).await?;
+    sqlx::query("UPDATE node_notes SET node_id = ? WHERE node_id = ?").bind(dst).bind(src).execute(pool).await?;
+    let mut props = d.props.0.clone();
+    if let (Some(dp), Some(sp)) = (props.as_object_mut(), s.props.0.as_object()) {
+        for (k, v) in sp {
+            let empty = dp.get(k).map(|x| x.is_null() || x.as_str() == Some("")).unwrap_or(true);
+            if empty && !v.is_null() {
+                dp.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    let body = if s.body.trim().is_empty() { d.body.clone() } else { crate::markdown::append_section(&d.body, Some(&format!("Из «{}»", s.label)), &s.body) };
+    update_node_fields(pool, dst, None, Some(&body), None, None).await?;
+    update_object_meta(pool, dst, None, Some(&props), None).await?;
+    update_object_meta(pool, src, None, None, Some(true)).await?;
+    Ok(())
 }
 
 /// Page backwards: messages with id < before, newest first → returned oldest first.

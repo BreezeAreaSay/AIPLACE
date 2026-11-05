@@ -144,3 +144,69 @@ pub fn cancel_pending(room_id: &str) {
 
 #[allow(dead_code)]
 fn _p(_: &Path) {}
+
+// ───────────────────────────── Snapshots (server-side) ─────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapshotInfo {
+    pub name: String,
+    pub bytes: u64,
+    pub created_at: String,
+    pub kind: String,
+}
+
+pub fn snapshots_dir(room_id: &str) -> PathBuf {
+    config::triad_home().join("backups").join(crate::mermaid::safe_id(room_id))
+}
+
+/// Write a zip into `~/.triad/backups/<room>/`, keep the newest 14 automatic ones.
+pub async fn snapshot(app: &AppState, kind: &str) -> Result<SnapshotInfo> {
+    let bytes = make_zip(app).await?;
+    let dir = snapshots_dir(&app.room_id);
+    std::fs::create_dir_all(&dir)?;
+    let name = format!("{}-{}.zip", chrono::Local::now().format("%Y%m%d-%H%M%S"), kind);
+    std::fs::write(dir.join(&name), &bytes)?;
+    if kind == "auto" {
+        let mut autos: Vec<_> = list_snapshots(&app.room_id)?.into_iter().filter(|s| s.kind == "auto").collect();
+        autos.sort_by(|a, b| b.name.cmp(&a.name));
+        for old in autos.into_iter().skip(14) {
+            let _ = std::fs::remove_file(dir.join(&old.name));
+        }
+    }
+    Ok(SnapshotInfo { name, bytes: bytes.len() as u64, created_at: chrono::Utc::now().to_rfc3339(), kind: kind.into() })
+}
+
+pub fn list_snapshots(room_id: &str) -> Result<Vec<SnapshotInfo>> {
+    let dir = snapshots_dir(room_id);
+    let mut out = vec![];
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".zip") {
+                continue;
+            }
+            let meta = e.metadata()?;
+            let created = meta.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()).unwrap_or_default();
+            let kind = name.trim_end_matches(".zip").rsplit('-').next().unwrap_or("manual").to_string();
+            out.push(SnapshotInfo { name, bytes: meta.len(), created_at: created, kind });
+        }
+    }
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(out)
+}
+
+fn safe_snapshot_name(name: &str) -> Result<String> {
+    anyhow::ensure!(name.ends_with(".zip") && !name.contains('/') && !name.contains('\\') && !name.contains(".."), "плохое имя снимка");
+    Ok(name.to_string())
+}
+
+pub fn read_snapshot(room_id: &str, name: &str) -> Result<Vec<u8>> {
+    let name = safe_snapshot_name(name)?;
+    Ok(std::fs::read(snapshots_dir(room_id).join(name))?)
+}
+
+pub fn delete_snapshot(room_id: &str, name: &str) -> Result<()> {
+    let name = safe_snapshot_name(name)?;
+    std::fs::remove_file(snapshots_dir(room_id).join(name))?;
+    Ok(())
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Archive, Check, Copy, Download, Eye, Files, Github, Leaf, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import { Archive, BookOpen, Check, Copy, Download, Eye, Files, Github, Leaf, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
 import type { Agent, Attachment, Features, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
@@ -43,6 +43,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
   const [editing, setEditing] = useState(() => !node.body.trim())
   const [saved, setSaved] = useState<'idle' | 'dirty' | 'saved'>('idle')
   const [copied, setCopied] = useState(false)
+  const [reading, setReading] = useState(false)
   const [myNote, setMyNote] = useState('')
   const [question, setQuestion] = useState('')
   const [backlinks, setBacklinks] = useState<Message[]>([])
@@ -71,6 +72,13 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
       lastSent.current.label = node.label
     }
   }, [node.body, node.label, editing])
+
+  useEffect(() => {
+    if (!reading) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setReading(false)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [reading])
 
   useEffect(() => {
     let alive = true
@@ -158,6 +166,30 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
 
   return (
     <div className="flex h-full w-full flex-col bg-void">
+      {reading && (
+        <div className="fixed inset-0 z-[60] overflow-y-auto bg-void/98 px-4 py-8" onClick={() => setReading(false)}>
+          <div className="mx-auto max-w-[76ch]" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-6 flex items-start gap-3">
+              <span className="text-2xl" style={{ color: type?.color }}>
+                {type?.icon ?? '◇'}
+              </span>
+              <div className="min-w-0 flex-1">
+                <h1 className="text-2xl font-semibold leading-tight text-zinc-50">{node.label}</h1>
+                {typeof node.props.summary === 'string' && node.props.summary.trim() && <div className="mt-1 text-sm italic text-zinc-400">{node.props.summary}</div>}
+                <div className="mt-1 font-mono text-[10px] text-zinc-600">
+                  {type?.name} · {name(node.created_by)} · {wordCount(body)} слов · Esc — закрыть
+                </div>
+              </div>
+              <button onClick={() => setReading(false)} className="rounded p-1 text-zinc-500 hover:text-zinc-200" aria-label="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="text-[15px]">
+              <Markdown text={body} nodes={graph.nodes} types={types} onOpen={(id) => { setReading(false); onSelect(id) }} onChange={changeBody} />
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
         <span className="text-base" style={{ color: type?.color }} title={type?.name}>
           {type?.icon ?? '◇'}
@@ -177,6 +209,9 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           </button>
           <button onClick={() => (editing ? finish() : setEditing(true))} className={`rounded p-1 hover:text-zinc-200 ${editing ? 'text-acid' : 'text-zinc-500'}`} title={editing ? 'Готово — показать (Ctrl+Enter)' : 'Редактировать'}>
             {editing ? <Eye size={14} /> : <Pencil size={14} />}
+          </button>
+          <button onClick={() => setReading(true)} className={iconBtn} title="Режим чтения">
+            <BookOpen size={14} />
           </button>
           <button onClick={() => void copy()} className={iconBtn} title="Скопировать как markdown">
             {copied ? <Check size={14} className="text-acid" /> : <Copy size={14} />}
@@ -224,6 +259,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
             placeholder="Заголовок"
             aria-label="Заголовок"
           />
+          {typeof node.props.summary === 'string' && node.props.summary.trim() && !editing && <div className="mt-0.5 text-[12px] italic text-zinc-400">{node.props.summary}</div>}
           <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-zinc-600">
             <span>{node.id}</span>
             <span>·</span>

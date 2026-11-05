@@ -11,9 +11,11 @@ interface Props {
   relations: Relation[]
   messages: Message[]
   onClose: () => void
+  onDm?: () => void
+  dmUnread?: number
 }
 
-export function AgentProfile({ agent, agents, memory, relations, messages, onClose }: Props) {
+export function AgentProfile({ agent, agents, memory, relations, messages, onClose, onDm, dmUnread = 0 }: Props) {
   const dead = agent.hp <= 0
   const color = dead ? '#55565f' : agent.color
   const thoughts = messages.filter((m) => m.sender_id === agent.id && m.ego_thought).slice(-4).reverse()
@@ -29,6 +31,11 @@ export function AgentProfile({ agent, agents, memory, relations, messages, onClo
             <div className="text-xs text-zinc-500">{agent.archetype}</div>
             {agent.inner_state && <div className="mt-1 text-sm italic text-zinc-300">«{agent.inner_state}»</div>}
           </div>
+          {onDm && (
+            <button onClick={onDm} className="flex items-center gap-1 rounded border border-line px-2 py-1 font-mono text-[11px] text-zinc-300 hover:border-acid hover:text-acid" title="Личные сообщения">
+              ✉ лично{dmUnread > 0 ? ` · ${dmUnread}` : ''}
+            </button>
+          )}
           <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:text-zinc-200" aria-label="Закрыть">
             <X size={16} />
           </button>

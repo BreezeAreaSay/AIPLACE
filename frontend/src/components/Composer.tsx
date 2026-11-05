@@ -7,7 +7,7 @@ import { api } from '../api'
 interface Props {
   disabled: boolean
   types: ObjectType[]
-  onSend: (text: string, nodeId?: string | null) => void
+  onSend: (text: string, nodeId?: string | null, replyTo?: number | null) => void
   onTick: () => void
   showEgo: boolean
   onToggleEgo: () => void
@@ -19,6 +19,8 @@ interface Props {
   features: Features
   /** Upload files as objects; returns their titles for [[links]]. */
   onAttach: (files: File[]) => Promise<string[]>
+  replyTo: { id: number; who: string; text: string } | null
+  onClearReply: () => void
 }
 
 type SR = { start: () => void; stop: () => void; lang: string; interimResults: boolean; continuous: boolean; onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null }
@@ -49,7 +51,7 @@ function parseCommand(text: string): { cmd: Command; arg: string } | null {
   return cmd ? { cmd, arg: m[2].trim() } : null
 }
 
-export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo, contextNode, onClearContext, onCapture, onSearch, features, onAttach }: Props) {
+export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo, contextNode, onClearContext, onCapture, onSearch, features, onAttach, replyTo, onClearReply }: Props) {
   const fileInput = useRef<HTMLInputElement>(null)
   const [rec, setRec] = useState<'off' | 'rec' | 'busy'>('off')
   const recorder = useRef<MediaRecorder | null>(null)
@@ -156,8 +158,9 @@ export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo
       setText('')
       return
     }
-    onSend(t, contextNode?.id ?? null)
+    onSend(t, contextNode?.id ?? null, replyTo?.id ?? null)
     setText('')
+    onClearReply()
   }
 
   return (
@@ -167,6 +170,16 @@ export function Composer({ disabled, types, onSend, onTick, showEgo, onToggleEgo
           <span>говорим про объект</span>
           <span className="truncate text-zinc-200">◇ {contextNode.label}</span>
           <button onClick={onClearContext} className="ml-auto text-zinc-500 hover:text-zinc-200" aria-label="Сбросить контекст">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+      {replyTo && (
+        <div className="mb-2 flex items-center gap-2 rounded border border-line bg-panel px-2 py-1 font-mono text-[10px] text-zinc-400">
+          <span>в ответ</span>
+          <span className="text-zinc-200">{replyTo.who}:</span>
+          <span className="truncate text-zinc-400">{replyTo.text}</span>
+          <button onClick={onClearReply} className="ml-auto text-zinc-500 hover:text-zinc-200" aria-label="Не отвечать">
             <X size={12} />
           </button>
         </div>
