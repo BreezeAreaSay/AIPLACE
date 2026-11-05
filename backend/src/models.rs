@@ -22,12 +22,89 @@ pub struct Agent {
     /// One line in character, written by the Director each round (what the UI shows instead of numbers).
     #[serde(default)]
     pub inner_state: String,
+    /// Avatar glyph (one or two characters).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub glyph: String,
+    /// Per-character model override (empty → the room's model).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub model: String,
+    /// Per-character TTS voice (empty → default by role).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub voice: String,
+    /// Role preset id this character was invited from.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub role: String,
+    /// 0 = moved out of the yard (history stays, no new lines).
+    #[serde(default = "one")]
+    #[sqlx(default)]
+    pub active: i64,
+}
+
+fn one() -> i64 {
+    1
 }
 
 impl Agent {
     pub fn is_alive(&self) -> bool {
-        self.hp > 0
+        self.hp > 0 && self.active != 0
     }
+    pub fn glyph_or_initial(&self) -> String {
+        if !self.glyph.trim().is_empty() {
+            return self.glyph.clone();
+        }
+        self.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentCreateRequest {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub archetype: Option<String>,
+    #[serde(default)]
+    pub system_core: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub glyph: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub agenda: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentPatchRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub archetype: Option<String>,
+    #[serde(default)]
+    pub system_core: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub glyph: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub agenda: Option<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    /// Bring a dead character back (hp → 60).
+    #[serde(default)]
+    pub revive: bool,
 }
 
 // ───────────────────────────── Messages ─────────────────────────────

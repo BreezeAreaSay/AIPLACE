@@ -10,7 +10,10 @@ const DEFAULT_TTS: &str = "https://api.openai.com/v1/audio/speech";
 const DEFAULT_STT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 
 /// `physicist=onyx,lit_teacher=nova,graffiti=echo` → voice for an agent (default alloy).
-pub fn voice_for(s: &LlmSettings, agent_id: &str) -> String {
+pub fn voice_for(s: &LlmSettings, agent_id: &str, override_voice: &str) -> String {
+    if !override_voice.trim().is_empty() {
+        return override_voice.trim().to_string();
+    }
     s.get("TTS_VOICES")
         .and_then(|m| m.split([',', ';']).filter_map(|kv| kv.split_once('=')).find(|(k, _)| k.trim() == agent_id).map(|(_, v)| v.trim().to_string()))
         .unwrap_or_else(|| match agent_id {
@@ -21,11 +24,11 @@ pub fn voice_for(s: &LlmSettings, agent_id: &str) -> String {
         })
 }
 
-pub async fn tts(s: &LlmSettings, text: &str, agent_id: &str) -> Result<(Vec<u8>, String)> {
+pub async fn tts(s: &LlmSettings, text: &str, agent_id: &str, override_voice: &str) -> Result<(Vec<u8>, String)> {
     anyhow::ensure!(s.tts_enabled(), "TTS не настроен");
     let url = s.get("TTS_URL").unwrap_or(DEFAULT_TTS);
     let model = s.get("TTS_MODEL").unwrap_or("tts-1");
-    let mut req = http().post(url).json(&serde_json::json!({ "model": model, "input": crate::mermaid::truncate_chars(text, 2000), "voice": voice_for(s, agent_id), "response_format": "mp3" }));
+    let mut req = http().post(url).json(&serde_json::json!({ "model": model, "input": crate::mermaid::truncate_chars(text, 2000), "voice": voice_for(s, agent_id, override_voice), "response_format": "mp3" }));
     if let Some(k) = s.get("TTS_API_KEY") {
         req = req.bearer_auth(k);
     }

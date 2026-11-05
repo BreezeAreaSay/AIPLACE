@@ -22,6 +22,7 @@ pub mod models;
 pub mod openrouter;
 pub mod pipeline;
 pub mod prompts;
+pub mod roles;
 pub mod rooms;
 pub mod state;
 pub mod telegram;

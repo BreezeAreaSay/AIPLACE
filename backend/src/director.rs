@@ -167,7 +167,7 @@ async fn apply_relations(app: &AppState, out: &DirectorOutput, agents: &[Agent])
         if a == b || a == "user" || b == "user" || !agents.iter().any(|x| x.id == a) || !agents.iter().any(|x| x.id == b) {
             continue;
         }
-        let (a, b) = db::order_pair(a, b);
+        let (a, b) = db::order_pair(&a, &b);
         let base = current
             .iter()
             .find(|r| r.a_id == a && r.b_id == b)
@@ -316,7 +316,7 @@ async fn apply_inner_states(app: &AppState, out: &DirectorOutput, agents: &[Agen
         if id == "user" || state.is_empty() || !agents.iter().any(|a| a.id == id) {
             continue;
         }
-        db::update_agent_inner_state(&app.db, id, &mermaid::truncate_chars(state, 200)).await?;
+        db::update_agent_inner_state(&app.db, &id, &mermaid::truncate_chars(state, 200)).await?;
     }
     Ok(())
 }
@@ -347,7 +347,7 @@ async fn apply_agendas(app: &AppState, out: &DirectorOutput, agents: &[Agent]) -
         if id == "user" || agenda.is_empty() || !agents.iter().any(|a| a.id == id) {
             continue;
         }
-        db::update_agent_agenda(&app.db, id, &mermaid::truncate_chars(agenda, 400)).await?;
+        db::update_agent_agenda(&app.db, &id, &mermaid::truncate_chars(agenda, 400)).await?;
     }
     Ok(())
 }
@@ -406,7 +406,7 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
             &id,
             &label,
             mermaid::normalize_node_type(&n.node_type),
-            mermaid::normalize_author(&n.author),
+            &mermaid::normalize_author(&n.author),
             body.as_deref(),
             None,
             None,
@@ -434,12 +434,12 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
             if !db::node_exists(&app.db, id).await? {
                 // The director referenced a node it forgot to declare — materialize it.
                 let label = mermaid::sanitize_label(&raw.replace('_', " "));
-                db::upsert_node(&app.db, id, &label, "concept", author).await?;
+                db::upsert_node(&app.db, id, &label, "concept", &author).await?;
             }
         }
         let label = mermaid::sanitize_label(&e.label);
         let label = if label == "…" { String::new() } else { mermaid::truncate_chars(&label, 30) };
-        db::insert_edge(&app.db, &from, &to, &label, author).await?;
+        db::insert_edge(&app.db, &from, &to, &label, &author).await?;
     }
     db::place_unpositioned_nodes(&app.db).await?;
     Ok(())

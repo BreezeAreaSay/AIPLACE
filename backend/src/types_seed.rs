@@ -155,7 +155,7 @@ pub fn seeds() -> Vec<TypeSeed> {
             name: "Лента",
             icon: "📡",
             color: "#5eead4",
-            schema: json!({ "props": [p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), json!({ "key": "owner", "label": "Кто читает", "kind": "select", "options": ["physicist", "lit_teacher", "graffiti"] }), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
+            schema: json!({ "props": [p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), p("owner", "Кто читает (id персонажа)", "text"), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
         },
     ]
 }

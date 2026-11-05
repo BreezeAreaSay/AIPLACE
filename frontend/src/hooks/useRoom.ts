@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, subscribeEvents } from '../api'
-import type { Message, RoomEvent, RoomState } from '../types'
+import { registerAgents, type Message, type RoomEvent, type RoomState } from '../types'
 
 export type Busy = { stage: string; detail: string } | null
 
@@ -24,6 +24,7 @@ export function useRoom() {
   const refresh = useCallback(async () => {
     try {
       const s = await api.state()
+      registerAgents(s.agents)
       setState(s)
       setError(null)
       setGate(null)
@@ -69,6 +70,7 @@ export function useRoom() {
           setState((s) => (s ? { ...s, last_director: ev.entry } : s))
           break
         case 'agents':
+          registerAgents(ev.agents)
           setState((s) => (s ? { ...s, agents: ev.agents } : s))
           break
         case 'graph':
@@ -168,6 +170,8 @@ export function useRoom() {
     autofill: (id: string, kind?: string, query?: string) => api.autofill(id, kind, query).then((r) => (void refresh(), r)),
     githubInto: (id: string) => api.githubInto(id).then((r) => (void refresh(), r)),
     pollFeeds: () => api.pollFeeds().then((r) => (void refresh(), r)),
+    createAgent: (body: Parameters<typeof api.createAgent>[0]) => api.createAgent(body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),
+    patchAgent: (id: string, body: Parameters<typeof api.patchAgent>[1]) => api.patchAgent(id, body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),
     createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),
     patchNode: (id: string, patch: Parameters<typeof api.patchNode>[1]) => {
       // optimistic local update so the panel feels instant

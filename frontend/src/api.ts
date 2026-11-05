@@ -1,4 +1,4 @@
-import type { Attachment, GraphNode, Message, ObjectType, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
+import type { Agent, Attachment, GraphNode, Message, ObjectType, RolePreset, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
 import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
@@ -116,6 +116,11 @@ export const api = {
   },
   stt: (blob: Blob) => upload<{ text: string }>('/api/stt', [new File([blob], 'voice.webm', { type: blob.type || 'audio/webm' })]),
   pollFeeds: () => request<{ created: number }>('/api/feeds/poll', { method: 'POST', body: '{}' }),
+  roles: () => request<RolePreset[]>('/api/roles'),
+  createAgent: (body: { role?: string; name?: string; archetype?: string; system_core?: string; color?: string; glyph?: string; model?: string; voice?: string; agenda?: string }) =>
+    request<Agent[]>('/api/agents', { method: 'POST', body: JSON.stringify(body) }),
+  patchAgent: (id: string, body: { name?: string; archetype?: string; system_core?: string; color?: string; glyph?: string; model?: string; voice?: string; agenda?: string; active?: boolean; revive?: boolean }) =>
+    request<Agent[]>(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   health: () => request<Health>('/api/health'),
   state: () => request<RoomState>('/api/state'),
   chat: (message: string, nodeId?: string | null) =>

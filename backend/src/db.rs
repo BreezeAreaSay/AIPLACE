@@ -156,6 +156,11 @@ pub async fn migrate(pool: &Db) -> Result<()> {
     // Additive column migrations for rooms created by earlier versions.
     for (table, col, ddl) in [
         ("agents", "inner_state", "TEXT NOT NULL DEFAULT ''"),
+        ("agents", "glyph", "TEXT NOT NULL DEFAULT ''"),
+        ("agents", "model", "TEXT NOT NULL DEFAULT ''"),
+        ("agents", "voice", "TEXT NOT NULL DEFAULT ''"),
+        ("agents", "role", "TEXT NOT NULL DEFAULT ''"),
+        ("agents", "active", "INTEGER NOT NULL DEFAULT 1"),
         ("messages", "addressee", "TEXT"),
         ("messages", "move", "TEXT"),
         ("messages", "node_id", "TEXT"),
@@ -174,6 +179,10 @@ pub async fn migrate(pool: &Db) -> Result<()> {
         add_column_if_missing(pool, table, col, ddl).await?;
     }
     seed_types(pool).await?;
+    // Older rooms: give the original three their glyph and role id.
+    for (id, glyph) in [("physicist", "Σ"), ("lit_teacher", "Ѣ"), ("graffiti", "☣")] {
+        sqlx::query("UPDATE agents SET glyph = ?, role = ? WHERE id = ? AND glyph = ''").bind(glyph).bind(id).bind(id).execute(pool).await?;
+    }
     // Pre-0.6 boards: derive the object type from the coarse node_type.
     sqlx::query("UPDATE graph_nodes SET type_id = CASE node_type WHEN 'task' THEN 'task' WHEN 'concept' THEN 'idea' ELSE 'note' END WHERE type_id = ''")
         .execute(pool)
@@ -359,6 +368,10 @@ pub async fn seed_if_empty(pool: &Db) -> Result<()> {
     )
     .await?;
     insert_event(pool, "room_opened", &serde_json::json!({})).await?;
+    for (id, glyph) in [("physicist", "Σ"), ("lit_teacher", "Ѣ"), ("graffiti", "☣")] {
+        sqlx::query("UPDATE agents SET glyph = ?, role = ? WHERE id = ?").bind(glyph).bind(id).bind(id).execute(pool).await?;
+    }
+    ensure_relations(pool).await?;
     seed_own_projects(pool).await?;
     Ok(())
 }
@@ -432,6 +445,69 @@ pub async fn list_agents(pool: &Db) -> Result<Vec<Agent>> {
     Ok(sqlx::query_as::<_, Agent>("SELECT * FROM agents ORDER BY rowid")
         .fetch_all(pool)
         .await?)
+}
+
+/// Invite a character into the yard. Returns the new id.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_agent(pool: &Db, id: &str, name: &str, archetype: &str, core: &str, color: &str, glyph: &str, role: &str, model: &str, voice: &str, agenda: &str, dopamine: i64, respect: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO agents (id, name, archetype, system_core, hp, dopamine, current_agenda, respect_user, color, glyph, role, model, voice, active)
+         VALUES (?, ?, ?, ?, 100, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(archetype)
+    .bind(core)
+    .bind(dopamine)
+    .bind(agenda)
+    .bind(respect)
+    .bind(color)
+    .bind(glyph)
+    .bind(role)
+    .bind(model)
+    .bind(voice)
+    .execute(pool)
+    .await?;
+    ensure_relations(pool).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_agent_profile(pool: &Db, id: &str, name: Option<&str>, archetype: Option<&str>, core: Option<&str>, color: Option<&str>, glyph: Option<&str>, model: Option<&str>, voice: Option<&str>, agenda: Option<&str>, active: Option<bool>) -> Result<()> {
+    sqlx::query(
+        "UPDATE agents SET name = COALESCE(?, name), archetype = COALESCE(?, archetype), system_core = COALESCE(?, system_core), color = COALESCE(?, color),
+         glyph = COALESCE(?, glyph), model = COALESCE(?, model), voice = COALESCE(?, voice), current_agenda = COALESCE(?, current_agenda), active = COALESCE(?, active) WHERE id = ?",
+    )
+    .bind(name)
+    .bind(archetype)
+    .bind(core)
+    .bind(color)
+    .bind(glyph)
+    .bind(model)
+    .bind(voice)
+    .bind(agenda)
+    .bind(active.map(|a| a as i64))
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn revive_agent(pool: &Db, id: &str) -> Result<()> {
+    sqlx::query("UPDATE agents SET hp = 60, dopamine = 50, active = 1 WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// Every pair of characters has a relation row (new neighbours start neutral).
+pub async fn ensure_relations(pool: &Db) -> Result<()> {
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM agents ORDER BY rowid").fetch_all(pool).await?;
+    for (i, a) in ids.iter().enumerate() {
+        for b in ids.iter().skip(i + 1) {
+            let (x, y) = order_pair(a, b);
+            sqlx::query("INSERT OR IGNORE INTO relations (a_id, b_id, affinity, label) VALUES (?, ?, 0, 'только познакомились')").bind(x).bind(y).execute(pool).await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn update_agent_stats(

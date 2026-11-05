@@ -111,7 +111,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         types: &types,
         relevant: &relevant,
     };
-    let model = settings.model.clone();
+    let model = if agent.model.trim().is_empty() { settings.model.clone() } else { agent.model.trim().to_string() };
     let (ego, speech) = if app.cfg.agent_mode == "single" {
         let msgs = [
             ChatMessage::system(prompts::agent_system(&ctx)),
@@ -454,7 +454,8 @@ fn silence_line(agent_id: &str) -> String {
     match agent_id {
         "physicist" => "…(Аркадий Борисович хмуро смотрит на мигающую лампу и молчит. Помехи.)".into(),
         "lit_teacher" => "…(Софья Генриховна поджимает губы: связь с комнатой прервалась на самом интересном месте.)".into(),
-        _ => "…(Кэп стучит по рации: «алло, база, палево, сигнал пропал».)".into(),
+        "graffiti" => "…(Кэп стучит по рации: «алло, база, палево, сигнал пропал».)".into(),
+        _ => "…(молчит: связь с комнатой на секунду пропала)".into(),
     }
 }
 

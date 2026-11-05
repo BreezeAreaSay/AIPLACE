@@ -24,7 +24,7 @@ use crate::{
     memory, mermaid,
     models::{
         AskNodeRequest, ChatRequest, CreateEdgeRequest, CreateNodeRequest, CreateTypeRequest, Graph, NoteRequest, PatchNodeRequest,
-        ImportReport, ImportRequest, ResolveContractRequest, RoomEvent, UpdateTypeRequest, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
+        AgentCreateRequest, AgentPatchRequest, ImportReport, ImportRequest, ResolveContractRequest, RoomEvent, UpdateTypeRequest, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
     },
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
@@ -118,6 +118,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tts", post(tts))
         .route("/api/stt", post(stt))
         .route("/api/feeds/poll", post(poll_feeds))
+        .route("/api/roles", get(list_roles))
+        .route("/api/agents", post(create_agent))
+        .route("/api/agents/:id", axum::routing::patch(patch_agent).delete(retire_agent))
         .layer(DefaultBodyLimit::max(60 * 1024 * 1024))
         .with_state(state)
 }
@@ -213,7 +216,7 @@ async fn mcp_rpc(
             "protocolVersion": params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("2025-03-26"),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "triad-canvas", "version": crate::update::VERSION },
-            "instructions": crate::tools::system_brief(),
+            "instructions": crate::tools::system_brief(db::list_agents(&app.db).await.map(|a| a.iter().filter(|x| x.is_alive()).count().saturating_sub(1)).unwrap_or(2)),
         }),
         "notifications/initialized" | "initialized" => return StatusCode::ACCEPTED.into_response(),
         "ping" => json!({}),
@@ -992,7 +995,9 @@ struct TtsRequest {
 
 async fn tts(Room { app, .. }: Room, Json(req): Json<TtsRequest>) -> AppResult<Response> {
     let s = app.llm_settings().await;
-    let (bytes, ct) = crate::integrations::speech::tts(&s, &req.text, req.agent.as_deref().unwrap_or("")).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    let agent_id = req.agent.clone().unwrap_or_default();
+    let voice = db::list_agents(&app.db).await?.into_iter().find(|a| a.id == agent_id).map(|a| a.voice).unwrap_or_default();
+    let (bytes, ct) = crate::integrations::speech::tts(&s, &req.text, &agent_id, &voice).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
     Ok(([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "no-store".to_string())], bytes).into_response())
 }
 
@@ -1010,6 +1015,101 @@ async fn poll_feeds(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>
     db::meta_set(&app.db, "feeds_last_poll", &chrono::Utc::now().to_rfc3339()).await?;
     emit_graph(&app).await?;
     Ok(Json(json!({ "created": n })))
+}
+
+// ───────────────────────────── Двор: the cast ─────────────────────────────
+
+async fn list_roles() -> Json<Vec<crate::roles::RolePreset>> {
+    Json(crate::roles::presets())
+}
+
+async fn emit_agents(app: &AppState) -> anyhow::Result<()> {
+    app.emit(RoomEvent::Agents { agents: db::list_agents(&app.db).await? });
+    Ok(())
+}
+
+/// Invite a character: from a role preset (with optional overrides) or fully custom.
+async fn create_agent(Room { app, .. }: Room, Json(req): Json<AgentCreateRequest>) -> AppResult<Json<Vec<crate::models::Agent>>> {
+    let preset = req.role.as_deref().and_then(crate::roles::find);
+    let name = req.name.as_deref().map(str::trim).filter(|n| n.chars().count() >= 2).map(str::to_string).or_else(|| preset.as_ref().map(|p| p.name.to_string()));
+    let Some(name) = name else { return Err(AppError::bad_request("нужно имя (или роль из пресетов)")) };
+    let core = req.system_core.as_deref().map(str::trim).filter(|c| c.chars().count() >= 40).map(str::to_string).or_else(|| preset.as_ref().map(|p| p.core.to_string()));
+    let Some(core) = core else { return Err(AppError::bad_request("нужно описание характера (system_core, от 40 символов) или роль")) };
+    let archetype = req.archetype.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_string).or_else(|| preset.as_ref().map(|p| p.archetype.to_string())).unwrap_or_else(|| "Житель двора".into());
+    let color = req.color.as_deref().map(str::trim).filter(|c| c.starts_with('#') && (c.len() == 7 || c.len() == 4)).map(str::to_string).or_else(|| preset.as_ref().map(|p| p.color.to_string())).unwrap_or_else(|| "#9a9ca8".into());
+    let glyph = req.glyph.as_deref().map(|g| g.trim().chars().take(2).collect::<String>()).filter(|g| !g.is_empty()).or_else(|| preset.as_ref().map(|p| p.glyph.to_string())).unwrap_or_else(|| name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default());
+    let agenda = req.agenda.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_string).or_else(|| preset.as_ref().map(|p| p.agenda.to_string())).unwrap_or_else(|| "Присматривается к игроку и соседям.".into());
+    let model = req.model.unwrap_or_default().trim().to_string();
+    let voice = req.voice.unwrap_or_default().trim().to_string();
+    let role = preset.as_ref().map(|p| p.id.to_string()).unwrap_or_else(|| "custom".into());
+    // id: the preset id if free, else a slug of the name, else numbered
+    let existing = db::list_agents(&app.db).await?;
+    let mut id = preset.as_ref().map(|p| p.id.to_string()).filter(|pid| !existing.iter().any(|a| &a.id == pid)).unwrap_or_else(|| mermaid::safe_id(&name));
+    if id.is_empty() || id == "user" || id == "system" {
+        id = "zhitel".into();
+    }
+    if existing.iter().any(|a| a.id == id) {
+        id = format!("{id}_{}", existing.len() + 1);
+    }
+    if existing.len() >= 8 {
+        return Err(AppError::bad_request("во дворе уже восемь жителей — отправь кого-нибудь в отпуск"));
+    }
+    let (dop, resp) = preset.as_ref().map(|p| (p.dopamine, p.respect)).unwrap_or((50, 0));
+    db::insert_agent(&app.db, &id, &name, &archetype, &core, &color, &glyph, &role, &model, &voice, &agenda, dop, resp).await?;
+    if let Some(p) = &preset {
+        let pid = format!("{}_{}", p.project.0, id);
+        if !db::node_exists(&app.db, &pid).await? && !db::node_exists(&app.db, p.project.0).await? {
+            db::upsert_object(&app.db, p.project.0, p.project.1, "project", &id, Some(p.project.2), Some(&json!({ "status": "в работе" })), None, None).await?;
+        } else if !db::node_exists(&app.db, &pid).await? {
+            db::upsert_object(&app.db, &pid, p.project.1, "project", &id, Some(p.project.2), Some(&json!({ "status": "в работе" })), None, None).await?;
+        }
+        db::place_unpositioned_nodes(&app.db).await?;
+    }
+    let msg = db::insert_message(&app.db, "system", None, &format!("Во двор заходит {name} — {}.", archetype.split('.').next().unwrap_or(&archetype).trim().to_lowercase())).await?;
+    app.emit(RoomEvent::Message { message: msg });
+    db::insert_event(&app.db, "agent_joined", &json!({ "id": id, "name": name })).await?;
+    emit_agents(&app).await?;
+    emit_graph(&app).await?;
+    Ok(Json(db::list_agents(&app.db).await?))
+}
+
+async fn patch_agent(Room { app, .. }: Room, Path(id): Path<String>, Json(req): Json<AgentPatchRequest>) -> AppResult<Json<Vec<crate::models::Agent>>> {
+    let id = mermaid::safe_id(&id);
+    let agents = db::list_agents(&app.db).await?;
+    let Some(cur) = agents.iter().find(|a| a.id == id) else { return Err(AppError::bad_request("нет такого жителя")) };
+    let name = req.name.as_deref().map(str::trim).filter(|n| n.chars().count() >= 2);
+    let core = req.system_core.as_deref().map(str::trim).filter(|c| c.chars().count() >= 40);
+    let color = req.color.as_deref().map(str::trim).filter(|c| c.starts_with('#') && (c.len() == 7 || c.len() == 4));
+    let glyph = req.glyph.as_deref().map(|g| g.trim().chars().take(2).collect::<String>()).filter(|g| !g.is_empty());
+    let archetype = req.archetype.as_deref().map(str::trim).filter(|a| !a.is_empty());
+    let agenda = req.agenda.as_deref().map(str::trim).filter(|a| !a.is_empty());
+    let model = req.model.as_deref().map(str::trim);
+    let voice = req.voice.as_deref().map(str::trim);
+    if req.active == Some(false) {
+        let alive_others = agents.iter().filter(|a| a.is_alive() && a.id != id).count();
+        if alive_others == 0 {
+            return Err(AppError::bad_request("нельзя оставить двор пустым"));
+        }
+    }
+    db::update_agent_profile(&app.db, &id, name, archetype, core, color, glyph.as_deref(), model, voice, agenda, req.active).await?;
+    if req.revive {
+        db::revive_agent(&app.db, &id).await?;
+    }
+    if let Some(active) = req.active {
+        if active != (cur.active != 0) {
+            let text = if active { format!("{} возвращается во двор.", name.unwrap_or(&cur.name)) } else { format!("{} уезжает из двора. Может, вернётся.", cur.name) };
+            let msg = db::insert_message(&app.db, "system", None, &text).await?;
+            app.emit(RoomEvent::Message { message: msg });
+            db::insert_event(&app.db, if active { "agent_returned" } else { "agent_left" }, &json!({ "id": id })).await?;
+        }
+    }
+    emit_agents(&app).await?;
+    Ok(Json(db::list_agents(&app.db).await?))
+}
+
+/// "Delete" = move out: lines and memories stay, the character stops speaking.
+async fn retire_agent(room: Room, Path(id): Path<String>) -> AppResult<Json<Vec<crate::models::Agent>>> {
+    patch_agent(room, Path(id), Json(AgentPatchRequest { active: Some(false), ..Default::default() })).await
 }
 
 async fn export_markdown(Room { app, .. }: Room) -> AppResult<Response> {

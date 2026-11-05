@@ -5678,7 +5678,7 @@ dependencies = [
 
 [[package]]
 name = "triad-canvas-backend"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5711,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "triad-desktop"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "futures",

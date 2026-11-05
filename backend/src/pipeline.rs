@@ -350,7 +350,7 @@ async fn apply_archivist(app: &AppState, v: &Value, round: &[crate::models::Mess
                 let filtered: serde_json::Map<String, Value> = m.iter().filter(|(k, _)| schema_keys.is_empty() || schema_keys.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
                 Value::Object(filtered)
             });
-            db::upsert_object(&app.db, &id, &label, &type_id, author, body.as_deref(), props.as_ref(), None, None).await?;
+            db::upsert_object(&app.db, &id, &label, &type_id, &author, body.as_deref(), props.as_ref(), None, None).await?;
         }
     }
     if let Some(rels) = v.get("relations").and_then(|x| x.as_array()) {

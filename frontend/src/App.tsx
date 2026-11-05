@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, KeyRound, PanelRightClose, PanelRightOpen, RotateCcw, Send, Settings, Zap } from 'lucide-react'
+import { AlertTriangle, KeyRound, PanelRightClose, PanelRightOpen, RotateCcw, Send, Settings, Users, Zap } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
 import { api } from './api'
 import { ScenePanel } from './components/ScenePanel'
@@ -7,6 +7,7 @@ import { SidePanel, type SideTab } from './components/SidePanel'
 import { AgentProfile } from './components/AgentProfile'
 import { SettingsModal } from './components/SettingsModal'
 import { TypeEditor } from './components/TypeEditor'
+import { YardModal } from './components/YardModal'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -31,6 +32,7 @@ export default function App() {
   const [profileId, setProfileId] = useState<string | null>(null)
   const [libraryQuery, setLibraryQuery] = useState<{ q: string; nonce: number } | null>(null)
   const [typeEditor, setTypeEditor] = useState<{ open: boolean; id: string | null }>({ open: false, id: null })
+  const [yardOpen, setYardOpen] = useState(false)
   const isDesktop = useMedia('(min-width: 900px)')
 
   const unread = useMemo(() => {
@@ -200,6 +202,7 @@ export default function App() {
       }}
       features={s.features}
       world={s.world}
+      onYard={() => setYardOpen(true)}
       onAttach={async (files) => {
         const r = await room.uploadFiles(files)
         const fresh = await api.state()
@@ -231,6 +234,9 @@ export default function App() {
             </button>
           )}
           <span className={room.live ? 'text-acid' : 'text-zinc-600'}>{room.live ? '● live' : '○ offline'}</span>
+          <button onClick={() => setYardOpen(true)} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Двор: жители, роли, модели, голоса">
+            <Users size={12} />
+          </button>
           <button onClick={() => setSettingsOpen(true)} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Ключ и модели">
             <Settings size={12} />
           </button>
@@ -298,6 +304,7 @@ export default function App() {
         />
       )}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void room.refresh()} />
+      <YardModal open={yardOpen} agents={s.agents} roomModel={s.model} onClose={() => setYardOpen(false)} onCreate={room.createAgent} onPatch={room.patchAgent} />
       <TypeEditor
         open={typeEditor.open}
         initialId={typeEditor.id}

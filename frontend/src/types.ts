@@ -11,6 +11,40 @@ export interface Agent {
   respect_user: number
   color: string
   inner_state: string
+  glyph: string
+  model: string
+  voice: string
+  role: string
+  active: number
+}
+
+export interface RolePreset {
+  id: string
+  role: string
+  name: string
+  archetype: string
+  color: string
+  glyph: string
+  dopamine: number
+  respect: number
+  agenda: string
+  core: string
+  project: [string, string, string]
+  pitch: string
+}
+
+/** Avatar glyph: the character's own, the legacy Triad glyph, or the initial. */
+export function glyphOf(a: { id: string; glyph?: string; name: string }): string {
+  if (a.glyph && a.glyph.trim()) return a.glyph
+  return AGENT_GLYPH[a.id] ?? a.name.trim().charAt(0).toUpperCase()
+}
+
+/** Keep the colour/glyph registries in sync with the live cast, so every component can look up any id. */
+export function registerAgents(agents: Agent[]) {
+  for (const a of agents) {
+    AGENT_COLORS[a.id] = a.color
+    AGENT_GLYPH[a.id] = glyphOf(a)
+  }
 }
 
 export interface Message {

@@ -31,6 +31,7 @@ interface Props {
   features: Features
   onAttach: (files: File[]) => Promise<string[]>
   world: string | null
+  onYard: () => void
 }
 
 export function ScenePanel(p: Props) {
@@ -57,7 +58,7 @@ export function ScenePanel(p: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <AgentStrip agents={p.agents} speaking={p.speaking} onOpen={p.onOpenAgent} />
+      <AgentStrip agents={p.agents} speaking={p.speaking} onOpen={p.onOpenAgent} onYard={p.onYard} />
       {(p.mood || p.world) && (
         <div className="flex flex-wrap gap-x-3 border-b border-line px-3 py-1 font-mono text-[10px] text-zinc-500">
           {p.mood && <span>в комнате · {p.mood}</span>}

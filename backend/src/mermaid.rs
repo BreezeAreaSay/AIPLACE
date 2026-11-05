@@ -88,14 +88,19 @@ pub fn normalize_node_type(raw: &str) -> &'static str {
     })
 }
 
-pub fn normalize_author(raw: &str) -> &'static str {
+pub fn normalize_author(raw: &str) -> String {
     let r = raw.trim().to_lowercase();
-    AUTHORS.iter().copied().find(|a| *a == r).unwrap_or(match r.as_str() {
-        "arkady" | "аркадий" | "физик" => "physicist",
-        "sofia" | "sofya" | "софья" | "литератор" => "lit_teacher",
-        "kep" | "cap" | "кэп" | "кислота" => "graffiti",
-        _ => "user",
-    })
+    if AUTHORS.contains(&r.as_str()) {
+        return r;
+    }
+    match r.as_str() {
+        "arkady" | "аркадий" | "физик" => "physicist".into(),
+        "sofia" | "sofya" | "софья" | "литератор" => "lit_teacher".into(),
+        "kep" | "cap" | "кэп" | "кислота" => "graffiti".into(),
+        // any other slug-looking id is an invited character
+        other if !other.is_empty() && other.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => other.to_string(),
+        _ => "user".into(),
+    }
 }
 
 fn shape(node_type: &str, label: &str) -> String {

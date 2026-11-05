@@ -1,6 +1,6 @@
 import { X } from 'lucide-react'
 import type { Agent, AgentMemory, Message, Relation } from '../types'
-import { AGENT_GLYPH } from '../types'
+import { glyphOf } from '../types'
 import { StatBar } from './StatBar'
 import { RelationsTriangle } from './RelationsTriangle'
 
@@ -22,7 +22,7 @@ export function AgentProfile({ agent, agents, memory, relations, messages, onClo
       <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-t-xl border border-line bg-void sm:rounded-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 border-b border-line px-4 py-3">
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded border text-2xl font-bold" style={{ borderColor: color, color }}>
-            {dead ? '☠' : AGENT_GLYPH[agent.id]}
+            {dead ? '☠' : glyphOf(agent)}
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-base font-semibold text-zinc-100">{agent.name}</div>
