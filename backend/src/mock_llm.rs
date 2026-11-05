@@ -28,7 +28,7 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
     } else if system.contains("[STAGE-PSYCHOLOGIST]") {
         stage_psychologist()
     } else if system.contains("Сейчас ты только ДУМАЕШЬ") {
-        format!("{}\nЦЕПЛЯЮСЬ ЗА: «{}»", "[MOCK мысль] Опять слова вместо дела. Поймаю его на последней фразе.", crate::mermaid::truncate_chars(&topic(user), 30))
+        format!("{}\nЦЕПЛЯЮСЬ ЗА: «{}»\nИЩУ В БИБЛИОТЕКЕ: {}", "[MOCK мысль] Опять слова вместо дела. Поймаю его на последней фразе.", crate::mermaid::truncate_chars(&topic(user), 30), crate::mermaid::truncate_chars(&topic(user), 20))
     } else if system.contains("Ты оставляешь ПОМЕТКУ") {
         "[MOCK пометка] Спорно, но живо — оставлю здесь свой след.".to_string()
     } else if system.contains("Отвечай ТОЛЬКО репликой") {
@@ -284,7 +284,12 @@ fn agent(system_prompt: &str) -> String {
         .and_then(|r| r.captures(system_prompt).map(|c| c[1].to_string()))
         .map(|id| format!("\n<note node=\"{id}\">[MOCK пометка] Моё мнение об этом узле: спорно, но живо.</note>"))
         .unwrap_or_default();
-    format!("<ego_thought>{ego}</ego_thought>\n\n{speech}{note}")
+    let act = if system_prompt.contains("БИБЛИОТЕКА КОМНАТЫ") && rng.gen_bool(0.5) {
+        "\n<act>{\"op\":\"create\",\"type\":\"task\",\"title\":\"[MOCK] Назвать одну цифру\",\"props\":{\"priority\":\"высокий\",\"status\":\"не начата\"},\"body\":\"Игрок обещал конкретику.\"}</act>".to_string()
+    } else {
+        String::new()
+    };
+    format!("<ego_thought>{ego}</ego_thought>\n\n{speech}{note}{act}")
 }
 
 fn schema(user_prompt: &str) -> String {
@@ -325,7 +330,7 @@ mod integration {
     use crate::prompts::{director_user, DirectorContext};
 
     fn msg(id: i64, who: &str, text: &str, ego: Option<&str>) -> Message {
-        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None, objects: vec![] }
+        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None, objects: vec![], actions: sqlx::types::Json(vec![]) }
     }
 
     #[test]

@@ -325,6 +325,36 @@ pub struct AgentContext<'a> {
     pub focus: Option<(&'a GraphNode, &'a [crate::models::NodeNote])>,
     /// Library lookup results relevant to the player's question (the "steroids").
     pub library: Option<&'a str>,
+    /// Object types the agent may use in <act> tags.
+    pub types: &'a [crate::models::ObjectType],
+    /// Objects relevant to the moment (by topic + the agent's own), with ids, so actions can target them.
+    pub relevant: &'a [GraphNode],
+}
+
+pub fn tools_block(types: &[crate::models::ObjectType], relevant: &[GraphNode], agents: &[Agent]) -> String {
+    let objs = if relevant.is_empty() {
+        "(ничего подходящего)".to_string()
+    } else {
+        relevant
+            .iter()
+            .take(14)
+            .map(|n| {
+                let props = n.props.0.as_object().filter(|o| !o.is_empty()).map(|o| format!(" {}", serde_json::Value::Object(o.clone()))).unwrap_or_default();
+                format!("  {} [{}] «{}» ({}){}", n.id, n.type_id, n.label, sender_name(&n.created_by, agents), props)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "БИБЛИОТЕКА КОМНАТЫ — ты можешь ею ПОЛЬЗОВАТЬСЯ, как и все здесь. Типы (id: свойства):\n{}\nОбъекты по теме и твои собственные:\n{}\n\
+Действия пиши отдельными строками в конце реплики, каждое — одним JSON в теге <act>…</act>:\n\
+  <act>{{\"op\":\"create\",\"type\":\"task\",\"title\":\"…\",\"props\":{{\"due\":\"2026-11-08\",\"priority\":\"высокий\"}},\"body\":\"…\"}}</act>\n\
+  <act>{{\"op\":\"update\",\"id\":\"id_объекта\",\"props\":{{\"done\":true}}}}</act>   (или \"title\", \"body\", \"type\")\n\
+  <act>{{\"op\":\"link\",\"from\":\"id\",\"to\":\"id\",\"kind\":\"belongs_to|about|blocks|assigned_to|contradicts|related\",\"label\":\"глагол\"}}</act>\n\
+Делай это, когда это в характере и по делу: завести задачу игроку, записать человека, поставить срок, закрыть сделанное, связать идею с проектом, завести СВОЙ объект (твоя идея, твоя задача, твой проект — автор ты). 0–2 действия за реплику, не ради галочки. Для пометки на объекте — <note node=\"id\">…</note>.",
+        types_summary(types),
+        objs
+    )
 }
 
 pub fn agent_system(ctx: &AgentContext) -> String {
@@ -479,6 +509,8 @@ pub fn agent_system(ctx: &AgentContext) -> String {
 {beat}
 {dying}
 
+{tools}
+
 ФОРМАТ ОТВЕТА — строго два слоя:
 <ego_thought>Честный внутренний монолог от первого лица, 1–3 предложения: что ты на самом деле думаешь о последней реплике и собеседнике и что сейчас сделаешь. Своими словами, не повторяя прошлые мысли.</ego_thought>
 Потом с новой строки — публичная речь в своём стиле, без имени-префикса и без markdown. Если хочешь оставить пометку на узле доски — в самом конце отдельной строкой: <note node="ID_узла">текст пометки</note> (можно несколько).
@@ -500,6 +532,7 @@ pub fn agent_system(ctx: &AgentContext) -> String {
         scene = scene,
         beat = beat,
         dying = dying,
+        tools = tools_block(ctx.types, ctx.relevant, &all_agents),
     )
 }
 
@@ -754,7 +787,7 @@ fn short_state(a: &Agent) -> String {
 pub fn think_system(ctx: &AgentContext) -> String {
     let a = ctx.agent;
     format!(
-        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной последней строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
+        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Если тебе нужны факты из библиотеки комнаты (дела игрока, люди, сроки, твои объекты) — добавь строку ИЩУ В БИБЛИОТЕКЕ: ключевые слова — и получишь результат перед репликой. Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
         core = a.system_core,
         state = short_state(a),
         agenda = a.current_agenda,
@@ -775,21 +808,27 @@ pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
     format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
 }
 
-/// Split the think-stage output into (thought, hook phrase).
-pub fn split_thought(raw: &str) -> (String, String) {
+/// Split the think-stage output into (thought, hook phrase, library query).
+pub fn split_thought(raw: &str) -> (String, String, Option<String>) {
     let text = raw.trim().trim_start_matches(EGO_PREFILL).trim_end_matches("</ego_thought>").trim();
     let mut thought = Vec::new();
     let mut hook = String::new();
+    let mut query = None;
     for line in text.lines() {
         let l = line.trim();
         let up = l.to_uppercase();
         if up.starts_with("ЦЕПЛЯЮСЬ ЗА") {
             hook = l.split_once(':').map(|(_, v)| v).unwrap_or("").trim().trim_matches(|c| c == '«' || c == '»' || c == '"').to_string();
+        } else if up.starts_with("ИЩУ В БИБЛИОТЕКЕ") {
+            let q = l.split_once(':').map(|(_, v)| v).unwrap_or("").trim().to_string();
+            if !q.is_empty() {
+                query = Some(crate::mermaid::truncate_chars(&q, 120));
+            }
         } else if !l.is_empty() {
             thought.push(l);
         }
     }
-    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120))
+    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120), query)
 }
 
 pub fn speak_system(ctx: &AgentContext) -> String {
@@ -798,15 +837,16 @@ pub fn speak_system(ctx: &AgentContext) -> String {
     let others = ctx.others.iter().map(|o| format!("{} — {}", o.name, if o.is_alive() { relations_for(&o.id, ctx.relations, &all).split(';').next().unwrap_or("").to_string() } else { "мёртв".into() })).collect::<Vec<_>>().join("; ");
     let dying = if ctx.dying { "\nЭТО ТВОЯ ПОСЛЕДНЯЯ РЕПЛИКА: ты умираешь прямо сейчас — предсмертные слова в характере." } else { "" };
     format!(
-        "{core}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная (одно слово, перебивка, абзац — как требует подача), не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\nОтвечай ТОЛЬКО репликой, без имени и без пояснений, на русском.",
+        "{core}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная (одно слово, перебивка, абзац — как требует подача), не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\n\n{tools}\n\nОтвечай репликой (без имени и пояснений, на русском); действия <act> и пометки <note> — отдельными строками после неё.",
         core = a.system_core,
         forbidden = FORBIDDEN_PHRASES,
         state = short_state(a),
         beat = beat_text(ctx, &all),
+        tools = tools_block(ctx.types, ctx.relevant, &all),
     )
 }
 
-pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str) -> String {
+pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str, found: Option<&str>) -> String {
     let recent: Vec<Message> = ctx.messages.iter().rev().take(6).rev().cloned().collect();
     let own = if ctx.own_recent.is_empty() {
         String::new()
@@ -819,8 +859,9 @@ pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str) 
         format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
     };
     let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (это точные факты о делах игрока — используй их, а не догадки):\n{l}")).unwrap_or_default();
+    let found = found.map(|f| format!("\nТЫ ИСКАЛ В БИБЛИОТЕКЕ — НАЙДЕНО:\n{f}")).unwrap_or_default();
     format!(
-        "СТЕНОГРАММА:\n{}{scene}{own}{library}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
         transcript(&recent, all, false),
         if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
         if hook.is_empty() { "последняя реплика" } else { hook }

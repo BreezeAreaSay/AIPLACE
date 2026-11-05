@@ -52,6 +52,16 @@ pub struct Message {
     #[serde(default)]
     #[sqlx(skip)]
     pub objects: Vec<String>,
+    /// Library actions the speaker performed with this line (JSON array of {op, object_id, text}).
+    #[serde(default)]
+    pub actions: sqlx::types::Json<Vec<ActionRecord>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActionRecord {
+    pub op: String,
+    pub object_id: String,
+    pub text: String,
 }
 
 // ───────────────────────────── Graph ─────────────────────────────

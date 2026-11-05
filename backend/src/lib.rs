@@ -72,6 +72,7 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
         db: local.db,
         events: local.events,
         turn_lock: local.turn_lock,
+        pending: local.pending,
     };
 
     if cfg.telegram_bot_token.is_some() && cfg.telegram_polling {

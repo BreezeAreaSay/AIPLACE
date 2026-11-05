@@ -148,6 +148,7 @@ pub async fn migrate(pool: &Db) -> Result<()> {
         ("messages", "addressee", "TEXT"),
         ("messages", "move", "TEXT"),
         ("messages", "node_id", "TEXT"),
+        ("messages", "actions", "TEXT NOT NULL DEFAULT '[]'"),
         ("graph_nodes", "body", "TEXT NOT NULL DEFAULT ''"),
         ("graph_nodes", "x", "REAL"),
         ("graph_nodes", "y", "REAL"),
@@ -478,6 +479,15 @@ pub async fn recent_messages(pool: &Db, limit: usize) -> Result<Vec<Message>> {
     .await?;
     rows.reverse();
     Ok(rows)
+}
+
+pub async fn set_message_actions(pool: &Db, id: i64, actions: &[crate::models::ActionRecord]) -> Result<()> {
+    sqlx::query("UPDATE messages SET actions = ? WHERE id = ?")
+        .bind(serde_json::to_string(actions)?)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn last_ego_thought(pool: &Db, agent_id: &str) -> Result<Option<String>> {

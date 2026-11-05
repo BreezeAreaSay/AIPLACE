@@ -117,6 +117,26 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
         >
           <div className="whitespace-pre-wrap break-words">{renderSpeech(message.content)}</div>
         </div>
+        {(message.actions ?? []).length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {message.actions.map((a, i) => {
+              const n = nodes.find((x) => x.id === a.object_id)
+              const t = n ? types.find((x) => x.id === n.type_id) : undefined
+              return (
+                <button
+                  key={i}
+                  onClick={() => onNodeClick?.(a.object_id)}
+                  className="inline-flex max-w-[280px] items-center gap-1 rounded border border-dashed px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-acid hover:text-acid"
+                  style={{ borderColor: `${color}77` }}
+                  title="Действие в библиотеке — открыть объект"
+                >
+                  <span style={{ color: t?.color ?? color }}>{a.op === 'link' ? '⇄' : a.op === 'update' ? '✎' : t?.icon ?? '＋'}</span>
+                  <span className="truncate">{a.text}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
         {mentioned.length > 0 && <div className="mt-1 flex flex-wrap gap-1">{mentioned.map((n) => chip(n))}</div>}
       </div>
     </div>

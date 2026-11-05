@@ -12,10 +12,11 @@ import {
   type NodeChange,
   type NodeMouseHandler,
 } from '@xyflow/react'
-import { Download, Plus, Search } from 'lucide-react'
+import { Circle, Download, LayoutGrid, Plus, Search } from 'lucide-react'
 import type { Agent, Graph, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS } from '../types'
 import { NodeCard, type NoteNodeType } from './NodeCard'
+import { DotNode, type DotNodeType } from './DotNode'
 import { api } from '../api'
 
 interface Props {
@@ -33,14 +34,23 @@ interface Props {
   toolbarOffset?: number
 }
 
-const nodeTypes = { note: NodeCard }
+const nodeTypes = { note: NodeCard, dot: DotNode }
 
 function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect, onCreate, onMove, onConnect, toolbarOffset = 0 }: Props) {
   const rf = useReactFlow()
   const [overrides, setOverrides] = useState<Record<string, { x: number; y: number }>>({})
   const [query, setQuery] = useState('')
   const [author, setAuthor] = useState<string>('all')
+  const [mode, setMode] = useState<'dots' | 'cards'>(() => (localStorage.getItem('triad.graph.mode') as 'dots' | 'cards') || 'dots')
   const fitted = useRef(false)
+  const degree = useMemo(() => {
+    const d: Record<string, number> = {}
+    for (const e of graph.edges) {
+      d[e.source_id] = (d[e.source_id] ?? 0) + 1
+      d[e.target_id] = (d[e.target_id] ?? 0) + 1
+    }
+    return d
+  }, [graph.edges])
 
   const counts = useMemo(() => {
     const m: Record<string, Record<string, number>> = {}
@@ -62,9 +72,23 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
   const tmap = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types])
   const visibleIds = useMemo(() => new Set(visible.map((n) => n.id)), [visible])
 
-  const nodes: NoteNodeType[] = useMemo(
+  const nodes: (NoteNodeType | DotNodeType)[] = useMemo(
     () =>
-      visible.map((n) => ({
+      visible.map((n) => mode === 'dots' ? ({
+        id: n.id,
+        type: 'dot',
+        position: overrides[n.id] ?? { x: n.x ?? 0, y: n.y ?? 0 },
+        data: {
+          label: n.label,
+          color: AGENT_COLORS[n.created_by] ?? '#9a9ca8',
+          typeIcon: tmap[n.type_id]?.icon ?? '◇',
+          degree: degree[n.id] ?? 0,
+          selected: n.id === selectedId,
+          hot: hotIds.has(n.id),
+          author: n.created_by,
+        },
+        draggable: n.pinned === 0,
+      } as DotNodeType) : ({
         id: n.id,
         type: 'note',
         position: overrides[n.id] ?? { x: n.x ?? 0, y: n.y ?? 0 },
@@ -82,8 +106,8 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
           hot: hotIds.has(n.id),
         },
         draggable: n.pinned === 0,
-      })),
-    [visible, overrides, counts, selectedId, hotIds, tmap],
+      } as NoteNodeType)),
+    [visible, overrides, counts, selectedId, hotIds, tmap, mode, degree],
   )
 
   const edges: Edge[] = useMemo(
@@ -107,7 +131,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
     }
   }, [graph.nodes.length, rf])
 
-  const onNodesChange = useCallback((changes: NodeChange<NoteNodeType>[]) => {
+  const onNodesChange = useCallback((changes: NodeChange<NoteNodeType | DotNodeType>[]) => {
     setOverrides((o) => {
       let next = o
       for (const c of changes) {
@@ -120,13 +144,13 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
   }, [])
 
   const onNodeDragStop = useCallback(
-    (_: unknown, node: NoteNodeType) => {
+    (_: unknown, node: NoteNodeType | DotNodeType) => {
       onMove(node.id, Math.round(node.position.x), Math.round(node.position.y))
     },
     [onMove],
   )
 
-  const onNodeClick: NodeMouseHandler<NoteNodeType> = useCallback((_, node) => onSelect(node.id), [onSelect])
+  const onNodeClick: NodeMouseHandler<NoteNodeType | DotNodeType> = useCallback((_, node) => onSelect(node.id), [onSelect])
 
   const onPaneClick = useCallback(
     (ev: React.MouseEvent) => {
@@ -170,7 +194,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
         maxZoom={2}
         proOptions={{ hideAttribution: true }}
         fitView
-        fitViewOptions={{ padding: 0.25, maxZoom: 0.9 }}
+        fitViewOptions={{ padding: 0.2, maxZoom: mode === 'dots' ? 1.4 : 0.9 }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#23242e" />
         <Controls position="bottom-left" showInteractive={false} />
@@ -180,7 +204,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
             pannable
             zoomable
             style={{ width: 150, height: 100 }}
-            nodeColor={(n) => AGENT_COLORS[(n as NoteNodeType).data.author] ?? '#555'}
+            nodeColor={(n) => AGENT_COLORS[(n as NoteNodeType | DotNodeType).data.author] ?? '#555'}
             nodeStrokeWidth={6}
             maskColor="rgba(13,14,18,0.6)"
             className="hidden md:block"
@@ -215,6 +239,17 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
             </button>
           ))}
         </div>
+        <button
+          onClick={() => {
+            const next = mode === 'dots' ? 'cards' : 'dots'
+            setMode(next)
+            localStorage.setItem('triad.graph.mode', next)
+          }}
+          className="pointer-events-auto flex items-center gap-1 rounded border border-line bg-void/90 px-2 py-1 font-mono text-[11px] text-zinc-400 backdrop-blur hover:text-zinc-100"
+          title={mode === 'dots' ? 'Показать карточки' : 'Показать точки'}
+        >
+          {mode === 'dots' ? <LayoutGrid size={12} /> : <Circle size={12} />} {mode === 'dots' ? 'карточки' : 'точки'}
+        </button>
         <button
           onClick={addAtCenter}
           className="pointer-events-auto flex items-center gap-1 rounded border border-acid/60 bg-void/90 px-2 py-1 font-mono text-[11px] text-acid backdrop-blur hover:bg-acid/10"

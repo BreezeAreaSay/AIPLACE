@@ -29,6 +29,7 @@ pub struct AppState {
     pub events: broadcast::Sender<RoomEvent>,
     /// Rounds are serialized per room: a tick spam-click never interleaves with a chat round.
     pub turn_lock: Arc<Mutex<()>>,
+    pub pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AppState {
@@ -51,6 +52,7 @@ impl AppState {
             db: h.db,
             events: h.events,
             turn_lock: h.turn_lock,
+            pending: h.pending,
             ..self.clone()
         })
     }

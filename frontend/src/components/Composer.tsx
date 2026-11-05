@@ -17,7 +17,7 @@ export function Composer({ disabled, onSend, onTick, showEgo, onToggleEgo, conte
   const [text, setText] = useState('')
   const submit = () => {
     const t = text.trim()
-    if (!t || disabled) return
+    if (!t) return
     haptic('light')
     onSend(t, contextNode?.id ?? null)
     setText('')
@@ -44,12 +44,12 @@ export function Composer({ disabled, onSend, onTick, showEgo, onToggleEgo, conte
             }
           }}
           rows={1}
-          placeholder="Скажи что-нибудь в комнату… (Enter — отправить, Shift+Enter — перенос)"
+          placeholder={disabled ? 'Они отвечают — можно докинуть ещё, подхватят по ходу…' : 'Скажи что-нибудь в комнату… (Enter — отправить, Shift+Enter — перенос)'}
           className="max-h-40 min-h-[42px] flex-1 resize-y rounded border border-line bg-panel px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-acid focus:outline-none"
         />
         <button
           onClick={submit}
-          disabled={disabled || !text.trim()}
+          disabled={!text.trim()}
           className="flex h-10 w-10 items-center justify-center rounded bg-acid text-void transition hover:shadow-glow disabled:opacity-40"
           aria-label="Отправить"
         >

@@ -242,14 +242,23 @@ async fn chat(Room { app, editable, user }: Room, Json(req): Json<ChatRequest>) 
     if text.chars().count() > 4000 {
         return Err(AppError::bad_request("сообщение длиннее 4000 символов"));
     }
-    let _turn = app.turn_lock.lock().await;
     let node_id = match req.node_id.as_deref().map(mermaid::safe_id) {
         Some(id) if db::node_exists(&app.db, &id).await? => Some(id),
         _ => None,
     };
+    // The line lands immediately — even mid-round, so the next beats see it in the transcript.
     let msg = db::insert_message_full(&app.db, USER_ID, None, text, None, None, node_id.as_deref()).await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
     crate::heartbeat::player_is_back(&app).await?;
+    let turn = match app.turn_lock.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            // A round is running: queue a follow-up round instead of blocking the client.
+            app.pending.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Json(build_state(&app, editable, user.as_ref()).await?));
+        }
+    };
+    let _turn = turn;
     // Links in the line become bookmarks before anyone speaks, so the room discusses content.
     let urls = crate::intake::find_urls(text);
     let mut digest: Vec<String> = Vec::new();
@@ -520,6 +529,10 @@ async fn alive_ids(app: &AppState) -> anyhow::Result<Vec<String>> {
 /// `alive_before` lets a caller that already changed the room (e.g. resolved a contract)
 /// still give last words to whoever died from it.
 async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<String>, attachments: Option<String>) -> anyhow::Result<()> {
+    run_round_inner(app, trigger, alive_before, attachments, 0).await
+}
+
+async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<String>, attachments: Option<String>, depth: u8) -> anyhow::Result<()> {
     // Deadlines bite before anyone speaks, so the Director sees the failure as an event.
     contracts::expire_overdue(app).await?;
 
@@ -588,6 +601,11 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
         tracing::warn!(error = %e, "memory scheduling failed");
     }
     app.emit(RoomEvent::Done);
+    // Lines the player dropped while we were talking get their own round (bounded).
+    if app.pending.swap(0, std::sync::atomic::Ordering::Relaxed) > 0 && depth < 2 {
+        let alive = alive_ids(app).await?;
+        return Box::pin(run_round_inner(app, Trigger::UserMessage, alive, None, depth + 1)).await;
+    }
     Ok(())
 }
 

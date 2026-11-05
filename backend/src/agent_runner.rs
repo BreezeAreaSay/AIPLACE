@@ -64,6 +64,20 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         Some(n) => db::notes_for_node(&app.db, &n.id).await?,
         None => Vec::new(),
     };
+    let types = db::list_types(&app.db).await?;
+    // Objects the agent can act on: by the topic of the last lines + their own things.
+    let topic_text: String = messages.iter().rev().take(4).map(|m| m.content.clone()).collect::<Vec<_>>().join(" ");
+    let mut relevant = db::search_objects(&app.db, &topic_text, None, 8).await?;
+    for own in db::objects_by_owner(&app.db, agent_id).await?.into_iter().take(4) {
+        if !relevant.iter().any(|r| r.id == own.id) {
+            relevant.push(own);
+        }
+    }
+    if let Some(n) = &focus_node {
+        if !relevant.iter().any(|r| r.id == n.id) {
+            relevant.insert(0, n.clone());
+        }
+    }
 
     let ctx = AgentContext {
         agent: &agent,
@@ -81,6 +95,8 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         scene_so_far: &plan.scene_so_far,
         focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
         library: plan.library,
+        types: &types,
+        relevant: &relevant,
     };
     let model = app.llm_settings().await.model;
     let (ego, speech) = if app.cfg.agent_mode == "single" {
@@ -107,6 +123,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         think_then_speak(app, &model, &ctx, &agents).await
     };
     let speech = strip_name_prefix(&speech, &agent.name);
+    let (speech, acts) = extract_acts(&speech);
     let (speech, notes) = extract_notes(&speech);
     let speech = if speech.trim().is_empty() { "*молчит*".to_string() } else { speech };
     let addressee = plan.beat.and_then(|b| b.addressee.clone());
@@ -122,6 +139,22 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
     )
     .await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
+    // Library actions the agent took with this line.
+    let records = apply_acts(app, agent_id, &acts, &types).await;
+    let msg = if records.is_empty() {
+        msg
+    } else {
+        db::set_message_actions(&app.db, msg.id, &records).await?;
+        for r in &records {
+            db::add_mention(&app.db, msg.id, &r.object_id).await?;
+        }
+        let graph = crate::models::Graph { nodes: db::list_nodes(&app.db).await?, edges: db::list_edges(&app.db).await? };
+        let mermaid = crate::mermaid::build_graph(&graph.nodes, &graph.edges);
+        app.emit(RoomEvent::Graph { graph, mermaid });
+        let updated = db::with_mentions(&app.db, vec![db::recent_messages(&app.db, 1).await?.remove(0)]).await?.remove(0);
+        app.emit(RoomEvent::Message { message: updated.clone() });
+        updated
+    };
     let mut stored = 0;
     for (node_id, text) in notes {
         let id = crate::mermaid::safe_id(&node_id);
@@ -153,7 +186,15 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
             String::new()
         }
     };
-    let (ego, hook) = prompts::split_thought(&thought_raw);
+    let (ego, hook, query) = prompts::split_thought(&thought_raw);
+    let found: Option<String> = match query {
+        Some(q) => {
+            let hits = db::search_objects(&app.db, &q, None, 6).await.unwrap_or_default();
+            let types = db::list_types(&app.db).await.unwrap_or_default();
+            Some(prompts::library_digest(&hits, &types, agents))
+        }
+        None => None,
+    };
 
     app.emit(RoomEvent::StreamStart { agent: ctx.agent.id.clone() });
     let agent_id = ctx.agent.id.clone();
@@ -162,7 +203,7 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
         .llm
         .chat_stream(
             model,
-            &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, &ego, &hook))],
+            &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, &ego, &hook, found.as_deref()))],
             &speak_opts,
             |d| emitter.emit(RoomEvent::Delta { agent: agent_id.clone(), text: d.to_string() }),
         )
@@ -203,6 +244,95 @@ fn strip_labels(s: &str) -> String {
     static LABELS: OnceLock<Regex> = OnceLock::new();
     let re = LABELS.get_or_init(|| Regex::new(r"(?im)^\s*(\*\*)?\s*(реплика|речь|публичная речь|ответ)\s*:?\s*(\*\*)?\s*:?\s*").expect("regex"));
     re.replace_all(s, "").trim().to_string()
+}
+
+/// Pull `<act>{json}</act>` blocks out of the speech.
+pub fn extract_acts(speech: &str) -> (String, Vec<serde_json::Value>) {
+    static ACT: OnceLock<Regex> = OnceLock::new();
+    let re = ACT.get_or_init(|| Regex::new(r"(?is)<act>\s*(\{.*?\})\s*</act>").expect("regex"));
+    let mut acts = Vec::new();
+    for c in re.captures_iter(speech) {
+        if let Ok(v) = crate::openrouter::extract_json(&c[1]) {
+            acts.push(v);
+        }
+    }
+    let cleaned = re.replace_all(speech, "").trim().to_string();
+    (cleaned, acts)
+}
+
+/// Apply agent actions against the library; returns human-readable records for the UI.
+async fn apply_acts(app: &AppState, agent_id: &str, acts: &[serde_json::Value], types: &[crate::models::ObjectType]) -> Vec<crate::models::ActionRecord> {
+    let mut out = Vec::new();
+    for a in acts.iter().take(3) {
+        let op = a.get("op").and_then(|o| o.as_str()).unwrap_or("").to_lowercase();
+        let res: anyhow::Result<Option<crate::models::ActionRecord>> = async {
+            match op.as_str() {
+                "create" => {
+                    let title = a.get("title").and_then(|t| t.as_str()).map(crate::mermaid::sanitize_label).filter(|t| t != "…");
+                    let Some(title) = title else { return Ok(None) };
+                    let type_id = a.get("type").and_then(|t| t.as_str()).map(|t| t.trim().to_lowercase()).filter(|t| types.iter().any(|x| &x.id == t)).unwrap_or_else(|| "note".into());
+                    let mut id = crate::mermaid::safe_id(&title);
+                    if db::node_exists(&app.db, &id).await? {
+                        id = format!("{}_{}", id, chrono::Utc::now().timestamp() % 10_000);
+                    }
+                    let body = a.get("body").and_then(|b| b.as_str()).map(|b| crate::mermaid::truncate_chars(b.trim(), 1500));
+                    let keys: Vec<String> = types.iter().find(|t| t.id == type_id).and_then(|t| t.schema.0.get("props")).and_then(|p| p.as_array()).map(|arr| arr.iter().filter_map(|p| p.get("key").and_then(|k| k.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+                    let props = a.get("props").and_then(|p| p.as_object()).map(|m| serde_json::Value::Object(m.iter().filter(|(k, _)| keys.is_empty() || keys.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect()));
+                    db::upsert_object(&app.db, &id, &title, &type_id, agent_id, body.as_deref(), props.as_ref(), None, None).await?;
+                    db::place_unpositioned_nodes(&app.db).await?;
+                    let tname = types.iter().find(|t| t.id == type_id).map(|t| t.name.to_lowercase()).unwrap_or(type_id.clone());
+                    Ok(Some(crate::models::ActionRecord { op: "create".into(), object_id: id, text: format!("завёл {tname} «{title}»") }))
+                }
+                "update" | "done" => {
+                    let Some(id) = a.get("id").and_then(|i| i.as_str()).map(crate::mermaid::safe_id) else { return Ok(None) };
+                    let Some(existing) = db::get_node(&app.db, &id).await? else { return Ok(None) };
+                    let label = a.get("title").and_then(|t| t.as_str()).map(crate::mermaid::sanitize_label).filter(|t| t != "…");
+                    let body = a.get("body").and_then(|b| b.as_str()).map(|b| crate::mermaid::truncate_chars(b.trim(), 1500));
+                    let type_id = a.get("type").and_then(|t| t.as_str()).map(|t| t.trim().to_lowercase()).filter(|t| types.iter().any(|x| &x.id == t));
+                    let mut props = a.get("props").cloned();
+                    if op == "done" {
+                        props = Some(serde_json::json!({ "done": true, "status": "сделана" }));
+                    }
+                    if label.is_some() || body.is_some() {
+                        db::update_node_fields(&app.db, &id, label.as_deref(), body.as_deref(), None, None).await?;
+                    }
+                    if type_id.is_some() || props.is_some() {
+                        db::update_object_meta(&app.db, &id, type_id.as_deref(), props.as_ref(), None).await?;
+                    }
+                    let what = if props.as_ref().and_then(|p| p.get("done")).and_then(|d| d.as_bool()) == Some(true) {
+                        format!("закрыл «{}»", existing.label)
+                    } else if let Some(p) = props.as_ref().and_then(|p| p.as_object()).filter(|o| !o.is_empty()) {
+                        format!("обновил «{}»: {}", existing.label, p.iter().map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>().join(", "))
+                    } else {
+                        format!("поправил «{}»", existing.label)
+                    };
+                    Ok(Some(crate::models::ActionRecord { op: "update".into(), object_id: id, text: what }))
+                }
+                "link" => {
+                    let (Some(f), Some(t)) = (a.get("from").and_then(|x| x.as_str()), a.get("to").and_then(|x| x.as_str())) else { return Ok(None) };
+                    let from = crate::mermaid::safe_id(f);
+                    let to = crate::mermaid::safe_id(t);
+                    if from == to || !db::node_exists(&app.db, &from).await? || !db::node_exists(&app.db, &to).await? {
+                        return Ok(None);
+                    }
+                    let kind = a.get("kind").and_then(|k| k.as_str()).map(|k| k.trim().to_lowercase()).filter(|k| ["related", "belongs_to", "about", "blocks", "made_by", "assigned_to", "contradicts", "mentions"].contains(&k.as_str())).unwrap_or_else(|| "related".into());
+                    let label = a.get("label").and_then(|l| l.as_str()).map(crate::mermaid::sanitize_label).filter(|l| l != "…").map(|l| crate::mermaid::truncate_chars(&l, 30)).unwrap_or_default();
+                    db::insert_relation(&app.db, &from, &to, &kind, &label, agent_id, 0.9).await?;
+                    let fl = db::get_node(&app.db, &from).await?.map(|n| n.label).unwrap_or(from.clone());
+                    let tl = db::get_node(&app.db, &to).await?.map(|n| n.label).unwrap_or(to.clone());
+                    Ok(Some(crate::models::ActionRecord { op: "link".into(), object_id: from, text: format!("связал «{fl}» → «{tl}»") }))
+                }
+                _ => Ok(None),
+            }
+        }
+        .await;
+        match res {
+            Ok(Some(r)) => out.push(r),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(agent = %agent_id, error = %e, "act failed"),
+        }
+    }
+    out
 }
 
 /// Pull `<note node="id">text</note>` annotations out of the speech.

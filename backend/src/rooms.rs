@@ -16,6 +16,8 @@ pub struct RoomHandle {
     pub db: SqlitePool,
     pub events: broadcast::Sender<RoomEvent>,
     pub turn_lock: Arc<Mutex<()>>,
+    /// Player lines that arrived during a round and still need a reaction.
+    pub pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub struct RoomManager {
@@ -52,7 +54,7 @@ impl RoomManager {
         db::migrate(&pool).await?;
         db::seed_if_empty(&pool).await?;
         let (events, _) = broadcast::channel(256);
-        let handle = RoomHandle { db: pool, events, turn_lock: Arc::new(Mutex::new(())) };
+        let handle = RoomHandle { db: pool, events, turn_lock: Arc::new(Mutex::new(())), pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)) };
         rooms.insert(id.to_string(), handle.clone());
         tracing::info!(room = %id, "room opened");
         Ok(handle)

@@ -23,6 +23,7 @@ export interface Message {
   move: string | null
   node_id: string | null
   objects: string[]
+  actions: { op: string; object_id: string; text: string }[]
 }
 
 export interface PropSchema {

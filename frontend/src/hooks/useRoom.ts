@@ -144,7 +144,16 @@ export function useRoom() {
     streaming,
     markSeen,
     refresh,
-    send: (text: string, nodeId?: string | null) => run('Отправляю в комнату…', () => api.chat(text, nodeId)),
+    send: async (text: string, nodeId?: string | null) => {
+      // Sending is always allowed: mid-round lines land immediately and get a follow-up round.
+      setError(null)
+      try {
+        const s = await api.chat(text, nodeId)
+        setState((prev) => (prev ? { ...s, messages: mergeMessages(prev.messages, s.messages) } : s))
+      } catch (e) {
+        setError((e as Error).message)
+      }
+    },
     createNode: (label: string, opts?: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number }) =>
       run('Добавляю объект…', () => api.createNode(label, opts)),
     createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),
