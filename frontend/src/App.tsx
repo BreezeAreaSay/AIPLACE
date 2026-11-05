@@ -422,6 +422,7 @@ export default function App() {
       chronicle: () => api.chronicle().then((r) => (void room.refresh(), r)),
       snapshot: () => api.createSnapshot(),
       tick: () => void room.tick(),
+      runRule: (ruleId: string) => api.runRule(ruleId).then((r) => (void room.refresh(), r)),
       notify: (text: string) => {
         setToast(text)
         window.setTimeout(() => setToast(null), 3500)

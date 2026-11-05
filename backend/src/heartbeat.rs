@@ -81,6 +81,9 @@ async fn beat_all(root: &AppState) -> Result<()> {
             if let Err(e) = maybe_snapshot(&app).await {
                 tracing::warn!(room = %id, error = %e, "snapshot failed");
             }
+            if let Err(e) = maybe_rules(root, &app).await {
+                tracing::warn!(room = %id, error = %e, "rules failed");
+            }
         }
     }
     // Evening chronicle and file digestion don't need the player to be away — only budget.
@@ -303,6 +306,24 @@ pub async fn maybe_poll_feeds(app: &AppState) -> Result<()> {
         let edges = db::list_edges(&app.db).await?;
         let mermaid = crate::mermaid::build_graph(&nodes, &edges);
         app.emit(RoomEvent::Graph { graph: crate::models::Graph { nodes, edges }, mermaid });
+    }
+    Ok(())
+}
+
+/// Automations (`rule` objects): checked every few minutes; the ones that need an LLM wait for
+/// budget and for a real model (or HEARTBEAT_IN_MOCK), the rest run regardless of quiet hours.
+pub async fn maybe_rules(root: &AppState, app: &AppState) -> Result<()> {
+    let last = db::meta_get(&app.db, "rules_last_check").await?;
+    if let Some(min) = last.as_deref().and_then(minutes_since) {
+        if min < 5 {
+            return Ok(());
+        }
+    }
+    db::meta_set(&app.db, "rules_last_check", &Utc::now().to_rfc3339()).await?;
+    let llm_ok = root.llm.budget_left() && (!root.llm_settings().await.mock_mode() || root.cfg.heartbeat_in_mock) && !in_quiet_hours(&root.cfg.quiet_hours);
+    let fired = crate::rules::run_all(app, llm_ok).await?;
+    for f in fired {
+        tracing::info!(room = %app.room_id, %f, "rule");
     }
     Ok(())
 }

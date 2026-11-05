@@ -138,6 +138,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/organism", get(organism_state))
         .route("/api/organism/audit", post(organism_audit))
         .route("/api/nodes/:id/ask-inline", post(ask_inline))
+        .route("/api/rules/:id/run", post(run_rule))
+        .route("/api/rules/run", post(run_rules))
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/:id/accept", post(accept_proposal))
         .route("/api/proposals/:id/reject", post(reject_proposal))
@@ -1320,6 +1322,29 @@ async fn ask_inline(Room { app, .. }: Room, Path(id): Path<String>, Json(req): J
     let reply = agent_runner::run_agent(&app, &agent.id, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
     app.emit(RoomEvent::Done);
     Ok(Json(json!({ "agent": agent.id, "answer": reply.content })))
+}
+
+// ───────────────────────────── Rules (automations) ─────────────────────────────
+
+/// Run one `rule` object now, ignoring its schedule and `active` flag.
+async fn run_rule(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    let id = mermaid::safe_id(&id);
+    let Some(node) = db::get_node(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого объекта")) };
+    if node.type_id != crate::rules::RULE_TYPE {
+        return Err(AppError::bad_request("это не правило"));
+    }
+    if app.turn_lock.try_lock().is_err() {
+        return Err(AppError::bad_request("идёт раунд — чуть позже"));
+    }
+    let _turn = app.turn_lock.lock().await;
+    let result = crate::rules::run_rule(&app, &node, true, true).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "result": result.unwrap_or_else(|| "не сработало".into()) })))
+}
+
+/// Check every active rule right now (what the heartbeat does every few minutes).
+async fn run_rules(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    let fired = crate::rules::run_all(&app, true).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "fired": fired })))
 }
 
 // ───────────────────────────── Proposals ─────────────────────────────

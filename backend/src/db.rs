@@ -764,6 +764,11 @@ pub async fn message_count(pool: &Db) -> Result<i64> {
     Ok(sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(pool).await?)
 }
 
+/// When the player last wrote anything (yard or DM), for "the player is silent" rules.
+pub async fn last_user_message_at(pool: &Db) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT created_at FROM messages WHERE sender_id = 'user' ORDER BY id DESC LIMIT 1").fetch_optional(pool).await?)
+}
+
 pub async fn get_message(pool: &Db, id: i64) -> Result<Option<Message>> {
     Ok(sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }

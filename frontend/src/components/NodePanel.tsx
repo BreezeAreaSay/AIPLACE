@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Archive, BookOpen, Check, Copy, Download, Eye, Files, Github, Leaf, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import { Archive, BookOpen, Check, Copy, Download, Eye, Files, Github, Leaf, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X, Zap } from 'lucide-react'
 import type { Agent, Attachment, Features, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
@@ -372,6 +372,32 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
         )}
 
         <Attachments nodeId={node.id} attachments={attachments} digested={new Set(attachments.filter((a) => node.body.includes(`<!-- digest:${a.id} -->`)).map((a) => a.id))} onUpload={(files) => onUpload(node.id, files)} onDelete={onDeleteFile} />
+
+        {node.type_id === 'rule' && (
+          <section>
+            <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+              <Zap size={11} /> автомат
+            </div>
+            <button
+              onClick={() => {
+                setFilling('выполняю правило…')
+                void api
+                  .runRule(node.id)
+                  .then((r) => setFilling(`⚙ ${r.result}`))
+                  .catch((e) => setFilling(`ошибка: ${(e as Error).message}`))
+                  .finally(() => window.setTimeout(() => setFilling(null), 6000))
+              }}
+              disabled={disabled || !!filling}
+              className="flex w-full items-center justify-center gap-1.5 rounded border border-dashed border-[#fcd34d]/60 px-2 py-1.5 font-mono text-[11px] text-[#fcd34d] hover:bg-[#fcd34d]/10 disabled:opacity-40"
+              title="Проверить условие и выполнить действие прямо сейчас, не дожидаясь пульса"
+            >
+              <Zap size={11} /> {filling && (filling.startsWith('выполн') || filling.startsWith('⚙')) ? filling : 'выполнить сейчас'}
+            </button>
+            <div className="mt-1 font-mono text-[9px] text-zinc-600">
+              пульс проверяет правила каждые 5 минут · {typeof node.props.last_run === 'string' && node.props.last_run ? `последний запуск ${new Date(node.props.last_run).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'ещё не запускалось'}
+            </div>
+          </section>
+        )}
 
         <section>
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">

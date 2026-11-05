@@ -26,6 +26,7 @@ pub mod pipeline;
 pub mod prompts;
 pub mod roles;
 pub mod rooms;
+pub mod rules;
 pub mod selfupdate;
 pub mod state;
 pub mod telegram;

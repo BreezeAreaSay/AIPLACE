@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Activity, BookOpen, Leaf, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react'
+import { Activity, BookOpen, Leaf, RefreshCw, ShieldCheck, Sparkles, Zap } from 'lucide-react'
 import type { Agent, GraphNode, ObjectType, Proposal } from '../types'
 import { ProposalCard } from './ProposalCard'
 import { AGENT_COLORS } from '../types'
@@ -40,6 +40,7 @@ export function OrganismPanel({ agents, nodes, types, disabled, onSelect, onTend
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
   }, [nodes.length])
+  const rules = nodes.filter((n) => n.type_id === 'rule' && n.archived === 0)
   const name = (id: string) => agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id
   const node = (id: string) => nodes.find((n) => n.id === id)
   const icon = (id: string) => {
@@ -145,6 +146,50 @@ export function OrganismPanel({ agents, nodes, types, disabled, onSelect, onTend
         </div>
         {msg && <div className="mt-1.5 font-mono text-[10px] text-acid">{msg}</div>}
         <div className="mt-1.5 text-[10px] text-zinc-600">Когда ты молчишь, каждый третий пульс комнаты уходит на заботу о библиотеке; файлы разбираются сами через пару минут после загрузки; хроника пишется вечером.</div>
+      </section>
+
+      <section>
+        <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+          <Zap size={11} /> автоматы · {rules.length}
+          <button
+            onClick={() => void run('rules', () => api.runRules().then((r) => setMsg(r.fired.length ? r.fired.join(' · ') : 'ни одно правило не сработало')), 'проверено')}
+            disabled={disabled || !!busy || rules.length === 0}
+            className="ml-auto rounded border border-line px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-zinc-400 hover:border-acid hover:text-acid disabled:opacity-40"
+            title="Проверить все правила сейчас"
+          >
+            {busy === 'rules' ? '…' : 'проверить все'}
+          </button>
+        </div>
+        {rules.length === 0 && (
+          <div className="text-[11px] text-zinc-600">
+            Правил нет. Заведи объект типа <span className="text-[#fcd34d]">⚙ Правило</span>: «когда … → сделать …», и двор будет выполнять его сам.
+          </div>
+        )}
+        <div className="space-y-1">
+          {rules.map((r) => {
+            const active = r.props.active !== false
+            return (
+              <div key={r.id} className={`flex items-center gap-2 rounded border border-line/60 px-2 py-1 text-[11px] ${active ? '' : 'opacity-50'}`}>
+                <button onClick={() => onSelect(r.id)} className="min-w-0 flex-1 text-left">
+                  <div className="truncate text-zinc-200">{r.label}</div>
+                  <div className="truncate font-mono text-[9px] text-zinc-500">
+                    {String(r.props.when ?? '—')} → {String(r.props.do ?? 'сказать')}
+                    {typeof r.props.log === 'string' && r.props.log ? ` · ${r.props.log}` : ''}
+                  </div>
+                </button>
+                <span className="shrink-0 font-mono text-[9px] text-zinc-600">×{Number(r.props.runs ?? 0)}</span>
+                <button
+                  onClick={() => void run(`rule:${r.id}`, () => api.runRule(r.id).then((x) => setMsg(x.result)), 'выполнено')}
+                  disabled={disabled || !!busy}
+                  className="shrink-0 rounded border border-[#fcd34d]/50 px-1.5 py-0.5 font-mono text-[9px] text-[#fcd34d] hover:bg-[#fcd34d]/10 disabled:opacity-40"
+                  title="Выполнить сейчас"
+                >
+                  {busy === `rule:${r.id}` ? '…' : '▶'}
+                </button>
+              </div>
+            )
+          })}
+        </div>
       </section>
 
       <section>

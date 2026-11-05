@@ -85,6 +85,16 @@ export function LiveButton({ label, action, nodeId }: { label: string; action: s
         case 'tick':
           a.tick()
           break
+        case 'rule': {
+          const id = arg || nodeId
+          if (!id) {
+            a.notify('укажи правило: [[button: … | rule:<id>]]')
+            break
+          }
+          const r = await a.runRule(id)
+          a.notify(`⚙ ${r.result}`)
+          break
+        }
         case 'open':
           a.openNode(arg)
           break

@@ -161,6 +161,25 @@ pub fn seeds() -> Vec<TypeSeed> {
             color: "#5eead4",
             schema: json!({ "props": [summary(), p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), p("owner", "Кто читает (id персонажа)", "text"), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
         },
+        TypeSeed {
+            id: "rule",
+            name: "Правило",
+            icon: "⚙",
+            color: "#fcd34d",
+            schema: json!({ "props": [
+                sel("when", "Когда", &crate::rules::WHEN_OPTIONS),
+                sel("every", "Как часто", &["час", "день", "неделя"]),
+                p("type", "Тип объектов (id, пусто = любой)", "text"),
+                p("days", "Дней (давность / тишина)", "number"),
+                sel("do", "Что сделать", &crate::rules::DO_OPTIONS),
+                p("param", "Текст / теги / «тип: название»", "longtext"),
+                p("who", "Кто (id жителя, пусто = подходящий)", "text"),
+                p("active", "Включено", "checkbox"),
+                p("last_run", "Последний запуск", "text"),
+                p("runs", "Срабатываний", "number"),
+                p("log", "Последний результат", "longtext")
+            ], "template": "## Зачем\n\nПравило — маленький автомат: двор проверяет условие «Когда» и делает «Что сделать».\n\nВ тексте можно писать `{count}`, `{list}`, `{label}`, `{date}`, `{rule}`.\n\nПримеры:\n\n- просроченные задачи → сказать: «Просрочено {count}: {list}»\n- новый объект, тип `book` → разобрать\n- давно не трогали, 30 дней → тегнуть `#пыль`\n- по расписанию, неделя → хроника\n\n[[button: Выполнить сейчас | rule]]\n" }),
+        },
     ]
 }
 

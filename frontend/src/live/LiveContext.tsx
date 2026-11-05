@@ -14,6 +14,8 @@ export interface LiveActions {
   chronicle: () => Promise<unknown>
   snapshot: () => Promise<unknown>
   tick: () => void
+  /** Run a `rule` object now (ignores its schedule). */
+  runRule: (ruleId: string) => Promise<{ result: string }>
   notify: (text: string) => void
 }
 

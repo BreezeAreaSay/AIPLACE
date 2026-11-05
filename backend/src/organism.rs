@@ -61,7 +61,7 @@ pub async fn health(app: &AppState) -> Result<Health> {
     let mentioned: std::collections::HashSet<String> = db::all_mentioned_objects(&app.db).await?.into_iter().collect();
     let linked: std::collections::HashSet<&str> = edges.iter().flat_map(|e| [e.source_id.as_str(), e.target_id.as_str()]).collect();
     let live: Vec<&GraphNode> = nodes.iter().filter(|n| n.archived == 0).collect();
-    let orphans = live.iter().filter(|n| !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && n.type_id != "feed").count();
+    let orphans = live.iter().filter(|n| !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && !matches!(n.type_id.as_str(), "feed" | "rule" | "canvas")).count();
     let stale = live
         .iter()
         .filter(|n| days_since(&n.updated_at) > 30 && !(n.type_id == "task" && n.props.0.get("done").and_then(|d| d.as_bool()) == Some(true)) && !matches!(n.type_id.as_str(), "bookmark" | "quote" | "image" | "file"))
@@ -123,7 +123,7 @@ pub async fn needs_care(app: &AppState, limit: usize) -> Result<Vec<Care>> {
             out.push(Care { kind: "overdue".into(), node_id: n.id.clone(), reason: format!("задача «{}» просрочена", n.label) });
         }
     }
-    for n in nodes.iter().filter(|n| n.archived == 0 && !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && !matches!(n.type_id.as_str(), "feed" | "diary") && n.body.chars().count() > 80) {
+    for n in nodes.iter().filter(|n| n.archived == 0 && !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && !matches!(n.type_id.as_str(), "feed" | "diary" | "rule" | "canvas") && n.body.chars().count() > 80) {
         out.push(Care { kind: "orphan".into(), node_id: n.id.clone(), reason: format!("«{}» ни с чем не связан", n.label) });
     }
     for n in nodes.iter().filter(|n| n.archived == 0 && days_since(&n.updated_at) > 30 && matches!(n.type_id.as_str(), "project" | "goal" | "idea")) {
