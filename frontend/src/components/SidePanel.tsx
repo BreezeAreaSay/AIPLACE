@@ -4,8 +4,9 @@ import { NodePanel } from './NodePanel'
 import { Canvas } from './Canvas'
 import { ContractsPanel } from './ContractsPanel'
 import { DirectorInspector } from './DirectorInspector'
+import { OrganismPanel } from './OrganismPanel'
 
-export type SideTab = 'library' | 'object' | 'graph' | 'contracts' | 'director'
+export type SideTab = 'library' | 'object' | 'graph' | 'organism' | 'contracts' | 'director'
 
 interface Props {
   tab: SideTab
@@ -30,6 +31,8 @@ interface Props {
   onGithub: (id: string) => Promise<unknown>
   onEditTypes: (id?: string) => void
   onPollFeeds: () => Promise<{ created: number }>
+  onTend: (nodeId?: string) => Promise<unknown>
+  onChronicle: () => Promise<unknown>
   onCreateType: (name: string) => void
   onPatch: (id: string, patch: Record<string, unknown>) => void
   onDelete: (id: string) => void
@@ -56,6 +59,7 @@ export function SidePanel(p: Props) {
     ['library', `Библиотека · ${live}`],
     ['object', p.selected ? `◇ ${p.selected.label.length > 18 ? p.selected.label.slice(0, 18) + '…' : p.selected.label}` : 'Объект'],
     ['graph', 'Граф'],
+    ['organism', '♥ Организм'],
     ['contracts', `Слово${openContracts ? ` · ${openContracts}` : ''}`],
     ['director', 'Режиссёр'],
   ]
@@ -115,11 +119,17 @@ export function SidePanel(p: Props) {
             onDeleteFile={p.onDeleteFile}
             onAutofill={p.onAutofill}
             onGithub={p.onGithub}
+            onTend={p.onTend}
           />
         )}
         {p.tab === 'object' && !p.selected && <div className="p-4 font-mono text-xs text-zinc-600">Выбери объект в библиотеке, на графе или по чипу в чате.</div>}
         {p.tab === 'graph' && (
           <Canvas graph={p.graph} notes={p.notes} agents={p.agents} types={p.types} selectedId={p.selected?.id ?? null} hotIds={p.hotIds} onSelect={p.onSelect} onCreate={(label, pos) => p.onCreate(label, pos)} onMove={p.onMove} onConnect={p.onConnect} />
+        )}
+        {p.tab === 'organism' && (
+          <div className="h-full overflow-y-auto">
+            <OrganismPanel agents={p.agents} nodes={p.graph.nodes} types={p.types} disabled={p.disabled} onSelect={(id) => p.onSelect(id)} onTend={p.onTend} onChronicle={p.onChronicle} />
+          </div>
         )}
         {p.tab === 'contracts' && (
           <div className="h-full overflow-y-auto">

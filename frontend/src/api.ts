@@ -93,7 +93,29 @@ export interface LookupCard {
   source: string
 }
 
+export interface OrganismState {
+  health: {
+    objects: number
+    archived: number
+    orphans: number
+    stale: number
+    undigested_files: number
+    open_tasks: number
+    overdue_tasks: number
+    unread_bookmarks: number
+    grown_7d: number
+    touched_by_agents_7d: number
+    score: number
+    today_diary: string | null
+  }
+  needs_care: { kind: string; node_id: string; reason: string }[]
+  recent: { at: string; agent: string; op: string; object_id: string; text: string; message_id: number }[]
+}
+
 export const api = {
+  organism: () => request<OrganismState>('/api/organism'),
+  tend: (nodeId?: string, agentId?: string) => request<Record<string, unknown>>('/api/organism/tend', { method: 'POST', body: JSON.stringify({ node_id: nodeId, agent_id: agentId }) }),
+  chronicle: () => request<{ id: string | null }>('/api/organism/chronicle', { method: 'POST', body: '{}' }),
   uploadToNode: (id: string, files: File[]) => upload<Attachment[]>(`/api/nodes/${encodeURIComponent(id)}/files`, files),
   uploadFiles: (files: File[], type?: string) => upload<{ ids: string[]; attachments: Attachment[] }>('/api/files', files, type ? { type } : {}),
   fileUrl: (id: string) => `${API_BASE}/api/files/${encodeURIComponent(id)}`,

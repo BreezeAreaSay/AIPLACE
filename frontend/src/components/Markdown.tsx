@@ -49,7 +49,8 @@ export function toggleTask(source: string, index: number): string {
 
 /** Shared markdown renderer: GFM (tables, task lists, strikethrough), wikilinks, safe external links. */
 export function Markdown({ text, nodes = [], types = [], onOpen, onCreate, onChange, variant = 'note', breaks = variant === 'chat' }: Props) {
-  const src = useMemo(() => preprocessWikilinks(text), [text])
+  // HTML comments (digest markers etc.) are bookkeeping, never content.
+  const src = useMemo(() => preprocessWikilinks(text.replace(/<!--[\s\S]*?-->/g, '')), [text])
   let taskIndex = -1
 
   const components: Components = {

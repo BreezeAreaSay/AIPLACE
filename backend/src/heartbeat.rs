@@ -80,6 +80,19 @@ async fn beat_all(root: &AppState) -> Result<()> {
             }
         }
     }
+    // Evening chronicle and file digestion don't need the player to be away — only budget.
+    if root.llm.budget_left() && (!root.llm_settings().await.mock_mode() || root.cfg.heartbeat_in_mock) {
+        for id in root.rooms.open_ids().await {
+            if let Ok(app) = root.for_room(&id).await {
+                if let Err(e) = maybe_chronicle(&app).await {
+                    tracing::warn!(room = %id, error = %e, "chronicle failed");
+                }
+                if let Err(e) = maybe_digest(&app).await {
+                    tracing::warn!(room = %id, error = %e, "digest failed");
+                }
+            }
+        }
+    }
     if in_quiet_hours(&root.cfg.quiet_hours) {
         return Ok(());
     }
@@ -121,9 +134,26 @@ async fn maybe_beat(app: &AppState) -> Result<()> {
         return Ok(());
     }
     let has_news = !crate::integrations::feeds::fresh_news(app, 1).await.unwrap_or_default().is_empty();
+    let needs_care = !crate::organism::needs_care(app, 1).await.unwrap_or_default().is_empty();
+    let roll = rand::thread_rng().gen_range(0..100);
+    // Every third quiet beat (when there is something to tend) is care, not talk: one small call.
+    if needs_care && roll < 33 {
+        if app.turn_lock.try_lock().is_err() {
+            return Ok(());
+        }
+        let _turn = app.turn_lock.lock().await;
+        match crate::organism::tend_next(app).await {
+            Ok(Some((agent, node, n))) => tracing::info!(room = %app.room_id, %agent, %node, actions = n, "heartbeat: tended the library"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "tend failed"),
+        }
+        drop(_turn);
+        db::meta_set(&app.db, "beats_while_away", &(beats_while_away + 1).to_string()).await?;
+        app.emit(RoomEvent::Done);
+        return Ok(());
+    }
     let kind = {
-        let mut rng = rand::thread_rng();
-        match rng.gen_range(0..100) {
+        match roll {
             0..=39 => LifeKind::WriteFirst,
             40..=64 => LifeKind::Argue,
             65..=84 if has_news => LifeKind::News,
@@ -134,6 +164,14 @@ async fn maybe_beat(app: &AppState) -> Result<()> {
     let before = db::last_message_id(&app.db).await?;
     let _turn = app.turn_lock.lock().await;
     crate::handlers::run_round(app, Trigger::Life(kind)).await?;
+    if matches!(kind, LifeKind::OwnProject) {
+        // what they told the room goes into their project's log too
+        if let Ok(new) = db::messages_between(&app.db, before, i64::MAX, 3).await {
+            if let Some(m) = new.iter().rev().find(|m| m.sender_id != "system" && m.sender_id != "user") {
+                let _ = crate::organism::advance_project(app, &m.sender_id, &m.content).await;
+            }
+        }
+    }
     drop(_turn);
     if matches!(kind, LifeKind::News) {
         // the freshest items were offered to the Caster; don't offer them twice
@@ -170,6 +208,45 @@ async fn notify_telegram(app: &AppState, after_id: i64) {
     if let Err(e) = client.post(format!("https://api.telegram.org/bot{token}/sendMessage")).json(&body).send().await {
         tracing::warn!(error = %e, "telegram push failed");
     }
+}
+
+/// Once a day after 20:00 local, if the day had any life: the yard writes its chronicle.
+pub async fn maybe_chronicle(app: &AppState) -> Result<()> {
+    let hour = chrono::Local::now().hour();
+    if hour < 20 {
+        return Ok(());
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if db::meta_get(&app.db, "chronicle_date").await?.as_deref() == Some(today.as_str()) {
+        return Ok(());
+    }
+    if app.turn_lock.try_lock().is_err() {
+        return Ok(());
+    }
+    db::meta_set(&app.db, "chronicle_date", &today).await?;
+    let _turn = app.turn_lock.lock().await;
+    if let Some(id) = crate::organism::chronicle(app, false).await? {
+        tracing::info!(room = %app.room_id, %id, "chronicle written");
+        app.emit(RoomEvent::Done);
+    }
+    Ok(())
+}
+
+/// Files nobody has read yet get digested within a couple of minutes of upload, player present or not.
+pub async fn maybe_digest(app: &AppState) -> Result<()> {
+    let care = crate::organism::needs_care(app, 3).await?;
+    let Some(c) = care.into_iter().find(|c| c.kind == "digest") else { return Ok(()) };
+    if app.turn_lock.try_lock().is_err() {
+        return Ok(());
+    }
+    let _turn = app.turn_lock.lock().await;
+    let agents = db::list_agents(&app.db).await?;
+    let Some(node) = db::get_node(&app.db, &c.node_id).await? else { return Ok(()) };
+    let Some(agent) = crate::organism::pick_carer(&agents, &node, "digest") else { return Ok(()) };
+    let (recs, _) = crate::organism::tend(app, &agent.id, &c.node_id, "digest").await?;
+    tracing::info!(room = %app.room_id, agent = %agent.id, node = %c.node_id, actions = recs.len(), "file digested");
+    app.emit(RoomEvent::Done);
+    Ok(())
 }
 
 /// Poll RSS feeds every `FEEDS_EVERY_MIN` (default 180) minutes.

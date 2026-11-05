@@ -156,6 +156,8 @@ export default function App() {
       onGithub={(id) => room.githubInto(id)}
       onEditTypes={(id) => setTypeEditor({ open: true, id: id ?? null })}
       onPollFeeds={room.pollFeeds}
+      onTend={(id) => api.tend(id).then((r) => (void room.refresh(), r))}
+      onChronicle={() => api.chronicle().then((r) => (void room.refresh(), r))}
       onCreateType={(name) => void room.createType(name)}
       onPatch={(id, patch) => void room.patchNode(id, patch)}
       onDelete={(id) => {

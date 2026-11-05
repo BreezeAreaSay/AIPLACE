@@ -123,6 +123,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/messages/search", get(search_messages))
         .route("/api/messages/:id", axum::routing::patch(edit_message).delete(delete_message))
         .route("/api/llm/log", get(llm_log))
+        .route("/api/organism", get(organism_state))
+        .route("/api/organism/tend", post(organism_tend))
+        .route("/api/organism/chronicle", post(organism_chronicle))
         .route("/api/backup.zip", get(backup_zip))
         .route("/api/restore", post(restore_upload).delete(restore_cancel))
         .route("/api/update/check", post(update_check))
@@ -456,6 +459,35 @@ pub async fn run_round_with(app: &AppState, trigger: Trigger, attachments: Optio
 
 // ───────────────────────────── Canvas: nodes, edges, notes ─────────────────────────────
 
+pub async fn emit_graph_pub(app: &AppState) -> anyhow::Result<()> {
+    emit_graph(app).await
+}
+
+/// Digest freshly uploaded readable files in the background (one small LLM call each).
+fn spawn_digest(app: &AppState, node_id: &str) {
+    let app = app.clone();
+    let node_id = node_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let s = app.llm_settings().await;
+        if s.mock_mode() && !app.cfg.heartbeat_in_mock {
+            return;
+        }
+        if !app.llm.budget_left() {
+            return;
+        }
+        let _turn = app.turn_lock.lock().await;
+        let Ok(agents) = db::list_agents(&app.db).await else { return };
+        let Ok(Some(node)) = db::get_node(&app.db, &node_id).await else { return };
+        let Some(agent) = crate::organism::pick_carer(&agents, &node, "digest") else { return };
+        match crate::organism::tend(&app, &agent.id, &node_id, "digest").await {
+            Ok((recs, _)) => tracing::info!(node = %node_id, agent = %agent.id, actions = recs.len(), "uploaded file digested"),
+            Err(e) => tracing::warn!(node = %node_id, error = %e, "digest failed"),
+        }
+        app.emit(RoomEvent::Done);
+    });
+}
+
 async fn emit_graph(app: &AppState) -> anyhow::Result<()> {
     let graph = Graph { nodes: db::list_nodes(&app.db).await?, edges: db::list_edges(&app.db).await? };
     let mermaid = mermaid::build_graph(&graph.nodes, &graph.edges);
@@ -775,6 +807,9 @@ async fn upload_to_node(Room { app, .. }: Room, Path(id): Path<String>, mp: Mult
     }
     emit_attachments(&app).await?;
     emit_graph(&app).await?;
+    if out.iter().any(|a| a.text_len > 0) {
+        spawn_digest(&app, &id);
+    }
     Ok(Json(out))
 }
 
@@ -809,6 +844,9 @@ async fn upload_files(Room { app, .. }: Room, mp: Multipart) -> AppResult<Json<s
         if a.text_len > 0 {
             let preview = mermaid::truncate_chars(&a.text.split_whitespace().collect::<Vec<_>>().join(" "), 400);
             db::update_object_meta(&app.db, &id, None, Some(&serde_json::json!({ "summary": preview })), None).await?;
+        }
+        if a.text_len > 0 {
+            spawn_digest(&app, &id);
         }
         ids.push(id);
         atts.push(a);
@@ -1095,6 +1133,63 @@ async fn delete_message(Room { app, .. }: Room, Path(id): Path<i64>) -> AppResul
 
 async fn llm_log(State(app): State<AppState>) -> Json<Vec<crate::openrouter::CallLog>> {
     Json(app.llm.journal())
+}
+
+// ───────────────────────────── Organism ─────────────────────────────
+
+async fn organism_state(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    let health = crate::organism::health(&app).await?;
+    let care = crate::organism::needs_care(&app, 8).await?;
+    let recent = crate::organism::recent_care(&app, 30).await?;
+    Ok(Json(json!({ "health": health, "needs_care": care, "recent": recent })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TendRequest {
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+/// Tend one object now (or whatever needs it most).
+async fn organism_tend(Room { app, .. }: Room, Json(req): Json<TendRequest>) -> AppResult<Json<serde_json::Value>> {
+    if app.turn_lock.try_lock().is_err() {
+        return Err(AppError::bad_request("идёт раунд — чуть позже"));
+    }
+    let _turn = app.turn_lock.lock().await;
+    let result = match req.node_id.as_deref().map(mermaid::safe_id) {
+        Some(id) => {
+            let agents = db::list_agents(&app.db).await?;
+            let node = db::get_node(&app.db, &id).await?.ok_or_else(|| AppError::bad_request("нет такого объекта"))?;
+            let atts = db::attachments_of(&app.db, &id).await?;
+            let kind = if atts.iter().any(|a| a.text_len > 0 && !node.body.contains(&format!("<!-- digest:{} -->", a.id))) { "digest" } else { "manual" };
+            let agent = match req.agent_id.as_deref() {
+                Some(a) => agents.iter().find(|x| x.id == a && x.is_alive()).cloned(),
+                None => crate::organism::pick_carer(&agents, &node, kind).cloned(),
+            }
+            .ok_or_else(|| AppError::bad_request("некому: все жители мертвы или уехали"))?;
+            let (recs, say) = crate::organism::tend(&app, &agent.id, &id, kind).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+            json!({ "agent": agent.id, "node": id, "actions": recs, "say": say })
+        }
+        None => match crate::organism::tend_next(&app).await.map_err(|e| AppError::bad_request(format!("{e:#}")))? {
+            Some((agent, node, n)) => json!({ "agent": agent, "node": node, "actions_count": n }),
+            None => json!({ "nothing": true, "message": "в библиотеке всё прибрано" }),
+        },
+    };
+    app.emit(RoomEvent::Done);
+    Ok(Json(result))
+}
+
+async fn organism_chronicle(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    if app.turn_lock.try_lock().is_err() {
+        return Err(AppError::bad_request("идёт раунд — чуть позже"));
+    }
+    let _turn = app.turn_lock.lock().await;
+    let id = crate::organism::chronicle(&app, true).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    db::meta_set(&app.db, "chronicle_date", &chrono::Local::now().format("%Y-%m-%d").to_string()).await?;
+    app.emit(RoomEvent::Done);
+    Ok(Json(json!({ "id": id })))
 }
 
 // ───────────────────────────── Backup / restore ─────────────────────────────

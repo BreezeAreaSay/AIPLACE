@@ -906,6 +906,10 @@ pub async fn search_attachments(pool: &Db, text: &str, limit: usize) -> Result<V
 
 // ───────────────────────────── Mentions ─────────────────────────────
 
+pub async fn all_mentioned_objects(pool: &Db) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT DISTINCT object_id FROM mentions").fetch_all(pool).await?)
+}
+
 pub async fn add_mention(pool: &Db, message_id: i64, object_id: &str) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO mentions (message_id, object_id) VALUES (?, ?)")
         .bind(message_id)

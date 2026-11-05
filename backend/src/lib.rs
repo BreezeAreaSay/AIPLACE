@@ -21,6 +21,7 @@ pub mod mermaid;
 pub mod mock_llm;
 pub mod models;
 pub mod openrouter;
+pub mod organism;
 pub mod pipeline;
 pub mod prompts;
 pub mod roles;

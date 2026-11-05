@@ -8,6 +8,8 @@ interface Props {
   attachments: Attachment[]
   onUpload: (files: File[]) => Promise<unknown>
   onDelete: (id: string) => void
+  /** ids whose text an inhabitant has already read and digested into the note. */
+  digested?: Set<string>
 }
 
 export function humanSize(n: number) {
@@ -32,7 +34,7 @@ export function Lightbox({ src, name, onClose }: { src: string; name: string; on
 }
 
 /** Files of one object: image grid + document list, drag-and-drop or button upload. */
-export function Attachments({ nodeId, attachments, onUpload, onDelete }: Props) {
+export function Attachments({ nodeId, attachments, onUpload, onDelete, digested }: Props) {
   const [drag, setDrag] = useState(false)
   const [busy, setBusy] = useState(false)
   const [view, setView] = useState<Attachment | null>(null)
@@ -116,7 +118,7 @@ export function Attachments({ nodeId, attachments, onUpload, onDelete }: Props) 
             </a>
             <span className="shrink-0 font-mono text-[9px] text-zinc-600">
               {humanSize(a.size)}
-              {a.text_len > 0 ? ` · ${a.text_len.toLocaleString('ru-RU')} симв. — агенты читают` : ' · без текста'}
+              {a.text_len > 0 ? ` · ${a.text_len.toLocaleString('ru-RU')} симв.${digested?.has(a.id) ? ' · прочитан и законспектирован' : ' · в очереди на разбор'}` : ' · без текста'}
             </span>
             {a.text_len > 0 && (
               <button

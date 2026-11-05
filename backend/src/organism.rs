@@ -1,0 +1,381 @@
+//! The library as a living thing. Inhabitants don't just answer — they *tend* the library:
+//! digest files you drop, link orphans, close the loop on stale tasks, write the day's
+//! chronicle, advance their own projects. Each act is one small LLM call producing a JSON
+//! plan that is applied through the same tool registry the agents use, so it shows up in the
+//! chat as that character's doing.
+
+use anyhow::{Context, Result};
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::{
+    db, mermaid,
+    models::{ActionRecord, Agent, Attachment, GraphNode, RoomEvent},
+    openrouter::{extract_json, ChatMessage, ChatOpts},
+    state::AppState,
+};
+
+pub const GARDENER_MARK: &str = "[STAGE-GARDENER]";
+pub const CHRONICLE_MARK: &str = "[STAGE-CHRONICLE]";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Health {
+    pub objects: usize,
+    pub archived: usize,
+    pub orphans: usize,
+    pub stale: usize,
+    pub undigested_files: usize,
+    pub open_tasks: usize,
+    pub overdue_tasks: usize,
+    pub unread_bookmarks: usize,
+    pub grown_7d: usize,
+    pub touched_by_agents_7d: usize,
+    /// 0..100 — how cared-for the library is.
+    pub score: u8,
+    pub today_diary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Care {
+    pub kind: String,
+    pub node_id: String,
+    pub reason: String,
+}
+
+fn days_since(ts: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.fZ").map(|n| n.and_utc()))
+        .map(|d| (chrono::Utc::now() - d).num_days())
+        .unwrap_or(0)
+}
+
+pub fn today_diary_id() -> String {
+    format!("khronika_{}", chrono::Local::now().format("%Y_%m_%d"))
+}
+
+pub async fn health(app: &AppState) -> Result<Health> {
+    let nodes = db::list_nodes(&app.db).await?;
+    let edges = db::list_edges(&app.db).await?;
+    let atts = db::list_attachments(&app.db).await?;
+    let mentioned: std::collections::HashSet<String> = db::all_mentioned_objects(&app.db).await?.into_iter().collect();
+    let linked: std::collections::HashSet<&str> = edges.iter().flat_map(|e| [e.source_id.as_str(), e.target_id.as_str()]).collect();
+    let live: Vec<&GraphNode> = nodes.iter().filter(|n| n.archived == 0).collect();
+    let orphans = live.iter().filter(|n| !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && n.type_id != "feed").count();
+    let stale = live
+        .iter()
+        .filter(|n| days_since(&n.updated_at) > 30 && !(n.type_id == "task" && n.props.0.get("done").and_then(|d| d.as_bool()) == Some(true)) && !matches!(n.type_id.as_str(), "bookmark" | "quote" | "image" | "file"))
+        .count();
+    let undigested_files = atts.iter().filter(|a| a.text_len > 0 && !is_digested(&nodes, a)).count();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let (mut open_tasks, mut overdue) = (0, 0);
+    for n in live.iter().filter(|n| n.type_id == "task") {
+        let done = n.props.0.get("done").and_then(|d| d.as_bool()) == Some(true);
+        if done {
+            continue;
+        }
+        open_tasks += 1;
+        if n.props.0.get("due").and_then(|d| d.as_str()).map(|d| d < today.as_str()).unwrap_or(false) {
+            overdue += 1;
+        }
+    }
+    let unread_bookmarks = live.iter().filter(|n| n.type_id == "bookmark" && n.props.0.get("read").and_then(|r| r.as_bool()) != Some(true)).count();
+    let grown_7d = nodes.iter().filter(|n| days_since(&n.created_at) <= 7).count();
+    let touched_by_agents_7d = nodes.iter().filter(|n| days_since(&n.updated_at) <= 7 && n.created_by != "user").count();
+    let total = live.len().max(1) as f64;
+    let penalty = (orphans as f64 / total) * 35.0 + (stale as f64 / total) * 25.0 + (undigested_files.min(10) as f64) * 4.0 + (overdue.min(10) as f64) * 2.0;
+    let score = (100.0 - penalty).clamp(0.0, 100.0) as u8;
+    let diary = today_diary_id();
+    Ok(Health {
+        objects: live.len(),
+        archived: nodes.len() - live.len(),
+        orphans,
+        stale,
+        undigested_files,
+        open_tasks,
+        overdue_tasks: overdue,
+        unread_bookmarks,
+        grown_7d,
+        touched_by_agents_7d,
+        score,
+        today_diary: if nodes.iter().any(|n| n.id == diary) { Some(diary) } else { None },
+    })
+}
+
+fn is_digested(nodes: &[GraphNode], a: &Attachment) -> bool {
+    nodes.iter().find(|n| n.id == a.node_id).map(|n| n.body.contains(&format!("<!-- digest:{} -->", a.id))).unwrap_or(true)
+}
+
+/// What needs care most, in order.
+pub async fn needs_care(app: &AppState, limit: usize) -> Result<Vec<Care>> {
+    let nodes = db::list_nodes(&app.db).await?;
+    let edges = db::list_edges(&app.db).await?;
+    let atts = db::list_attachments(&app.db).await?;
+    let mentioned: std::collections::HashSet<String> = db::all_mentioned_objects(&app.db).await?.into_iter().collect();
+    let linked: std::collections::HashSet<&str> = edges.iter().flat_map(|e| [e.source_id.as_str(), e.target_id.as_str()]).collect();
+    let mut out = vec![];
+    for a in atts.iter().filter(|a| a.text_len > 0 && !is_digested(&nodes, a)) {
+        out.push(Care { kind: "digest".into(), node_id: a.node_id.clone(), reason: format!("файл «{}» ещё никто не читал", a.name) });
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    for n in nodes.iter().filter(|n| n.archived == 0 && n.type_id == "task") {
+        if n.props.0.get("done").and_then(|d| d.as_bool()) != Some(true) && n.props.0.get("due").and_then(|d| d.as_str()).map(|d| d < today.as_str()).unwrap_or(false) {
+            out.push(Care { kind: "overdue".into(), node_id: n.id.clone(), reason: format!("задача «{}» просрочена", n.label) });
+        }
+    }
+    for n in nodes.iter().filter(|n| n.archived == 0 && !linked.contains(n.id.as_str()) && !mentioned.contains(&n.id) && !matches!(n.type_id.as_str(), "feed" | "diary") && n.body.chars().count() > 80) {
+        out.push(Care { kind: "orphan".into(), node_id: n.id.clone(), reason: format!("«{}» ни с чем не связан", n.label) });
+    }
+    for n in nodes.iter().filter(|n| n.archived == 0 && days_since(&n.updated_at) > 30 && matches!(n.type_id.as_str(), "project" | "goal" | "idea")) {
+        out.push(Care { kind: "stale".into(), node_id: n.id.clone(), reason: format!("«{}» не трогали {} дн.", n.label, days_since(&n.updated_at)) });
+    }
+    // de-dup by node, keep first (highest priority)
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.node_id.clone()));
+    out.truncate(limit);
+    Ok(out)
+}
+
+/// Which inhabitant should care for an object (role affinity, falls back to anyone alive).
+pub fn pick_carer<'a>(agents: &'a [Agent], node: &GraphNode, kind: &str) -> Option<&'a Agent> {
+    let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
+    if alive.is_empty() {
+        return None;
+    }
+    let prefer: &[&str] = match (kind, node.type_id.as_str()) {
+        ("digest", _) => &["chronicler", "critic", "engineer", "physicist", "lit_teacher", "mentor"],
+        ("overdue", _) => &["producer", "coach", "mentor", "physicist", "hustler"],
+        (_, "book") | (_, "quote") => &["lit_teacher", "critic", "chronicler"],
+        (_, "project") => &["engineer", "producer", "mentor", "physicist"],
+        (_, "idea") => &["dreamer", "graffiti", "critic"],
+        (_, "human") => &["shrink", "granny", "lit_teacher"],
+        (_, "goal") => &["coach", "producer", "mentor"],
+        _ => &["chronicler", "shrink", "lit_teacher", "physicist"],
+    };
+    for p in prefer {
+        if let Some(a) = alive.iter().find(|a| a.role == *p || a.id == *p) {
+            return Some(a);
+        }
+    }
+    use rand::seq::SliceRandom;
+    alive.choose(&mut rand::thread_rng()).copied()
+}
+
+fn opts(max_tokens: u32) -> ChatOpts {
+    ChatOpts { temperature: 0.5, max_tokens, json_mode: true, prefill: None, presence_penalty: None, frequency_penalty: None }
+}
+
+/// One act of care on `node_id` by `agent`: read it (and its files), improve it, say one line.
+pub async fn tend(app: &AppState, agent_id: &str, node_id: &str, kind: &str) -> Result<(Vec<ActionRecord>, Option<String>)> {
+    let agents = db::list_agents(&app.db).await?;
+    let agent = agents.iter().find(|a| a.id == agent_id).cloned().context("нет такого жителя")?;
+    let node = db::get_node(&app.db, node_id).await?.context("нет такого объекта")?;
+    let types = db::list_types(&app.db).await?;
+    let atts = db::attachments_of(&app.db, node_id).await?;
+    let edges = db::edges_of(&app.db, node_id).await?;
+    let notes = db::notes_for_node(&app.db, node_id).await?;
+    let all = db::list_nodes(&app.db).await?;
+    let candidates: Vec<&GraphNode> = {
+        let text = format!("{} {}", node.label, mermaid::truncate_chars(&node.body, 400));
+        let hits = db::search_objects(&app.db, &text, None, 10).await?;
+        let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).filter(|id| id != node_id).collect();
+        all.iter().filter(|n| ids.contains(&n.id)).collect()
+    };
+    let schema = types.iter().find(|t| t.id == node.type_id).and_then(|t| t.schema.0.get("props").cloned()).unwrap_or(json!([]));
+    let files_text: String = atts
+        .iter()
+        .filter(|a| a.text_len > 0)
+        .map(|a| format!("### Файл «{}» ({} симв.) [id {}]\n{}", a.name, a.text_len, a.id, mermaid::truncate_chars(&a.text, if kind == "digest" { 7000 } else { 2500 })))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let undigested: Vec<&Attachment> = atts.iter().filter(|a| a.text_len > 0 && !node.body.contains(&format!("<!-- digest:{} -->", a.id))).collect();
+
+    let system = format!(
+        "{GARDENER_MARK} {core}\n\nСейчас ты не разговариваешь, а ВОЗДЕЛЫВАЕШЬ библиотеку двора: приводишь в порядок один объект. Ты читал его целиком (и приложенные файлы). Верни ТОЛЬКО JSON:\n\
+{{\"summary\": \"1–2 предложения, о чём объект (для поля summary; null если не нужно)\",\n \"props\": {{\"ключ\": \"значение по схеме типа — заполняй только пустое и очевидное, null не пиши\"}},\n \"append\": {{\"heading\": \"Конспект|Главное|Лог|Мысли <твоё имя>\", \"text\": \"markdown: что стоит дописать в тело — конспект файла, главные тезисы, следующий шаг, твоё замечание. 3–12 строк, списками\"}},\n \"links\": [{{\"to\": \"id из КАНДИДАТОВ\", \"kind\": \"related|about|belongs_to|blocks|contradicts\", \"why\": \"3 слова\"}}],\n \"new_objects\": [{{\"type\": \"task|human|idea|quote|event|place|book\", \"title\": \"…\", \"props\": {{}}}}],\n \"note\": \"короткая пометка от тебя в характере или null\",\n \"say\": \"одна реплика в чат от первого лица в твоём характере: что ты сделал и что заметил (1–2 предложения, без списков, с конкретикой из текста)\"}}\n\
+Правила: не выдумывай фактов, которых нет в тексте; не переписывай тело, только дописывай; new_objects — не больше 3 и только если в тексте есть конкретные люди/задачи/даты/цитаты; links — только из кандидатов. Пиши по-русски.",
+        core = agent.system_core
+    );
+    let user = format!(
+        "ОБЪЕКТ: «{}» [{}] id={}\nСВОЙСТВА: {}\nСХЕМА ТИПА: {}\nТЕЛО:\n{}\n\n{}\n\nСВЯЗИ: {}\nПОМЕТКИ: {}\nКАНДИДАТЫ ДЛЯ СВЯЗЕЙ:\n{}\n\nПОЧЕМУ ТЫ ВЗЯЛСЯ: {}",
+        node.label,
+        node.type_id,
+        node.id,
+        node.props.0,
+        schema,
+        mermaid::truncate_chars(&node.body, 3500),
+        if files_text.is_empty() { "(файлов нет)".to_string() } else { files_text },
+        if edges.is_empty() { "нет".to_string() } else { edges.iter().map(|e| format!("{}→{} ({})", e.source_id, e.target_id, e.kind)).collect::<Vec<_>>().join(", ") },
+        if notes.is_empty() { "нет".to_string() } else { notes.iter().map(|n| format!("{}: {}", n.author, mermaid::truncate_chars(&n.text, 100))).collect::<Vec<_>>().join(" | ") },
+        if candidates.is_empty() { "  (нет)".to_string() } else { candidates.iter().map(|c| format!("  {} [{}] «{}»", c.id, c.type_id, c.label)).collect::<Vec<_>>().join("\n") },
+        match kind { "digest" => "к объекту приложили файл, его никто ещё не читал", "overdue" => "задача просрочена", "orphan" => "объект ни с чем не связан", "stale" => "объект давно не трогали", _ => "игрок попросил разобрать" }
+    );
+    let settings = app.llm_settings().await;
+    let model = if agent.model.trim().is_empty() { settings.director_model.clone() } else { agent.model.clone() };
+    app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} разбирает «{}»", agent.name, mermaid::truncate_chars(&node.label, 30)) });
+    let raw = app.llm.chat(&model, &[ChatMessage::system(system), ChatMessage::user(user)], &opts(1100)).await?;
+    let plan = extract_json(&raw)?;
+
+    let mut records: Vec<ActionRecord> = vec![];
+    // props + summary
+    let mut props = plan.get("props").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+    if let Some(s) = plan.get("summary").and_then(|s| s.as_str()).filter(|s| !s.trim().is_empty()) {
+        let has_summary = schema.as_array().map(|a| a.iter().any(|p| p.get("key").and_then(|k| k.as_str()) == Some("summary"))).unwrap_or(false);
+        if has_summary && node.props.0.get("summary").and_then(|x| x.as_str()).map(|x| x.trim().is_empty()).unwrap_or(true) {
+            props.insert("summary".into(), json!(mermaid::truncate_chars(s.trim(), 400)));
+        }
+    }
+    props.retain(|k, v| !v.is_null() && node.props.0.get(k).map(|cur| cur.is_null() || cur.as_str() == Some("")).unwrap_or(true));
+    if !props.is_empty() {
+        let (_, rec) = crate::tools::call(app, &agent.id, "library_update", &json!({ "id": node.id, "props": Value::Object(props) })).await?;
+        records.extend(rec);
+    }
+    // append (with digest markers for files we read)
+    if let Some(ap) = plan.get("append").filter(|a| a.is_object()) {
+        let text = ap.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+        if text.chars().count() > 10 {
+            let heading = ap.get("heading").and_then(|h| h.as_str()).unwrap_or("Главное");
+            let markers: String = undigested.iter().map(|a| format!("\n<!-- digest:{} -->", a.id)).collect();
+            let signed = format!("{text}\n\n_— {}_{markers}", agent.name.split(" (").next().unwrap_or(&agent.name));
+            let (_, rec) = crate::tools::call(app, &agent.id, "library_append", &json!({ "id": node.id, "heading": heading, "text": signed })).await?;
+            records.extend(rec);
+        }
+    } else if !undigested.is_empty() {
+        // nothing to append but the files were read: mark them so we don't loop
+        let markers: String = undigested.iter().map(|a| format!("<!-- digest:{} -->", a.id)).collect::<Vec<_>>().join("\n");
+        db::update_node_fields(&app.db, &node.id, None, Some(&format!("{}\n\n{markers}", node.body.trim_end())), None, None).await?;
+    }
+    // links
+    for l in plan.get("links").and_then(|l| l.as_array()).map(|a| a.iter().take(4).collect::<Vec<_>>()).unwrap_or_default() {
+        let to = l.get("to").and_then(|t| t.as_str()).unwrap_or("");
+        if candidates.iter().any(|c| c.id == to) {
+            let (_, rec) = crate::tools::call(app, &agent.id, "library_link", &json!({ "from": node.id, "to": to, "kind": l.get("kind").cloned().unwrap_or(json!("related")), "label": l.get("why").cloned().unwrap_or(json!("")) })).await?;
+            records.extend(rec);
+        }
+    }
+    // new objects (linked to the source)
+    for o in plan.get("new_objects").and_then(|l| l.as_array()).map(|a| a.iter().take(3).collect::<Vec<_>>()).unwrap_or_default() {
+        let (res, rec) = crate::tools::call(app, &agent.id, "library_create", &json!({ "type": o.get("type").cloned().unwrap_or(json!("note")), "title": o.get("title").cloned().unwrap_or(json!("")), "props": o.get("props").cloned().unwrap_or(json!({})) })).await?;
+        if let Some(id) = res.get("id").and_then(|i| i.as_str()) {
+            let _ = crate::tools::call(app, &agent.id, "library_link", &json!({ "from": id, "to": node.id, "kind": "about", "label": "из разбора" })).await;
+        }
+        records.extend(rec);
+    }
+    if let Some(n) = plan.get("note").and_then(|n| n.as_str()).filter(|n| n.trim().chars().count() > 3) {
+        let (_, rec) = crate::tools::call(app, &agent.id, "library_note", &json!({ "id": node.id, "text": n.trim() })).await?;
+        records.extend(rec);
+    }
+    // the line in chat
+    let say = plan.get("say").and_then(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(|s| mermaid::truncate_chars(s, 600));
+    if let Some(text) = &say {
+        let msg = db::insert_message_full(&app.db, &agent.id, None, text, Some("user"), Some("забота"), Some(&node.id)).await?;
+        db::set_message_actions(&app.db, msg.id, &records).await?;
+        db::add_mention(&app.db, msg.id, &node.id).await?;
+        let full = db::with_mentions(&app.db, vec![db::get_message(&app.db, msg.id).await?.unwrap()]).await?.remove(0);
+        app.emit(RoomEvent::Message { message: full });
+    }
+    db::insert_event(&app.db, "tended", &json!({ "agent": agent.id, "node": node.id, "kind": kind, "actions": records.len() })).await?;
+    crate::handlers::emit_graph_pub(app).await?;
+    app.emit(RoomEvent::Notes { notes: db::list_notes(&app.db, 400).await? });
+    Ok((records, say))
+}
+
+/// Pick the most needed object and tend it. Returns what was done, if anything.
+pub async fn tend_next(app: &AppState) -> Result<Option<(String, String, usize)>> {
+    let Some(care) = needs_care(app, 1).await?.into_iter().next() else { return Ok(None) };
+    let agents = db::list_agents(&app.db).await?;
+    let node = db::get_node(&app.db, &care.node_id).await?.context("node vanished")?;
+    let Some(agent) = pick_carer(&agents, &node, &care.kind) else { return Ok(None) };
+    let (records, _) = tend(app, &agent.id, &care.node_id, &care.kind).await?;
+    Ok(Some((agent.id.clone(), care.node_id, records.len())))
+}
+
+/// The day's chronicle: a diary object the yard writes about itself.
+pub async fn chronicle(app: &AppState, force: bool) -> Result<Option<String>> {
+    let id = today_diary_id();
+    let date = chrono::Local::now().format("%d.%m.%Y").to_string();
+    if !force && db::node_exists(&app.db, &id).await? {
+        return Ok(None);
+    }
+    let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let nodes = db::list_nodes(&app.db).await?;
+    let agents = db::list_agents(&app.db).await?;
+    let messages = db::recent_messages(&app.db, 120).await?;
+    let day_msgs: Vec<_> = messages.iter().filter(|m| m.created_at > since).collect();
+    if day_msgs.len() < 2 && !force {
+        return Ok(None);
+    }
+    let new_objs: Vec<_> = nodes.iter().filter(|n| n.created_at > since && n.id != id).collect();
+    let done: Vec<_> = nodes.iter().filter(|n| n.type_id == "task" && n.updated_at > since && n.props.0.get("done").and_then(|d| d.as_bool()) == Some(true)).collect();
+    let contracts = db::list_contracts(&app.db).await?;
+    let events = db::recent_events(&app.db, 30).await?;
+    let facts = format!(
+        "- реплик за сутки: {} (игрок: {})\n- новые объекты: {}\n- закрытые задачи: {}\n- открытые слова: {}\n- события: {}",
+        day_msgs.len(),
+        day_msgs.iter().filter(|m| m.sender_id == "user").count(),
+        if new_objs.is_empty() { "нет".into() } else { new_objs.iter().take(12).map(|n| format!("[[{}]]", n.label)).collect::<Vec<_>>().join(", ") },
+        if done.is_empty() { "нет".into() } else { done.iter().map(|n| format!("[[{}]]", n.label)).collect::<Vec<_>>().join(", ") },
+        contracts.iter().filter(|c| c.status == "open").map(|c| format!("«{}»", c.title)).collect::<Vec<_>>().join(", "),
+        events.iter().filter(|e| e.created_at > since).map(|e| e.kind.clone()).collect::<Vec<_>>().join(", ")
+    );
+    let writer = agents.iter().filter(|a| a.is_alive()).find(|a| a.role == "chronicler").or_else(|| agents.iter().find(|a| a.is_alive())).cloned();
+    let transcript = crate::prompts::transcript(&day_msgs.iter().rev().take(40).rev().cloned().cloned().collect::<Vec<_>>(), &agents, false);
+    let voice = writer.as_ref().map(|w| format!("Пишет {} — в его/её голосе, но сдержанно, как летопись, не как реплика.", w.name)).unwrap_or_else(|| "Пишет сам двор, нейтрально.".into());
+    let system = format!("{CHRONICLE_MARK} Ты ведёшь хронику двора — живой комнаты, где игрок разговаривает с несколькими персонажами и ведёт общую библиотеку. {voice} Верни ТОЛЬКО JSON: {{\"title\": \"заголовок дня (3–6 слов)\", \"text\": \"markdown 6–14 строк: что было главным, что игрок решил или обещал, что сдвинулось в библиотеке, какая тема повисла; с [[вики-ссылками]] на объекты из фактов; без воды и без оценок игрока как человека\", \"mood\": 1–5, \"tomorrow\": \"одна строка — на что завтра обратить внимание\"}}");
+    let user = format!("ДАТА: {date}\nФАКТЫ:\n{facts}\n\nСТЕНОГРАММА ДНЯ (последние реплики):\n{transcript}");
+    let model = app.llm_settings().await.director_model;
+    let raw = app.llm.chat(&model, &[ChatMessage::system(system), ChatMessage::user(user)], &opts(900)).await?;
+    let v = extract_json(&raw)?;
+    let title = format!("Хроника двора · {date}{}", v.get("title").and_then(|t| t.as_str()).map(|t| format!(" · {t}")).unwrap_or_default());
+    let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+    let tomorrow = v.get("tomorrow").and_then(|t| t.as_str()).map(|t| format!("\n\n## Завтра\n\n{t}")).unwrap_or_default();
+    let body = format!("{text}\n\n## Факты\n\n{facts}{tomorrow}\n\n_— {}_", writer.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| "двор".into()));
+    let author = writer.as_ref().map(|w| w.id.clone()).unwrap_or_else(|| "system".into());
+    let props = json!({ "date": chrono::Local::now().format("%Y-%m-%d").to_string(), "mood": v.get("mood").and_then(|m| m.as_i64()).unwrap_or(3), "tags": ["хроника"] });
+    db::upsert_object(&app.db, &id, &mermaid::sanitize_label(&title), "diary", &author, Some(&mermaid::truncate_chars(&body, 20_000)), Some(&props), None, None).await?;
+    for n in new_objs.iter().take(12).chain(done.iter().take(12)) {
+        db::insert_relation(&app.db, &id, &n.id, "about", "", &author, 1.0).await?;
+    }
+    db::place_unpositioned_nodes(&app.db).await?;
+    if let Some(w) = &writer {
+        let line = format!("Записал хронику дня: «{}». {}", title, v.get("tomorrow").and_then(|t| t.as_str()).unwrap_or(""));
+        let msg = db::insert_message_full(&app.db, &w.id, None, &line, Some("room"), Some("хроника"), Some(&id)).await?;
+        db::add_mention(&app.db, msg.id, &id).await?;
+        db::set_message_actions(&app.db, msg.id, &[ActionRecord { op: "create".into(), object_id: id.clone(), text: "записал хронику дня".into() }]).await?;
+        let full = db::with_mentions(&app.db, vec![db::get_message(&app.db, msg.id).await?.unwrap()]).await?.remove(0);
+        app.emit(RoomEvent::Message { message: full });
+    }
+    db::insert_event(&app.db, "chronicle", &json!({ "id": id })).await?;
+    crate::handlers::emit_graph_pub(app).await?;
+    Ok(Some(id))
+}
+
+/// An inhabitant moves their own project forward in writing (after an own_project beat).
+pub async fn advance_project(app: &AppState, agent_id: &str, said: &str) -> Result<()> {
+    let projects = db::objects_by_owner(&app.db, agent_id).await?;
+    let Some(p) = projects.into_iter().find(|n| n.type_id == "project" && n.archived == 0) else { return Ok(()) };
+    let agents = db::list_agents(&app.db).await?;
+    let name = agents.iter().find(|a| a.id == agent_id).map(|a| a.name.clone()).unwrap_or_default();
+    let line = format!("{}: {}", chrono::Local::now().format("%d.%m"), mermaid::truncate_chars(said.trim(), 300));
+    let _ = crate::tools::call(app, agent_id, "library_append", &json!({ "id": p.id, "heading": "Лог", "text": line })).await?;
+    tracing::debug!(agent = %name, project = %p.id, "project log advanced");
+    Ok(())
+}
+
+/// Recent things the inhabitants did in the library (from message action records).
+pub async fn recent_care(app: &AppState, limit: usize) -> Result<Vec<Value>> {
+    let msgs = db::recent_messages(&app.db, 200).await?;
+    let mut out = vec![];
+    for m in msgs.iter().rev() {
+        if m.sender_id == "user" || m.sender_id == "system" {
+            continue;
+        }
+        for a in m.actions.0.iter() {
+            out.push(json!({ "at": m.created_at, "agent": m.sender_id, "op": a.op, "object_id": a.object_id, "text": a.text, "message_id": m.id }));
+            if out.len() >= limit {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}

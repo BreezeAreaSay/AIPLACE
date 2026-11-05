@@ -91,7 +91,17 @@ pub async fn save(app: &AppState, node_id: &str, name: &str, declared_mime: Opti
     let path = dir.join(&fname);
     tokio::fs::write(&path, bytes).await.with_context(|| format!("cannot write {}", path.display()))?;
     let mime = guess_mime(name, declared_mime);
-    let text = if is_image(&mime) { String::new() } else { extract_text(name, &mime, bytes) };
+    let mut text = if is_image(&mime) { String::new() } else { extract_text(name, &mime, bytes) };
+    if text.is_empty() && mime.starts_with("audio/") {
+        let s = app.llm_settings().await;
+        if s.stt_enabled() {
+            match crate::integrations::speech::stt(&s, bytes.to_vec(), name, &mime).await {
+                Ok(t) if !t.trim().is_empty() => text = format!("Расшифровка «{name}»:\n\n{t}"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "audio transcription failed"),
+            }
+        }
+    }
     let a = Attachment {
         id,
         node_id: node_id.to_string(),

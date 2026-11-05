@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Archive, Check, Copy, Download, Eye, Files, Github, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import { Archive, Check, Copy, Download, Eye, Files, Github, Leaf, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Sparkles, Swords, Trash2, TrendingUp, X } from 'lucide-react'
 import type { Agent, Attachment, Features, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
@@ -29,6 +29,7 @@ interface Props {
   onDeleteFile: (id: string) => void
   onAutofill: (id: string) => Promise<{ found: boolean; filled?: string[]; card?: { source: string } }>
   onGithub: (id: string) => Promise<unknown>
+  onTend: (nodeId?: string) => Promise<unknown>
 }
 
 function wordCount(s: string) {
@@ -36,7 +37,7 @@ function wordCount(s: string) {
 }
 
 /** Object page: editable markdown note with autosave, properties, triad buttons, notes, links, backlinks. */
-export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect, onCreate, attachments, features, onUpload, onDeleteFile, onAutofill, onGithub }: Props) {
+export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect, onCreate, attachments, features, onUpload, onDeleteFile, onAutofill, onGithub, onTend }: Props) {
   const [label, setLabel] = useState(node.label)
   const [body, setBody] = useState(node.body)
   const [editing, setEditing] = useState(() => !node.body.trim())
@@ -288,12 +289,26 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           </section>
         )}
 
-        <Attachments nodeId={node.id} attachments={attachments} onUpload={(files) => onUpload(node.id, files)} onDelete={onDeleteFile} />
+        <Attachments nodeId={node.id} attachments={attachments} digested={new Set(attachments.filter((a) => node.body.includes(`<!-- digest:${a.id} -->`)).map((a) => a.id))} onUpload={(files) => onUpload(node.id, files)} onDelete={onDeleteFile} />
 
         <section>
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
             <MessageSquare size={11} /> позвать триаду
           </div>
+          <button
+            onClick={() => {
+              setFilling('разбирают…')
+              void onTend(node.id)
+                .then(() => setFilling('разобрано: смотри тело, пометки и чат'))
+                .catch((e) => setFilling(`ошибка: ${(e as Error).message}`))
+                .finally(() => window.setTimeout(() => setFilling(null), 4000))
+            }}
+            disabled={disabled || !!filling}
+            className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded border border-dashed border-acid/50 px-2 py-1.5 font-mono text-[11px] text-acid hover:bg-acid/10 disabled:opacity-40"
+            title="Подходящий по роли житель прочитает объект и файлы, допишет главное, свяжет, заполнит поля и скажет об этом в чат"
+          >
+            <Leaf size={11} /> {filling && filling.startsWith('разб') ? filling : 'разобрать: прочитать, дописать, связать'}
+          </button>
           <div className="grid grid-cols-3 gap-1.5">
             <button onClick={() => onAsk(node.id, 'discuss')} disabled={disabled} className="rounded border border-cyan/50 px-2 py-1.5 font-mono text-[11px] text-cyan hover:bg-cyan/10 disabled:opacity-40">
               обсудить

@@ -17,7 +17,11 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
         .find(|m| m.role == "user")
         .map(|m| m.content.as_str())
         .unwrap_or("");
-    if system.contains("[STAGE-READER]") {
+    if system.contains("[STAGE-GARDENER]") {
+        stage_gardener(user)
+    } else if system.contains("[STAGE-CHRONICLE]") {
+        json!({ "title": "тихий день с одним файлом", "text": "Игрок принёс файл, двор его прочитал и разложил по полкам. Главная тема дня — [[Осциллограф С1-94]]: Аркадий настаивает на цифрах, остальные — на смысле.\n\n- слово про лампу остаётся открытым\n- в библиотеке стало на два объекта больше", "mood": 3, "tomorrow": "спросить игрока, купил ли он лампу" }).to_string()
+    } else if system.contains("[STAGE-READER]") {
         stage_reader(user)
     } else if system.contains("[STAGE-CASTER]") {
         stage_caster(user)
@@ -42,6 +46,21 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
     } else {
         agent(system)
     }
+}
+
+fn stage_gardener(user_prompt: &str) -> String {
+    let cand = regex::Regex::new(r"(?m)^  (\w+) \[").ok().and_then(|r| r.captures(user_prompt).map(|c| c[1].to_string()));
+    let has_file = user_prompt.contains("### Файл");
+    json!({
+        "summary": if has_file { json!("[MOCK] Короткий документ про лампы и цоколи; есть цена.") } else { serde_json::Value::Null },
+        "props": {},
+        "append": { "heading": if has_file { "Конспект" } else { "Главное" }, "text": "[MOCK]\n- главный тезис: без цифр это разговор, а не план\n- в тексте есть срок и сумма — вынес в задачу\n- следующий шаг: проверить цоколь" },
+        "links": cand.map(|c| json!([{ "to": c, "kind": "related", "why": "[MOCK] та же тема" }])).unwrap_or(json!([])),
+        "new_objects": if has_file { json!([{ "type": "task", "title": "[MOCK] Проверить цоколь лампы", "props": { "priority": "средний" } }]) } else { json!([]) },
+        "note": "[MOCK пометка] Разобрал, спорно, но живо.",
+        "say": "[MOCK] Прочитал, разложил по полкам: главное вынес наверх, задачу завёл. Цифры там есть — значит, с этим можно работать."
+    })
+    .to_string()
 }
 
 fn topic(user_prompt: &str) -> String {
