@@ -5,6 +5,7 @@ import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
 import { Markdown } from './Markdown'
 import { MdEditor } from './MdEditor'
+import { CanvasBoard, type Board } from './CanvasBoard'
 import { Attachments } from './Attachments'
 import { NoteScope } from '../live/LiveContext'
 import { api } from '../api'
@@ -271,6 +272,21 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
             <span>·</span>
             <span>{wordCount(body)} слов</span>
           </div>
+          {node.type_id === 'canvas' && (
+            <div className="mt-2">
+              <CanvasBoard
+                node={node}
+                nodes={graph.nodes}
+                edges={graph.edges}
+                types={types}
+                disabled={disabled}
+                onSave={(board: Board) => onPatch(node.id, { props: { board } })}
+                onOpen={onSelect}
+                onCreate={(label, opts) => onCreate(label, opts)}
+                className="h-[55vh] min-h-[320px]"
+              />
+            </div>
+          )}
           {editing ? (
             <div className="mt-2">
               <MdEditor value={body} onChange={changeBody} nodes={graph.nodes.filter((n) => n.id !== node.id)} types={types} autoFocus onDone={finish} />

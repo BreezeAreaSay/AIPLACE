@@ -162,6 +162,13 @@ pub fn seeds() -> Vec<TypeSeed> {
             schema: json!({ "props": [summary(), p("url", "RSS/Atom URL", "url"), p("topics", "Темы", "text"), p("owner", "Кто читает (id персонажа)", "text"), p("active", "Активна", "checkbox"), p("last_fetch", "Последний опрос", "text")] }),
         },
         TypeSeed {
+            id: "canvas",
+            name: "Доска",
+            icon: "🗺",
+            color: "#f0abfc",
+            schema: json!({ "props": [summary(), tags()], "template": "Свободная доска: карточки, объекты библиотеки и стрелки между ними. Текст ниже — описание доски.\n" }),
+        },
+        TypeSeed {
             id: "rule",
             name: "Правило",
             icon: "⚙",
