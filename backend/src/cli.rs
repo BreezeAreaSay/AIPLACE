@@ -64,6 +64,14 @@ fn ask(prompt: &str, default: &str) -> Result<String> {
     Ok(if v.is_empty() { default.to_string() } else { v })
 }
 
+fn mask(t: &str) -> String {
+    let n = t.chars().count();
+    if n <= 10 {
+        return "•".repeat(n);
+    }
+    format!("{}…{}", t.chars().take(6).collect::<String>(), t.chars().skip(n - 4).collect::<String>())
+}
+
 pub fn interactive() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
@@ -88,10 +96,26 @@ pub fn setup_wizard() -> Result<LlmSettings> {
     println!("│ Режиссёр: быстрая JSON-модель, напр. google/gemini-2.5-flash или та же.");
     let director_model = ask("│ OPENROUTER_DIRECTOR_MODEL", &current.director_model)?;
     let port = ask("│ PORT", &std::env::var("PORT").unwrap_or_else(|_| "3000".into()))?;
+    println!("│ Telegram Mini App (необязательно): токен бота от @BotFather. Пусто — локальный режим.");
+    let tg_default = std::env::var("TELEGRAM_BOT_TOKEN").ok().map(|t| mask(&t)).unwrap_or_default();
+    let tg_in = ask("│ TELEGRAM_BOT_TOKEN", &tg_default)?;
+    let tg_token = if tg_in == tg_default { std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default() } else if tg_in == "-" { String::new() } else { tg_in };
+    let mut extra: Vec<(&str, String)> = vec![("PORT", port.clone()), ("TELEGRAM_BOT_TOKEN", tg_token.clone())];
+    if !tg_token.is_empty() {
+        println!("│ Публичный https-адрес, по которому Telegram откроет мини-апп (туннель или домен VPS).");
+        let url = ask("│ WEBAPP_URL", &std::env::var("WEBAPP_URL").unwrap_or_default())?;
+        println!("│ Твой Telegram user id (число, узнать: @userinfobot) — сможешь менять ключ из мини-аппа.");
+        let admin = ask("│ TELEGRAM_ADMIN_IDS", &std::env::var("TELEGRAM_ADMIN_IDS").unwrap_or_default())?;
+        extra.push(("WEBAPP_URL", url.clone()));
+        extra.push(("APP_URL", url));
+        extra.push(("TELEGRAM_ADMIN_IDS", admin));
+    }
     let settings = LlmSettings { api_key, model, director_model };
     let path = settings.save()?;
-    config::save_config_values(&[("PORT", port.clone())])?;
-    std::env::set_var("PORT", &port);
+    config::save_config_values(&extra)?;
+    for (k, v) in &extra {
+        if v.is_empty() { std::env::remove_var(k) } else { std::env::set_var(k, v) }
+    }
     println!("│ ✔ Сохранено в {}", path.display());
     println!("└─────────────────────────────────────────────────────────────");
     Ok(settings)
@@ -135,6 +159,10 @@ pub fn show_config() {
     println!("director   : {}", s.director_model);
     for (k, v) in config::read_config_file() {
         if k == "OPENROUTER_API_KEY" {
+            continue;
+        }
+        if k == "TELEGRAM_BOT_TOKEN" {
+            println!("{k:<11}: {}", mask(&v));
             continue;
         }
         println!("{k:<11}: {v}");

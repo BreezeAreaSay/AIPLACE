@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, subscribeEvents } from '../api'
+import { api, ApiError, subscribeEvents } from '../api'
 import type { Message, RoomEvent, RoomState } from '../types'
 
 export type Busy = { stage: string; detail: string } | null
@@ -16,6 +16,7 @@ export function useRoom() {
   const [busy, setBusy] = useState<Busy>(null)
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
+  const [gate, setGate] = useState<{ code: string; message: string; bot: string | null } | null>(null)
   const inflight = useRef(false)
 
   const refresh = useCallback(async () => {
@@ -23,7 +24,18 @@ export function useRoom() {
       const s = await api.state()
       setState(s)
       setError(null)
+      setGate(null)
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        let bot: string | null = null
+        try {
+          bot = (await api.health()).telegram.bot_username
+        } catch {
+          /* ignore */
+        }
+        setGate({ code: e.code, message: e.message, bot })
+        return
+      }
       setError((e as Error).message)
     }
   }, [])
@@ -94,6 +106,7 @@ export function useRoom() {
     state,
     busy,
     error,
+    gate,
     live,
     refresh,
     send: (text: string) => run('Отправляю в комнату…', () => api.chat(text)),

@@ -131,6 +131,7 @@ export interface RoomState {
   memories: AgentMemory[]
   events: RoomEventRecord[]
   now: string
+  room_id: string
 }
 
 export interface UpdateInfo {

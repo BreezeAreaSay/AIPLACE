@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "triad-canvas-backend"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2875,7 +2875,10 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "dotenvy",
+ "form_urlencoded",
  "futures",
+ "hex",
+ "hmac",
  "mime_guess",
  "rand 0.8.8",
  "regex",
@@ -2884,6 +2887,7 @@ dependencies = [
  "self_update",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",

@@ -15,7 +15,9 @@ mod mock_llm;
 mod models;
 mod openrouter;
 mod prompts;
+mod rooms;
 mod state;
+mod telegram;
 mod update;
 mod web;
 
@@ -23,7 +25,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::Context;
 use clap::Parser;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::RwLock;
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
@@ -104,21 +106,27 @@ fn serve(no_prompt: bool) -> anyhow::Result<()> {
 
 async fn run(cfg: Config, settings: LlmSettings) -> anyhow::Result<()> {
     std::fs::create_dir_all(config::triad_home()).ok();
-    let pool = db::connect(&cfg.database_url).await?;
-    db::migrate(&pool).await?;
-    db::seed_if_empty(&pool).await?;
+    let cfg = Arc::new(cfg);
+    let rooms = Arc::new(rooms::RoomManager::new(cfg.clone()));
+    let local = rooms.get(rooms::LOCAL_ROOM).await?;
 
     let settings = Arc::new(RwLock::new(settings));
-    let (events, _) = broadcast::channel(256);
     let state = AppState {
-        cfg: Arc::new(cfg.clone()),
+        cfg: cfg.clone(),
         settings: settings.clone(),
-        db: pool,
         llm: Arc::new(LlmClient::new(settings.clone(), cfg.app_url.clone())?),
-        events,
-        turn_lock: Arc::new(Mutex::new(())),
         update: Arc::new(RwLock::new(None)),
+        rooms,
+        bot_username: Arc::new(RwLock::new(None)),
+        room_id: rooms::LOCAL_ROOM.to_string(),
+        db: local.db,
+        events: local.events,
+        turn_lock: local.turn_lock,
     };
+
+    if cfg.telegram_bot_token.is_some() && cfg.telegram_polling {
+        tokio::spawn(telegram::run_bot(cfg.clone(), state.bot_username.clone()));
+    }
 
     if cfg.update_check {
         let slot = state.update.clone();
@@ -156,6 +164,7 @@ async fn run(cfg: Config, settings: LlmSettings) -> anyhow::Result<()> {
 }
 
 async fn banner(cfg: &Config, s: &LlmSettings) {
+    let _ = cfg;
     let url = format!("http://localhost:{}", cfg.port);
     println!("┌─ TRIAD CANVAS v{} ─────────────────────────────────", update::VERSION);
     println!("│ UI / API : {url}   (bind {}:{})", cfg.host, cfg.port);
@@ -163,6 +172,15 @@ async fn banner(cfg: &Config, s: &LlmSettings) {
     match s.key_hint() {
         Some(h) => println!("│ LLM      : {} · режиссёр {} · ключ {h}", s.model, s.director_model),
         None => println!("│ LLM      : MOCK-режим (нет ключа) → `triad setup`, `triad key sk-or-…` или ⚙ в UI"),
+    }
+    if cfg.telegram_bot_token.is_some() {
+        println!(
+            "│ Telegram : ПУБЛИЧНЫЙ режим · комната на каждого пользователя · Mini App URL {}{}",
+            cfg.webapp_url,
+            if cfg.allow_anon_rooms { " · анонимы разрешены" } else { " · без Telegram — только localhost" }
+        );
+    } else {
+        println!("│ Telegram : выкл (TELEGRAM_BOT_TOKEN не задан) → одна локальная комната");
     }
     if !web::is_embedded() {
         println!("│ UI       : не встроен в бинарник → `cd frontend && npm run dev`");

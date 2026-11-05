@@ -3,8 +3,9 @@
 use std::{convert::Infallible, net::SocketAddr};
 
 use axum::{
-    extract::{ConnectInfo, Path, State},
-    http::{HeaderMap, StatusCode},
+    async_trait,
+    extract::{ConnectInfo, FromRequestParts, Path, State},
+    http::{request::Parts, HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
@@ -21,8 +22,53 @@ use crate::{
     models::{ChatRequest, Graph, ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID},
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
+    rooms::LOCAL_ROOM,
     state::AppState,
+    telegram::{self, TgUser},
 };
+
+/// Per-request room scope: resolves the Telegram user (if any), picks their room and decides
+/// whether this client may edit server settings.
+pub struct Room {
+    pub app: AppState,
+    pub user: Option<TgUser>,
+    pub editable: bool,
+}
+
+fn is_forwarded(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip")
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for Room {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
+        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0);
+        let loopback = peer.map(|p| p.ip().is_loopback()).unwrap_or(false) && !is_forwarded(&parts.headers);
+        let init = telegram::extract_init_data(&parts.headers, parts.uri.query());
+        let mut user: Option<TgUser> = None;
+        match (&state.cfg.telegram_bot_token, init) {
+            (Some(token), Some(raw)) => {
+                let u = telegram::validate_init_data(&raw, token, 86_400)
+                    .map_err(|e| AppError::unauthorized(format!("Telegram initData отклонён: {e}"), "telegram_invalid"))?;
+                user = Some(u);
+            }
+            (Some(_), None) if !loopback && !state.cfg.allow_anon_rooms => {
+                return Err(AppError::unauthorized(
+                    "Эта комната открывается только из Telegram Mini App.",
+                    "telegram_required",
+                ));
+            }
+            _ => {}
+        }
+        let room_id = user.as_ref().map(telegram::room_id_for).unwrap_or_else(|| LOCAL_ROOM.to_string());
+        let app = state.for_room(&room_id).await?;
+        let admin = user.as_ref().map(|u| state.cfg.telegram_admin_ids.contains(&u.id)).unwrap_or(false);
+        let editable = state.cfg.allow_remote_settings || admin || loopback;
+        Ok(Room { app, user, editable })
+    }
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -47,20 +93,15 @@ async fn health(State(app): State<AppState>) -> Json<serde_json::Value> {
         "mock_mode": s.mock_mode(),
         "model": s.model,
         "director_model": s.director_model,
+        "telegram": {
+            "enabled": app.cfg.telegram_bot_token.is_some(),
+            "bot_username": app.bot_username.read().await.clone(),
+            "anon_rooms": app.cfg.allow_anon_rooms,
+        },
     }))
 }
 
-/// Settings are editable from the machine the server runs on. Behind a reverse proxy the
-/// peer is loopback too, so a forwarded-for header demotes the request to "remote".
-fn settings_editable(app: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
-    if app.cfg.allow_remote_settings {
-        return true;
-    }
-    let forwarded = headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip");
-    peer.ip().is_loopback() && !forwarded
-}
-
-pub async fn build_state(app: &AppState, editable: bool) -> anyhow::Result<RoomState> {
+pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) -> anyhow::Result<RoomState> {
     let nodes = db::list_nodes(&app.db).await?;
     let edges = db::list_edges(&app.db).await?;
     let graph_mermaid = mermaid::build_graph(&nodes, &edges);
@@ -83,19 +124,16 @@ pub async fn build_state(app: &AppState, editable: bool) -> anyhow::Result<RoomS
         memories: db::list_memories(&app.db).await?,
         events: db::recent_events(&app.db, 20).await?,
         now: contracts::now_rfc3339(),
+        room_id: app.room_id.clone(),
+        tg_user: user.cloned(),
     })
 }
 
-async fn get_state(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> AppResult<Json<RoomState>> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn get_state(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> {
     if app.turn_lock.try_lock().is_ok() {
         contracts::expire_overdue(&app).await?;
     }
-    Ok(Json(build_state(&app, editable).await?))
+    Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
 
 async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
@@ -113,22 +151,15 @@ async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
     }
 }
 
-async fn get_settings(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Json<SettingsView> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn get_settings(Room { app, editable, .. }: Room) -> Json<SettingsView> {
     Json(settings_view(&app, editable).await)
 }
 
 async fn post_settings(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    Room { app, editable, .. }: Room,
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<SettingsView>, (StatusCode, Json<serde_json::Value>)> {
-    if !settings_editable(&app, peer, &headers) {
+    if !editable {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Настройки можно менять только с машины, где запущен сервер (или ALLOW_REMOTE_SETTINGS=true). Используй `triad setup` / `triad key`."})),
@@ -157,13 +188,7 @@ async fn post_settings(
     Ok(Json(settings_view(&app, true).await))
 }
 
-async fn chat(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(req): Json<ChatRequest>,
-) -> AppResult<Json<RoomState>> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn chat(Room { app, editable, user }: Room, Json(req): Json<ChatRequest>) -> AppResult<Json<RoomState>> {
     let text = req.message.trim();
     if text.is_empty() {
         return Err(AppError::bad_request("пустое сообщение"));
@@ -175,22 +200,17 @@ async fn chat(
     let msg = db::insert_message(&app.db, USER_ID, None, text).await?;
     app.emit(RoomEvent::Message { message: msg });
     run_round(&app, Trigger::UserMessage).await?;
-    Ok(Json(build_state(&app, editable).await?))
+    Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
 
-async fn tick(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> AppResult<Json<RoomState>> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn tick(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> {
     let _turn = app.turn_lock.lock().await;
     let alive = db::list_agents(&app.db).await?.into_iter().filter(|a| a.is_alive()).count();
     if alive == 0 {
         return Err(AppError::bad_request("в комнате никого не осталось — нажми «Новая комната»"));
     }
     run_round(&app, Trigger::Tick).await?;
-    Ok(Json(build_state(&app, editable).await?))
+    Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
 
 /// Director → (1–2) agents, sequentially, so the second can answer the first.
@@ -242,9 +262,7 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
 }
 
 async fn resolve_contract(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    Room { app, editable, user }: Room,
     Path(id): Path<i64>,
     Json(req): Json<ResolveContractRequest>,
 ) -> AppResult<Json<RoomState>> {
@@ -252,7 +270,6 @@ async fn resolve_contract(
     if !matches!(status.as_str(), "done" | "failed" | "cancelled") {
         return Err(AppError::bad_request("status must be done | failed | cancelled"));
     }
-    let editable = settings_editable(&app, peer, &headers);
     let _turn = app.turn_lock.lock().await;
     let alive_before = alive_ids(&app).await?;
     let Some(c) = contracts::resolve(&app, id, &status, req.note.as_deref(), "user").await? else {
@@ -262,15 +279,10 @@ async fn resolve_contract(
         // Let the room react in character (guarantor first); the dead get their last words.
         run_round_from(&app, Trigger::Event, alive_before).await?;
     }
-    Ok(Json(build_state(&app, editable).await?))
+    Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
 
-async fn synthesize_schema(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> AppResult<Json<RoomState>> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn synthesize_schema(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> {
     let _turn = app.turn_lock.lock().await;
     app.emit(RoomEvent::Status {
         stage: "schema".into(),
@@ -321,18 +333,13 @@ async fn synthesize_schema(
     let saved = db::save_schema(&app.db, &doc).await?;
     app.emit(RoomEvent::Schema { schema: saved });
     app.emit(RoomEvent::Done);
-    Ok(Json(build_state(&app, editable).await?))
+    Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
 
-async fn reset(
-    State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> AppResult<Json<RoomState>> {
-    let editable = settings_editable(&app, peer, &headers);
+async fn reset(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> {
     let _turn = app.turn_lock.lock().await;
     db::reset_room(&app.db).await?;
-    let state = build_state(&app, editable).await?;
+    let state = build_state(&app, editable, user.as_ref()).await?;
     app.emit(RoomEvent::Agents { agents: state.agents.clone() });
     app.emit(RoomEvent::Graph {
         graph: state.graph.clone(),
@@ -346,7 +353,7 @@ async fn reset(
 }
 
 /// Server-Sent Events: live progress while a round runs (works through any WebView/proxy).
-async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn events(Room { app, .. }: Room) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = app.events.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|item| async move {
         let ev = item.ok()?;

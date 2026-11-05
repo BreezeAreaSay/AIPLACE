@@ -22,8 +22,9 @@ frontend/  (Vite + React + TS + Tailwind + Mermaid)   ──HTTP /api/* + SSE─
 
 * Фронтенд **никогда** не трогает OS-API: только `fetch('/api/…')` и `EventSource('/api/events')`.
   Тот же бандл открывается в браузере, в Tauri-обёртке и в WebView Telegram.
-* Бэкенд — один бинарник. На ноутбуке слушает `localhost:3000`; на VPS за $5 — тот же бинарник, тот же SQLite-файл,
-  плюс он сам отдаёт собранный `frontend/dist`. Telegram Mini App просто указывает на его URL.
+* Бэкенд — один бинарник. На ноутбуке слушает `localhost:3000`; на VPS за $5 — тот же бинарник, тот же SQLite,
+  плюс он сам отдаёт встроенный UI. Telegram Mini App просто указывает на его URL, а сервер по `initData`
+  раскладывает пользователей по отдельным комнатам.
 
 ## Установка за минуту (готовый бинарник)
 
@@ -87,6 +88,11 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 | `STATIC_DIR` | — | Отдавать UI с диска вместо встроенного (dev без пересборки) |
 | `ALLOW_REMOTE_SETTINGS` | `false` | Разрешить `POST /api/settings` не только с localhost |
 | `TRIAD_NO_UPDATE_CHECK` | — | `1` — не ходить на GitHub за версией при старте |
+| `TELEGRAM_BOT_TOKEN` | — | Включает публичный режим: проверка initData, комната на пользователя, бот `/start` |
+| `WEBAPP_URL` | = `APP_URL` | Публичный https-адрес мини-аппа для кнопки в `/start` |
+| `TELEGRAM_ADMIN_IDS` | — | Telegram user id, которым можно менять ключ из мини-аппа |
+| `TELEGRAM_POLLING` | `true` | Отвечать на `/start` long-polling'ом |
+| `ALLOW_ANON_ROOMS` | `false` | Пускать браузеры без Telegram в комнату `local` в публичном режиме |
 | `CONTEXT_MESSAGES` | `14` | Сколько реплик видят Режиссёр и агенты |
 | `MEMORY_EVERY` | `8` | Через сколько новых сообщений переписывать дневники агентов |
 | `TICK_ENTROPY_HP` / `TICK_ENTROPY_DOPAMINE` | `2` / `3` | Сколько теряет каждый за автономный тик |
@@ -158,17 +164,44 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
    разноцветные узлы-конфликты.
 4. **⚡ Собрать схему** — сухой остаток спора в виде блок-схемы с тремя язвительными аннотациями.
 
-## Деплой под Telegram Mini Apps
+## Telegram Mini App
 
-На VPS нужен только бинарник и https:
+Когда задан `TELEGRAM_BOT_TOKEN`, сервер переходит в **публичный режим**:
+
+- каждый запрос из мини-аппа несёт подписанный Telegram `initData` (`Authorization: tma …`); сервер проверяет HMAC
+  по токену бота и свежесть (24 ч) — подделать пользователя нельзя;
+- у каждого Telegram-пользователя **своя комната** — отдельный SQLite `~/.triad/rooms/tg_<id>.db` со своими агентами,
+  контрактами, дневниками. Твоя старая база живёт в комнате `local` и открывается только с localhost;
+- браузер без Telegram снаружи получает экран «Открыть в Telegram» (401 `telegram_required`); для отладки можно
+  разрешить `ALLOW_ANON_ROOMS=true`;
+- бот сам отвечает на `/start` кнопкой «⚡ Открыть комнату» (long polling, вебхуки и сертификаты не нужны);
+- ключ и модели из мини-аппа может менять только `TELEGRAM_ADMIN_IDS` (твой user id).
+
+### За 15 минут с ноутбука (без VPS)
+
+1. **@BotFather** → `/newbot` → получи токен. Там же: `/mybots` → бот → *Bot Settings* → *Menu Button* — пока пропусти, URL появится на шаге 3.
+2. **Туннель** до локального сервера (нужен https): [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+   ```bash
+   cloudflared tunnel --url http://localhost:3000
+   ```
+   В выводе будет `https://<что-то>.trycloudflare.com` — это и есть адрес мини-аппа (меняется при каждом запуске туннеля).
+3. **Настрой triad**:
+   ```bash
+   triad setup      # ключ OpenRouter → токен бота → WEBAPP_URL=https://<что-то>.trycloudflare.com → свой user id
+   triad
+   ```
+   или вручную в `~/.triad/config.env`: `TELEGRAM_BOT_TOKEN=…`, `WEBAPP_URL=https://…`, `TELEGRAM_ADMIN_IDS=…`.
+4. В **@BotFather**: *Menu Button* → вставь тот же https-URL (или `/newapp` — даст прямую ссылку `t.me/<bot>/<app>`).
+5. Открой бота в Telegram → `/start` → кнопка. Готово: комната в телефоне, десктоп по-прежнему на http://localhost:3000.
+
+### На VPS (постоянно)
 
 ```bash
 ssh user@vps 'curl -fsSL https://raw.githubusercontent.com/BreezeAreaSay/AIPLACE/main/install.sh | TRIAD_NO_SETUP=1 sh'
-ssh user@vps '~/.triad/bin/triad key sk-or-v1-…'
-ssh user@vps '~/.triad/bin/triad --no-prompt --host 127.0.0.1 --port 3000'   # лучше как systemd-сервис
+ssh user@vps '~/.triad/bin/triad setup'     # ключ, токен бота, WEBAPP_URL=https://triad.example.com, admin id
 ```
 
-Пример `/etc/systemd/system/triad.service`:
+`/etc/systemd/system/triad.service`:
 
 ```ini
 [Service]
@@ -179,11 +212,8 @@ User=user
 WantedBy=multi-user.target
 ```
 
-Сверху Caddy (`reverse_proxy 127.0.0.1:3000`) — Telegram требует https. Обновление: `triad update && systemctl restart triad`.
-
-В BotFather: `/newapp` → URL `https://твой-домен`. `index.html` уже подключает `telegram-web-app.js`,
-`src/telegram.ts` вызывает `ready()/expand()`, красит шапку в `#0D0E12` и даёт haptic-отклик на кнопках.
-Если фронт хостится отдельно (Vercel/Pages) — задай `VITE_API_URL=https://api.твой-домен` при сборке; CORS на бэкенде permissive.
+Сверху Caddy: `triad.example.com { reverse_proxy 127.0.0.1:3000 }` — TLS он получит сам. Обновление:
+`triad update && systemctl restart triad`. Если фронт хостится отдельно (Vercel/Pages) — задай `VITE_API_URL=https://api.…` при сборке; CORS permissive.
 
 ## Структура
 
@@ -194,6 +224,8 @@ backend/src/
   config.rs       ~/.triad/config.env, приоритеты env, горячие LlmSettings
   update.rs       самообновление с GitHub Releases + тихая проверка версии
   web.rs          встроенный UI (rust-embed, SPA-fallback); build.rs копирует frontend/dist
+  telegram.rs     проверка initData (HMAC), бот /start (long polling)
+  rooms.rs        комната на Telegram-пользователя: отдельный SQLite, ленивое открытие
   models.rs       Agent, Message, GraphNode/Edge, DirectorOutput, RoomState, RoomEvent
   db.rs           пул, миграции, сид трёх персонажей и их отношений, CRUD
   contracts.rs    слово игрока: дедлайны, поручители, последствия, события

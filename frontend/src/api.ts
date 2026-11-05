@@ -1,12 +1,28 @@
 import type { RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
+import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
 export const API_BASE: string = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
+export class ApiError extends Error {
+  code: string
+  status: number
+  constructor(message: string, code: string, status: number) {
+    super(message)
+    this.code = code
+    this.status = status
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const d = initData()
+  return d ? { Authorization: `tma ${d}` } : {}
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
   })
   const text = await res.text()
   let data: unknown = null
@@ -16,13 +32,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     /* non-JSON error body */
   }
   if (!res.ok) {
-    const msg = (data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`
-    throw new Error(msg)
+    const body = data as { error?: string; code?: string } | null
+    throw new ApiError(body?.error ?? `${res.status} ${res.statusText}`, body?.code ?? 'http_error', res.status)
   }
   return data as T
 }
 
+export interface Health {
+  ok: boolean
+  version: string
+  mock_mode: boolean
+  telegram: { enabled: boolean; bot_username: string | null; anon_rooms: boolean }
+}
+
 export const api = {
+  health: () => request<Health>('/api/health'),
   state: () => request<RoomState>('/api/state'),
   chat: (message: string) => request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   tick: () => request<RoomState>('/api/tick', { method: 'POST' }),
@@ -36,7 +60,8 @@ export const api = {
 
 /** Subscribe to live room events (SSE). Returns an unsubscribe function. */
 export function subscribeEvents(onEvent: (ev: RoomEvent) => void, onStatus?: (ok: boolean) => void): () => void {
-  const es = new EventSource(`${API_BASE}/api/events`)
+  const d = initData()
+  const es = new EventSource(`${API_BASE}/api/events${d ? `?tma=${encodeURIComponent(d)}` : ''}`)
   es.onopen = () => onStatus?.(true)
   es.onerror = () => onStatus?.(false)
   es.onmessage = (e) => {

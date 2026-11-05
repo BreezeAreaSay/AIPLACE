@@ -280,6 +280,8 @@ pub struct RoomState {
     pub memories: Vec<AgentMemory>,
     pub events: Vec<RoomEventRecord>,
     pub now: String,
+    pub room_id: String,
+    pub tg_user: Option<crate::telegram::TgUser>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -66,6 +66,14 @@ pub struct Config {
     pub update_check: bool,
     /// Rewrite each agent's diary after this many new messages.
     pub memory_every: usize,
+    /// Telegram Mini App mode: validate initData, one room per Telegram user, /start bot.
+    pub telegram_bot_token: Option<String>,
+    pub telegram_admin_ids: Vec<i64>,
+    pub telegram_polling: bool,
+    /// Let browsers without Telegram initData use the shared `local` room even in public mode.
+    pub allow_anon_rooms: bool,
+    /// Public https URL of the Mini App (sent in the /start button). Defaults to APP_URL.
+    pub webapp_url: String,
 }
 
 impl Config {
@@ -85,6 +93,14 @@ impl Config {
             allow_remote_settings: env_bool("ALLOW_REMOTE_SETTINGS"),
             update_check: !env_bool("TRIAD_NO_UPDATE_CHECK"),
             memory_every: env_or("MEMORY_EVERY", "8").parse().unwrap_or(8),
+            telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
+            telegram_admin_ids: env_or("TELEGRAM_ADMIN_IDS", "")
+                .split([',', ' ', ';'])
+                .filter_map(|x| x.trim().parse().ok())
+                .collect(),
+            telegram_polling: env_opt("TELEGRAM_POLLING").map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on")).unwrap_or(true),
+            allow_anon_rooms: env_bool("ALLOW_ANON_ROOMS"),
+            webapp_url: env_or("WEBAPP_URL", &env_or("APP_URL", &format!("http://localhost:{port}"))),
         })
     }
 }

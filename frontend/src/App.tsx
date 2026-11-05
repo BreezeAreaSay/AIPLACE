@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, KeyRound, PanelRightOpen } from 'lucide-react'
+import { AlertTriangle, KeyRound, PanelRightOpen, Send } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
 import { TopBar } from './components/TopBar'
 import { ChatStream } from './components/ChatStream'
@@ -31,6 +31,26 @@ export default function App() {
     if (room.busy?.stage !== 'agent') return null
     return room.state?.agents.find((a) => d.startsWith(a.name))?.id ?? null
   }, [room.busy, room.state])
+
+  if (room.gate) {
+    const link = room.gate.bot ? `https://t.me/${room.gate.bot}` : null
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center font-mono text-sm text-zinc-400">
+        <div className="text-2xl tracking-[0.3em] text-acid">TRIAD CANVAS</div>
+        <div className="max-w-sm text-zinc-300">{room.gate.message}</div>
+        {link ? (
+          <a href={link} className="flex items-center gap-2 rounded bg-acid px-4 py-2 font-bold text-void hover:shadow-glow">
+            <Send size={16} /> Открыть в Telegram
+          </a>
+        ) : (
+          <div className="text-xs text-zinc-600">Бот ещё не представился серверу — открой мини-апп из Telegram.</div>
+        )}
+        <div className="text-[11px] text-zinc-600">
+          Локальная комната доступна с машины сервера: http://localhost:3000
+        </div>
+      </div>
+    )
+  }
 
   if (!room.state) {
     return (
@@ -78,7 +98,7 @@ export default function App() {
   )
 
   return (
-    <div className="scanlines relative flex h-full flex-col bg-void">
+    <div className="scanlines relative flex flex-col bg-void" style={{ height: 'var(--app-height, 100%)' }}>
       <TopBar
         agents={s.agents}
         speaking={speaking}
