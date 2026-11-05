@@ -20,6 +20,7 @@ pub struct TurnPlan<'a> {
     pub scene_so_far: Vec<(String, String)>,
     pub room_mood: Option<&'a str>,
     pub focus_node: Option<&'a str>,
+    pub library: Option<&'a str>,
 }
 
 pub async fn run_agent(app: &AppState, agent_id: &str, plan: TurnPlan<'_>) -> Result<Message> {
@@ -79,6 +80,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         beat: plan.beat,
         scene_so_far: &plan.scene_so_far,
         focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
+        library: plan.library,
     };
     let model = app.llm_settings().await.model;
     let (ego, speech) = if app.cfg.agent_mode == "single" {

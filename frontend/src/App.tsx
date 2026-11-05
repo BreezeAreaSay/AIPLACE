@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, KeyRound, PanelRightClose, PanelRightOpen, RotateCcw, Send, Settings, Zap } from 'lucide-react'
 import { useRoom } from './hooks/useRoom'
-import { Canvas } from './components/Canvas'
-import { NodePanel } from './components/NodePanel'
 import { ScenePanel } from './components/ScenePanel'
+import { SidePanel, type SideTab } from './components/SidePanel'
 import { AgentProfile } from './components/AgentProfile'
 import { SettingsModal } from './components/SettingsModal'
 
@@ -22,8 +21,9 @@ export default function App() {
   const room = useRoom()
   const [showEgo, setShowEgo] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [sceneOpen, setSceneOpen] = useState(true)
-  const [mobileTab, setMobileTab] = useState<'canvas' | 'scene'>('scene')
+  const [sideOpen, setSideOpen] = useState(true)
+  const [sideTab, setSideTab] = useState<SideTab>('library')
+  const [mobileTab, setMobileTab] = useState<'side' | 'scene'>('scene')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [contextId, setContextId] = useState<string | null>(null)
   const [profileId, setProfileId] = useState<string | null>(null)
@@ -35,7 +35,7 @@ export default function App() {
     return room.state?.agents.find((a) => d.startsWith(a.name))?.id ?? null
   }, [room.busy, room.state])
 
-  // Nodes touched in the last round glow for a moment.
+  // Objects touched in the last round glow for a moment on the graph.
   const hotIds = useMemo(() => {
     const s = room.state
     if (!s) return new Set<string>()
@@ -43,7 +43,10 @@ export default function App() {
     const d = s.last_director?.output
     for (const n of d?.graph_mutations.nodes ?? []) ids.add(n.id)
     for (const u of d?.node_updates ?? []) ids.add(u.id)
-    for (const m of s.messages.slice(-6)) if (m.node_id) ids.add(m.node_id)
+    for (const m of s.messages.slice(-6)) {
+      if (m.node_id) ids.add(m.node_id)
+      for (const o of m.objects ?? []) ids.add(o)
+    }
     return ids
   }, [room.state])
 
@@ -88,52 +91,57 @@ export default function App() {
   const contextNode = contextId ? s.graph.nodes.find((n) => n.id === contextId) ?? null : null
   const profile = profileId ? s.agents.find((a) => a.id === profileId) ?? null : null
   const mood = s.last_director?.output.room_mood ?? null
+  const liveCount = s.graph.nodes.filter((n) => n.archived === 0).length
 
   const selectNode = (id: string | null) => {
     setSelectedId(id)
-    if (id) setContextId(id)
-    if (id && !isDesktop) setMobileTab('canvas')
+    if (id) {
+      setContextId(id)
+      setSideTab('object')
+      setSideOpen(true)
+      if (!isDesktop) setMobileTab('side')
+    }
   }
 
-  const canvas = (
-    <div className="relative h-full w-full">
-      <Canvas
-        graph={s.graph}
-        notes={s.node_notes}
-        agents={s.agents}
-        selectedId={selectedId}
-        hotIds={hotIds}
-        onSelect={selectNode}
-        onCreate={(label, pos) => void room.createNode(label, pos)}
-        onMove={(id, x, y) => void room.patchNode(id, { x, y })}
-        onConnect={(a, b) => void room.createEdge(a, b)}
-        toolbarOffset={selected && isDesktop ? 380 : 0}
-      />
-      {selected && (
-        <div className="absolute inset-y-0 left-0 z-10 w-full md:w-auto">
-          <NodePanel
-            node={selected}
-            graph={s.graph}
-            notes={s.node_notes}
-            agents={s.agents}
-            disabled={disabled}
-            onClose={() => setSelectedId(null)}
-            onPatch={(id, patch) => void room.patchNode(id, patch)}
-            onDelete={(id) => {
-              void room.deleteNode(id)
-              if (contextId === id) setContextId(null)
-            }}
-            onAsk={(id, mode, msg) => {
-              void room.askNode(id, mode, msg)
-              if (!isDesktop) setMobileTab('scene')
-            }}
-            onAddNote={(id, text) => void room.addNote(id, text)}
-            onDeleteEdge={(id) => void room.deleteEdge(id)}
-            onSelect={selectNode}
-          />
-        </div>
-      )}
-    </div>
+  const side = (
+    <SidePanel
+      tab={sideTab}
+      onTab={setSideTab}
+      graph={s.graph}
+      types={s.types}
+      notes={s.node_notes}
+      agents={s.agents}
+      selected={selected}
+      hotIds={hotIds}
+      disabled={disabled}
+      onSelect={selectNode}
+      onCreate={(label, opts) => void room.createNode(label, opts)}
+      onCreateType={(name) => void room.createType(name)}
+      onPatch={(id, patch) => void room.patchNode(id, patch)}
+      onDelete={(id) => {
+        void room.deleteNode(id)
+        if (contextId === id) setContextId(null)
+        setSelectedId(null)
+        setSideTab('library')
+      }}
+      onAsk={(id, mode, msg) => {
+        void room.askNode(id, mode, msg)
+        if (!isDesktop) setMobileTab('scene')
+      }}
+      onAddNote={(id, text) => void room.addNote(id, text)}
+      onDeleteEdge={(id) => void room.deleteEdge(id)}
+      onConnect={(a, b) => void room.createEdge(a, b)}
+      onMove={(id, x, y) => void room.patchNode(id, { x, y })}
+      contracts={s.contracts}
+      now={s.now}
+      onResolve={(id, st) => void room.resolveContract(id, st)}
+      onPromise={(t) => void room.send(t)}
+      director={s.last_director}
+      directorModel={s.director_model}
+      relations={s.relations}
+      memories={s.memories}
+      events={s.events}
+    />
   )
 
   const scene = (
@@ -141,6 +149,7 @@ export default function App() {
       agents={s.agents}
       messages={s.messages}
       nodes={s.graph.nodes}
+      types={s.types}
       busy={room.busy}
       speaking={speaking}
       showEgo={showEgo}
@@ -152,14 +161,6 @@ export default function App() {
       onClearContext={() => setContextId(null)}
       onNodeClick={selectNode}
       onOpenAgent={setProfileId}
-      contracts={s.contracts}
-      now={s.now}
-      onResolve={(id, st) => void room.resolveContract(id, st)}
-      director={s.last_director}
-      directorModel={s.director_model}
-      relations={s.relations}
-      memories={s.memories}
-      events={s.events}
       mood={mood}
     />
   )
@@ -170,7 +171,7 @@ export default function App() {
         <Zap size={15} className="text-acid" />
         <span className="font-mono text-xs font-bold tracking-[0.25em] text-zinc-100">TRIAD CANVAS</span>
         <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
-          {s.graph.nodes.length} узлов · {s.node_notes.length} пометок{s.room_id !== 'local' ? ` · ${s.room_id}` : ''}
+          {liveCount} объектов · {s.types.length} типов{s.room_id !== 'local' ? ` · ${s.room_id}` : ''}
         </span>
         <div className="ml-auto flex items-center gap-1.5 font-mono text-[10px]">
           {s.update && (
@@ -197,8 +198,8 @@ export default function App() {
             <RotateCcw size={12} />
           </button>
           {isDesktop && (
-            <button onClick={() => setSceneOpen((v) => !v)} className="rounded border border-line p-1 text-zinc-400 hover:text-zinc-100" title={sceneOpen ? 'Свернуть сцену' : 'Показать сцену'}>
-              {sceneOpen ? <PanelRightClose size={12} /> : <PanelRightOpen size={12} />}
+            <button onClick={() => setSideOpen((v) => !v)} className="rounded border border-line p-1 text-zinc-400 hover:text-zinc-100" title={sideOpen ? 'Свернуть библиотеку' : 'Показать библиотеку'}>
+              {sideOpen ? <PanelRightClose size={12} /> : <PanelRightOpen size={12} />}
             </button>
           )}
         </div>
@@ -221,18 +222,20 @@ export default function App() {
 
       {isDesktop ? (
         <div className="flex min-h-0 flex-1">
-          <main className="min-w-0 flex-1">{canvas}</main>
-          {sceneOpen && <aside className="w-[460px] shrink-0 border-l border-line">{scene}</aside>}
+          <main className="flex min-w-0 flex-1 justify-center">
+            <div className="flex h-full w-full max-w-3xl flex-col">{scene}</div>
+          </main>
+          {sideOpen && <aside className="w-[520px] shrink-0 border-l border-line">{side}</aside>}
         </div>
       ) : (
         <>
-          <div className="min-h-0 flex-1">{mobileTab === 'canvas' ? canvas : scene}</div>
+          <div className="min-h-0 flex-1">{mobileTab === 'side' ? side : scene}</div>
           <nav className="grid grid-cols-2 border-t border-line bg-void font-mono text-[11px]" style={{ paddingBottom: 'var(--tg-safe-bottom)' }}>
-            <button onClick={() => setMobileTab('canvas')} className={`py-2 ${mobileTab === 'canvas' ? 'text-acid' : 'text-zinc-500'}`}>
-              ◇ Холст · {s.graph.nodes.length}
-            </button>
             <button onClick={() => setMobileTab('scene')} className={`py-2 ${mobileTab === 'scene' ? 'text-acid' : 'text-zinc-500'}`}>
-              ☰ Сцена
+              ☰ Чат
+            </button>
+            <button onClick={() => setMobileTab('side')} className={`py-2 ${mobileTab === 'side' ? 'text-acid' : 'text-zinc-500'}`}>
+              ◇ Библиотека · {liveCount}
             </button>
           </nav>
         </>

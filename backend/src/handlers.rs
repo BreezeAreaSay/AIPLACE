@@ -23,7 +23,7 @@ use crate::{
     error::{AppError, AppResult},
     memory, mermaid,
     models::{
-        AskNodeRequest, ChatRequest, CreateEdgeRequest, CreateNodeRequest, Graph, NoteRequest, PatchNodeRequest,
+        AskNodeRequest, ChatRequest, CreateEdgeRequest, CreateNodeRequest, CreateTypeRequest, Graph, NoteRequest, PatchNodeRequest,
         ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
     },
     openrouter::{extract_json, ChatMessage, ChatOpts},
@@ -94,6 +94,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:id/ask", post(ask_node))
         .route("/api/nodes/:id/notes", post(add_note))
         .route("/api/edges", post(create_edge))
+        .route("/api/types", get(list_types).post(create_type))
+        .route("/api/nodes/:id/backlinks", get(node_backlinks))
+        .route("/api/search", get(search))
         .route("/api/edges/:id", delete(delete_edge))
         .route("/api/export.md", get(export_markdown))
         .with_state(state)
@@ -122,8 +125,9 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
     let s = app.llm_settings().await;
     Ok(RoomState {
         agents: db::list_agents(&app.db).await?,
-        messages: db::recent_messages(&app.db, 80).await?,
+        messages: db::with_mentions(&app.db, db::recent_messages(&app.db, 80).await?).await?,
         graph: Graph { nodes, edges },
+        types: db::list_types(&app.db).await?,
         node_notes: db::list_notes(&app.db, 400).await?,
         graph_mermaid,
         schema: db::last_schema(&app.db).await?,
@@ -266,20 +270,50 @@ async fn create_node(Room { app, editable, user }: Room, Json(req): Json<CreateN
     if db::node_exists(&app.db, &id).await? {
         id = format!("{id}_{}", chrono::Utc::now().timestamp() % 100_000);
     }
-    db::upsert_node_full(
-        &app.db,
-        &id,
-        &label,
-        mermaid::normalize_node_type(req.node_type.as_deref().unwrap_or("concept")),
-        USER_ID,
-        req.body.as_deref(),
-        req.x,
-        req.y,
-    )
-    .await?;
+    let type_id = match req.type_id.as_deref().map(mermaid::safe_id) {
+        Some(t) if db::type_exists(&app.db, &t).await? => t,
+        _ => crate::types_seed::legacy_type(req.node_type.as_deref().unwrap_or("note")).to_string(),
+    };
+    db::upsert_object(&app.db, &id, &label, &type_id, USER_ID, req.body.as_deref(), req.props.as_ref(), req.x, req.y).await?;
     db::place_unpositioned_nodes(&app.db).await?;
     emit_graph(&app).await?;
     Ok(Json(build_state(&app, editable, user.as_ref()).await?))
+}
+
+async fn list_types(Room { app, .. }: Room) -> AppResult<Json<Vec<crate::models::ObjectType>>> {
+    Ok(Json(db::list_types(&app.db).await?))
+}
+
+async fn create_type(Room { app, .. }: Room, Json(req): Json<CreateTypeRequest>) -> AppResult<Json<Vec<crate::models::ObjectType>>> {
+    let name = mermaid::truncate_chars(req.name.trim(), 40);
+    if name.chars().count() < 2 {
+        return Err(AppError::bad_request("имя типа слишком короткое"));
+    }
+    let id = mermaid::safe_id(&name);
+    if db::type_exists(&app.db, &id).await? {
+        return Err(AppError::bad_request("такой тип уже есть"));
+    }
+    db::insert_type(&app.db, &id, &name, req.icon.as_deref().unwrap_or("◇"), req.color.as_deref().unwrap_or("#9a9ca8"), &serde_json::json!({ "props": req.props }), USER_ID).await?;
+    let types = db::list_types(&app.db).await?;
+    app.emit(RoomEvent::Types { types: types.clone() });
+    Ok(Json(types))
+}
+
+async fn node_backlinks(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Json<Vec<crate::models::Message>>> {
+    let id = mermaid::safe_id(&id);
+    Ok(Json(db::with_mentions(&app.db, db::messages_mentioning(&app.db, &id, 50).await?).await?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default, rename = "type")]
+    type_id: Option<String>,
+}
+
+async fn search(Room { app, .. }: Room, axum::extract::Query(q): axum::extract::Query<SearchQuery>) -> AppResult<Json<Vec<crate::models::GraphNode>>> {
+    Ok(Json(db::search_objects(&app.db, &q.q, q.type_id.as_deref().filter(|t| !t.is_empty()), 30).await?))
 }
 
 async fn patch_node(Room { app, .. }: Room, Path(id): Path<String>, Json(req): Json<PatchNodeRequest>) -> AppResult<StatusCode> {
@@ -293,8 +327,21 @@ async fn patch_node(Room { app, .. }: Room, Path(id): Path<String>, Json(req): J
     let label = req.label.as_deref().map(|l| mermaid::sanitize_label(l.trim())).filter(|l| l != "…");
     let body = req.body.as_deref().map(|b| mermaid::truncate_chars(b.trim(), 4000));
     let nt = req.node_type.as_deref().map(mermaid::normalize_node_type);
+    let mut changed = false;
     if label.is_some() || body.is_some() || nt.is_some() || req.pinned.is_some() {
         db::update_node_fields(&app.db, &id, label.as_deref(), body.as_deref(), nt, req.pinned).await?;
+        changed = true;
+    }
+    let type_id = match req.type_id.as_deref().map(mermaid::safe_id) {
+        Some(t) if db::type_exists(&app.db, &t).await? => Some(t),
+        Some(_) => return Err(AppError::bad_request("нет такого типа")),
+        None => None,
+    };
+    if type_id.is_some() || req.props.is_some() || req.archived.is_some() {
+        db::update_object_meta(&app.db, &id, type_id.as_deref(), req.props.as_ref(), req.archived).await?;
+        changed = true;
+    }
+    if changed {
         emit_graph(&app).await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -317,7 +364,8 @@ async fn create_edge(Room { app, .. }: Room, Json(req): Json<CreateEdgeRequest>)
         return Err(AppError::bad_request("связь должна соединять два разных существующих узла"));
     }
     let label = req.label.as_deref().map(mermaid::sanitize_label).filter(|l| l != "…").unwrap_or_default();
-    db::insert_edge(&app.db, &a, &b, &mermaid::truncate_chars(&label, 30), USER_ID).await?;
+    let kind = req.kind.as_deref().map(|k| k.trim().to_lowercase()).filter(|k| ["related", "belongs_to", "about", "blocks", "made_by", "assigned_to", "contradicts", "mentions"].contains(&k.as_str())).unwrap_or_else(|| "related".into());
+    db::insert_relation(&app.db, &a, &b, &kind, &mermaid::truncate_chars(&label, 30), USER_ID, 1.0).await?;
     emit_graph(&app).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -457,13 +505,14 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
             stage: "agent".into(),
             detail: format!("{name} формулирует…"),
         });
-        let plan = agent_runner::TurnPlan {
+        let plan_turn = agent_runner::TurnPlan {
             beat: Some(beat),
             scene_so_far: scene_so_far.clone(),
             room_mood: mood.as_deref(),
             focus_node: focus_node.as_deref(),
+            library: plan.as_ref().and_then(|p| p.library.as_deref()),
         };
-        match agent_runner::run_agent(app, &beat.speaker, plan).await {
+        match agent_runner::run_agent(app, &beat.speaker, plan_turn).await {
             Ok(m) => scene_so_far.push((name, m.content)),
             Err(e) => tracing::warn!(agent = %beat.speaker, error = %e, "agent turn skipped"),
         }
@@ -579,6 +628,7 @@ async fn reset(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>>
     });
     app.emit(RoomEvent::Contracts { contracts: state.contracts.clone() });
     app.emit(RoomEvent::Notes { notes: state.node_notes.clone() });
+    app.emit(RoomEvent::Types { types: state.types.clone() });
     app.emit(RoomEvent::Relations { relations: state.relations.clone() });
     app.emit(RoomEvent::Memories { memories: state.memories.clone() });
     app.emit(RoomEvent::Done);

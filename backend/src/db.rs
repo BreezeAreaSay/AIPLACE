@@ -9,8 +9,8 @@ use sqlx::{
 };
 
 use crate::models::{
-    Agent, AgentMemory, Contract, DirectorLogEntry, DirectorOutput, GraphEdge, GraphNode, Message,
-    NodeNote, Relation, RoomEventRecord, SchemaDoc,
+    Agent, AgentMemory, Contract, DirectorLogEntry, DirectorOutput, GraphEdge, GraphNode, Mention, Message,
+    NodeNote, ObjectType, Relation, RoomEventRecord, SchemaDoc,
 };
 
 pub type Db = SqlitePool;
@@ -104,6 +104,21 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             narrated   INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS object_types (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            icon       TEXT NOT NULL DEFAULT '◇',
+            color      TEXT NOT NULL DEFAULT '#9a9ca8',
+            schema     TEXT NOT NULL DEFAULT '{"props":[]}',
+            builtin    INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT 'system',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        CREATE TABLE IF NOT EXISTS mentions (
+            message_id INTEGER NOT NULL,
+            object_id  TEXT NOT NULL,
+            PRIMARY KEY (message_id, object_id)
+        );
         CREATE TABLE IF NOT EXISTS node_notes (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             node_id    TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
@@ -134,8 +149,34 @@ pub async fn migrate(pool: &Db) -> Result<()> {
         ("graph_nodes", "y", "REAL"),
         ("graph_nodes", "pinned", "INTEGER NOT NULL DEFAULT 0"),
         ("graph_nodes", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("graph_nodes", "type_id", "TEXT NOT NULL DEFAULT ''"),
+        ("graph_nodes", "props", "TEXT NOT NULL DEFAULT '{}'"),
+        ("graph_nodes", "archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("graph_edges", "kind", "TEXT NOT NULL DEFAULT 'related'"),
+        ("graph_edges", "confidence", "REAL NOT NULL DEFAULT 1.0"),
     ] {
         add_column_if_missing(pool, table, col, ddl).await?;
+    }
+    seed_types(pool).await?;
+    // Pre-0.6 boards: derive the object type from the coarse node_type.
+    sqlx::query("UPDATE graph_nodes SET type_id = CASE node_type WHEN 'task' THEN 'task' WHEN 'concept' THEN 'idea' ELSE 'note' END WHERE type_id = ''")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn seed_types(pool: &Db) -> Result<()> {
+    for t in crate::types_seed::seeds() {
+        sqlx::query(
+            "INSERT OR IGNORE INTO object_types (id, name, icon, color, schema, builtin, created_by) VALUES (?, ?, ?, ?, ?, 1, 'system')",
+        )
+        .bind(t.id)
+        .bind(t.name)
+        .bind(t.icon)
+        .bind(t.color)
+        .bind(t.schema.to_string())
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -282,7 +323,7 @@ pub async fn reset_room(pool: &Db) -> Result<()> {
         "DELETE FROM graph_edges; DELETE FROM graph_nodes; DELETE FROM messages;
          DELETE FROM director_log; DELETE FROM schemas; DELETE FROM agents;
          DELETE FROM contracts; DELETE FROM relations; DELETE FROM agent_memory; DELETE FROM room_events;
-         DELETE FROM node_notes;",
+         DELETE FROM node_notes; DELETE FROM mentions; DELETE FROM object_types WHERE builtin = 0;",
     )
     .execute(pool)
     .await?;
@@ -439,10 +480,46 @@ pub async fn upsert_node_full(
     x: Option<f64>,
     y: Option<f64>,
 ) -> Result<()> {
+    let type_id = crate::types_seed::legacy_type(node_type);
+    upsert_object(pool, id, label, type_id, created_by, body, None, x, y).await
+}
+
+/// Insert or refresh a typed object. Existing objects keep their author and position;
+/// label/type/body/props are refreshed (props are merged key-by-key, never wiped).
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_object(
+    pool: &Db,
+    id: &str,
+    label: &str,
+    type_id: &str,
+    created_by: &str,
+    body: Option<&str>,
+    props: Option<&serde_json::Value>,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<()> {
+    let node_type = match type_id {
+        "task" | "goal" => "task",
+        "idea" | "project" => "concept",
+        _ => "insight",
+    };
+    let existing = get_node(pool, id).await?;
+    let merged = {
+        let mut base = existing.as_ref().map(|n| n.props.0.clone()).unwrap_or(serde_json::json!({}));
+        if let (Some(serde_json::Value::Object(new)), serde_json::Value::Object(b)) = (props, &mut base) {
+            for (k, v) in new {
+                if !v.is_null() {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        base
+    };
     sqlx::query(
-        "INSERT INTO graph_nodes (id, label, node_type, created_by, body, x, y, updated_at)
-         VALUES (?, ?, ?, ?, COALESCE(?, ''), ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        "INSERT INTO graph_nodes (id, label, node_type, created_by, body, x, y, type_id, props, updated_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
          ON CONFLICT(id) DO UPDATE SET label = excluded.label, node_type = excluded.node_type,
+         type_id = excluded.type_id, props = excluded.props,
          body = CASE WHEN excluded.body = '' THEN graph_nodes.body ELSE excluded.body END,
          x = COALESCE(graph_nodes.x, excluded.x), y = COALESCE(graph_nodes.y, excluded.y),
          updated_at = excluded.updated_at",
@@ -454,9 +531,137 @@ pub async fn upsert_node_full(
     .bind(body)
     .bind(x)
     .bind(y)
+    .bind(type_id)
+    .bind(merged.to_string())
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn update_object_meta(pool: &Db, id: &str, type_id: Option<&str>, props: Option<&serde_json::Value>, archived: Option<bool>) -> Result<()> {
+    if let Some(p) = props {
+        let existing = get_node(pool, id).await?;
+        let mut base = existing.map(|n| n.props.0).unwrap_or(serde_json::json!({}));
+        if let (serde_json::Value::Object(new), serde_json::Value::Object(b)) = (p, &mut base) {
+            for (k, v) in new {
+                if v.is_null() {
+                    b.remove(k);
+                } else {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        sqlx::query("UPDATE graph_nodes SET props = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+            .bind(base.to_string())
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    if type_id.is_some() || archived.is_some() {
+        sqlx::query("UPDATE graph_nodes SET type_id = COALESCE(?, type_id), archived = COALESCE(?, archived), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+            .bind(type_id)
+            .bind(archived.map(|a| a as i64))
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+// ───────────────────────────── Types ─────────────────────────────
+
+pub async fn list_types(pool: &Db) -> Result<Vec<ObjectType>> {
+    Ok(sqlx::query_as::<_, ObjectType>("SELECT * FROM object_types ORDER BY builtin DESC, created_at")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn type_exists(pool: &Db, id: &str) -> Result<bool> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_types WHERE id = ?").bind(id).fetch_one(pool).await?;
+    Ok(n > 0)
+}
+
+pub async fn insert_type(pool: &Db, id: &str, name: &str, icon: &str, color: &str, schema: &serde_json::Value, created_by: &str) -> Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO object_types (id, name, icon, color, schema, builtin, created_by) VALUES (?, ?, ?, ?, ?, 0, ?)")
+        .bind(id)
+        .bind(name)
+        .bind(icon)
+        .bind(color)
+        .bind(schema.to_string())
+        .bind(created_by)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ───────────────────────────── Mentions ─────────────────────────────
+
+pub async fn add_mention(pool: &Db, message_id: i64, object_id: &str) -> Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO mentions (message_id, object_id) VALUES (?, ?)")
+        .bind(message_id)
+        .bind(object_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn mentions_for_messages(pool: &Db, ids: &[i64]) -> Result<Vec<Mention>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT message_id, object_id FROM mentions WHERE message_id IN ({placeholders})");
+    let mut q = sqlx::query_as::<_, Mention>(&sql);
+    for id in ids {
+        q = q.bind(id);
+    }
+    Ok(q.fetch_all(pool).await?)
+}
+
+pub async fn messages_mentioning(pool: &Db, object_id: &str, limit: usize) -> Result<Vec<Message>> {
+    let mut rows = sqlx::query_as::<_, Message>(
+        "SELECT m.* FROM messages m JOIN mentions x ON x.message_id = m.id WHERE x.object_id = ? ORDER BY m.id DESC LIMIT ?",
+    )
+    .bind(object_id)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Attach mention lists to messages (one query).
+pub async fn with_mentions(pool: &Db, mut messages: Vec<Message>) -> Result<Vec<Message>> {
+    let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+    let ms = mentions_for_messages(pool, &ids).await?;
+    for m in messages.iter_mut() {
+        m.objects = ms.iter().filter(|x| x.message_id == m.id).map(|x| x.object_id.clone()).collect();
+    }
+    Ok(messages)
+}
+
+/// Case-insensitive search over title / body / props, optionally by type.
+pub async fn search_objects(pool: &Db, text: &str, type_id: Option<&str>, limit: usize) -> Result<Vec<GraphNode>> {
+    let words: Vec<String> = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(|w| w.chars().take(6).collect::<String>())
+        .take(6)
+        .collect();
+    let all = list_nodes(pool).await?;
+    let mut scored: Vec<(i32, GraphNode)> = all
+        .into_iter()
+        .filter(|n| n.archived == 0 && type_id.map(|t| n.type_id == t).unwrap_or(true))
+        .map(|n| {
+            let hay = format!("{} {} {}", n.label, n.body, n.props.0).to_lowercase();
+            let score = words.iter().filter(|w| hay.contains(w.as_str())).count() as i32 + if n.label.to_lowercase().contains(&text.to_lowercase()) { 3 } else { 0 };
+            (score, n)
+        })
+        .filter(|(s, _)| *s > 0 || (words.is_empty() && type_id.is_some()))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.updated_at.cmp(&a.1.updated_at)));
+    Ok(scored.into_iter().take(limit).map(|(_, n)| n).collect())
 }
 
 pub async fn get_node(pool: &Db, id: &str) -> Result<Option<GraphNode>> {
@@ -503,6 +708,7 @@ pub async fn delete_node(pool: &Db, id: &str) -> Result<bool> {
     // Edges/notes cascade via FK; be explicit for DBs created before FK was on.
     sqlx::query("DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?").bind(id).bind(id).execute(pool).await?;
     sqlx::query("DELETE FROM node_notes WHERE node_id = ?").bind(id).execute(pool).await?;
+    sqlx::query("DELETE FROM mentions WHERE object_id = ?").bind(id).execute(pool).await?;
     let r = sqlx::query("DELETE FROM graph_nodes WHERE id = ?").bind(id).execute(pool).await?;
     Ok(r.rows_affected() > 0)
 }
@@ -609,14 +815,20 @@ pub async fn insert_edge(
     relation_label: &str,
     created_by: &str,
 ) -> Result<()> {
+    insert_relation(pool, source_id, target_id, "related", relation_label, created_by, 1.0).await
+}
+
+pub async fn insert_relation(pool: &Db, source_id: &str, target_id: &str, kind: &str, label: &str, created_by: &str, confidence: f64) -> Result<()> {
     sqlx::query(
-        "INSERT OR IGNORE INTO graph_edges (source_id, target_id, relation_label, created_by)
-         VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO graph_edges (source_id, target_id, relation_label, created_by, kind, confidence)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(source_id)
     .bind(target_id)
-    .bind(relation_label)
+    .bind(label)
     .bind(created_by)
+    .bind(kind)
+    .bind(confidence)
     .execute(pool)
     .await?;
     Ok(())

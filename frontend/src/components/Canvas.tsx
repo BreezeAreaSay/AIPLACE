@@ -13,7 +13,7 @@ import {
   type NodeMouseHandler,
 } from '@xyflow/react'
 import { Download, Plus, Search } from 'lucide-react'
-import type { Agent, Graph, NodeNote } from '../types'
+import type { Agent, Graph, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS } from '../types'
 import { NodeCard, type NoteNodeType } from './NodeCard'
 import { api } from '../api'
@@ -22,6 +22,7 @@ interface Props {
   graph: Graph
   notes: NodeNote[]
   agents: Agent[]
+  types: ObjectType[]
   selectedId: string | null
   hotIds: Set<string>
   onSelect: (id: string | null) => void
@@ -34,7 +35,7 @@ interface Props {
 
 const nodeTypes = { note: NodeCard }
 
-function CanvasInner({ graph, notes, agents, selectedId, hotIds, onSelect, onCreate, onMove, onConnect, toolbarOffset = 0 }: Props) {
+function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect, onCreate, onMove, onConnect, toolbarOffset = 0 }: Props) {
   const rf = useReactFlow()
   const [overrides, setOverrides] = useState<Record<string, { x: number; y: number }>>({})
   const [query, setQuery] = useState('')
@@ -54,10 +55,11 @@ function CanvasInner({ graph, notes, agents, selectedId, hotIds, onSelect, onCre
   const visible = useMemo(
     () =>
       graph.nodes.filter(
-        (n) => (author === 'all' || n.created_by === author) && (!q || n.label.toLowerCase().includes(q) || n.body.toLowerCase().includes(q)),
+        (n) => n.archived === 0 && (author === 'all' || n.created_by === author) && (!q || n.label.toLowerCase().includes(q) || n.body.toLowerCase().includes(q)),
       ),
     [graph.nodes, author, q],
   )
+  const tmap = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types])
   const visibleIds = useMemo(() => new Set(visible.map((n) => n.id)), [visible])
 
   const nodes: NoteNodeType[] = useMemo(
@@ -70,6 +72,9 @@ function CanvasInner({ graph, notes, agents, selectedId, hotIds, onSelect, onCre
           label: n.label,
           body: n.body,
           nodeType: n.node_type,
+          typeIcon: tmap[n.type_id]?.icon ?? '◇',
+          typeName: tmap[n.type_id]?.name ?? n.type_id,
+          typeColor: tmap[n.type_id]?.color ?? '#9a9ca8',
           author: n.created_by,
           pinned: n.pinned !== 0,
           noteCounts: counts[n.id] ?? {},
@@ -78,7 +83,7 @@ function CanvasInner({ graph, notes, agents, selectedId, hotIds, onSelect, onCre
         },
         draggable: n.pinned === 0,
       })),
-    [visible, overrides, counts, selectedId, hotIds],
+    [visible, overrides, counts, selectedId, hotIds, tmap],
   )
 
   const edges: Edge[] = useMemo(
@@ -89,7 +94,7 @@ function CanvasInner({ graph, notes, agents, selectedId, hotIds, onSelect, onCre
           id: String(e.id),
           source: e.source_id,
           target: e.target_id,
-          label: e.relation_label || undefined,
+          label: e.relation_label || (e.kind !== 'related' ? e.kind : undefined),
           style: { stroke: `${AGENT_COLORS[e.created_by] ?? '#4a4c5c'}99` },
         })),
     [graph.edges, visibleIds],

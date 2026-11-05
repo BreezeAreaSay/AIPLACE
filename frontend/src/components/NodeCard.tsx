@@ -1,12 +1,15 @@
 import { memo } from 'react'
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react'
 import { Pin } from 'lucide-react'
-import { AGENT_COLORS, NODE_TYPE_GLYPH, NODE_TYPE_LABEL } from '../types'
+import { AGENT_COLORS } from '../types'
 
 export type NoteData = {
   label: string
   body: string
   nodeType: string
+  typeIcon: string
+  typeName: string
+  typeColor: string
   author: string
   pinned: boolean
   noteCounts: Record<string, number>
@@ -30,9 +33,9 @@ function NodeCardInner({ data }: NodeProps<NoteNodeType>) {
       }}
     >
       <Handle type="target" position={Position.Left} />
-      <div className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest" style={{ color }}>
-        <span>{NODE_TYPE_GLYPH[data.nodeType] ?? '◇'}</span>
-        <span>{NODE_TYPE_LABEL[data.nodeType] ?? data.nodeType}</span>
+      <div className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest" style={{ color: data.typeColor }}>
+        <span>{data.typeIcon}</span>
+        <span>{data.typeName}</span>
         {data.pinned && <Pin size={10} className="ml-auto text-zinc-400" />}
       </div>
       <div className="text-[13px] font-semibold leading-snug text-zinc-100">{data.label}</div>

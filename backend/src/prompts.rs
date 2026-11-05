@@ -322,6 +322,8 @@ pub struct AgentContext<'a> {
     /// Beats already played this round (speaker → what they said), for continuity.
     pub scene_so_far: &'a [(String, String)],
     pub focus: Option<(&'a GraphNode, &'a [crate::models::NodeNote])>,
+    /// Library lookup results relevant to the player's question (the "steroids").
+    pub library: Option<&'a str>,
 }
 
 pub fn agent_system(ctx: &AgentContext) -> String {
@@ -593,7 +595,8 @@ pub fn reader_system() -> String {
     format!(
         "{READER_MARK} Ты — Читатель комнаты. Твоя единственная работа: понять последнюю реплику игрока и вернуть маленький JSON. Персонажи: physicist (физик: любит цифры, системы, парадоксы), lit_teacher (литератор: любит драму, рефлексию, признания), graffiti (граффитист: любит дерзость, визуальные идеи, быстрые действия).\n\
 Правила: promises — ТОЛЬКО если игрок сам обещает сам что-то сделать (просьбы к персонажам и вопросы — не обещания); deadline — абсолютный ISO-8601 UTC от текущего времени или null; contract_reports — если игрок отчитывается по открытому слову (done | failed), мутный отчёт — не включай. feeds: насколько реплика кормит профиль каждого, от -2 (нытьё/пустота) до 2 (прямое попадание).\n\
-Отвечай ТОЛЬКО JSON: {{\"topic\": \"2-5 слов\", \"player_intent\": \"одна фраза\", \"question_to_agents\": true/false, \"feeds\": {{\"physicist\": 0, \"lit_teacher\": 0, \"graffiti\": 0}}, \"promises\": [{{\"title\": \"…\", \"deadline\": \"2026-11-07T20:00:00Z\"}}], \"contract_reports\": [{{\"id\": 3, \"status\": \"done\"}}], \"node_refs\": [\"id_узла\"]}}"
+memory_query — если игрок спрашивает о СВОЕЙ памяти/библиотеке («что я обещал Ивану», «что у меня по проекту», «какие книги хотел»): text — ключевые слова, type — id типа или null; иначе null.\n\
+Отвечай ТОЛЬКО JSON: {{\"topic\": \"2-5 слов\", \"player_intent\": \"одна фраза\", \"question_to_agents\": true/false, \"feeds\": {{\"physicist\": 0, \"lit_teacher\": 0, \"graffiti\": 0}}, \"promises\": [{{\"title\": \"…\", \"deadline\": \"2026-11-07T20:00:00Z\"}}], \"contract_reports\": [{{\"id\": 3, \"status\": \"done\"}}], \"node_refs\": [\"id_узла\"], \"memory_query\": {{\"text\": \"Иван срок\", \"type\": \"task\"}}}}"
     )
 }
 
@@ -755,7 +758,8 @@ pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
     };
     let memory = ctx.memory.filter(|m| !m.is_empty()).map(|m| format!("\nИЗ ТВОЕГО ДНЕВНИКА: {}", crate::mermaid::truncate_chars(m, 500))).unwrap_or_default();
     let focus = ctx.focus.map(|(n, _)| format!("\nРЕЧЬ ИДЁТ ОБ УЗЛЕ ДОСКИ «{}»: {}", n.label, crate::mermaid::truncate_chars(&n.body, 300))).unwrap_or_default();
-    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
+    let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (точные факты, на них можно опираться):\n{l}")).unwrap_or_default();
+    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
 }
 
 /// Split the think-stage output into (thought, hook phrase).
@@ -801,8 +805,9 @@ pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str) 
     } else {
         format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
     };
+    let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (это точные факты о делах игрока — используй их, а не догадки):\n{l}")).unwrap_or_default();
     format!(
-        "СТЕНОГРАММА:\n{}{scene}{own}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        "СТЕНОГРАММА:\n{}{scene}{own}{library}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
         transcript(&recent, all, false),
         if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
         if hook.is_empty() { "последняя реплика" } else { hook }
@@ -822,4 +827,83 @@ pub fn note_system(ctx: &AgentContext) -> String {
 
 pub fn note_user(_ctx: &AgentContext, speech: &str) -> String {
     format!("Ты только что сказал в комнате: «{}»\n\nТвоя пометка на узле:", crate::mermaid::truncate_chars(speech, 400))
+}
+
+// ───────────────────────────── Archivist (typed library) ─────────────────────────────
+
+pub const ARCHIVIST_MARK: &str = "[STAGE-ARCHIVIST]";
+
+pub fn types_summary(types: &[crate::models::ObjectType]) -> String {
+    types
+        .iter()
+        .map(|t| {
+            let props = t.schema.0.get("props").and_then(|p| p.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let key = p.get("key")?.as_str()?;
+                        let kind = p.get("kind").and_then(|k| k.as_str()).unwrap_or("text");
+                        let opts = p.get("options").and_then(|o| o.as_array()).map(|o| format!("[{}]", o.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("|"))).unwrap_or_default();
+                        Some(format!("{key}:{kind}{opts}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }).unwrap_or_default();
+            format!("- {} «{}»{}", t.id, t.name, if props.is_empty() { String::new() } else { format!(" — {props}") })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn archivist_system() -> String {
+    format!(
+        "{ARCHIVIST_MARK} Ты — Архивариус. Из реплик раунда ты ведёшь типизированную библиотеку объектов (как в Anytype), чтобы игроку не приходилось ничего заводить руками. Верни маленький JSON.\n\
+Правила: объект — конкретная сущность, о которой говорили: человек, проект, задача, идея, цель, книга, ссылка, событие… Не заводи объект на каждую фразу; 0–4 за раунд. СНАЧАЛА проверь список существующих объектов — если это тот же человек/проект/задача, используй его id (можно обновить props и body). id новых — латиница snake_case. type — из списка типов; props — только ключи из схемы этого типа (значения коротко; даты в ISO; checkbox true/false). body — 1–2 предложения сути. author — чья это сущность/мысль: user | physicist | lit_teacher | graffiti.\n\
+relations — связи между объектами (новыми или существующими id): kind из [belongs_to (задача→проект), about, blocks, made_by, assigned_to (задача→человек), contradicts, related]; label — короткий глагол.\n\
+mentions — для КАЖДОГО сообщения раунда (по его id) список объектов, о которых в нём речь (включая существующие). Это обратные ссылки.\n\
+new_types — ТОЛЬКО если сущность явно не ложится ни в один тип и такое наверняка повторится (например «Рецепт» уже есть, а «Тренировка» — нет): максимум один, id латиницей, name по-русски, props по той же схеме (key, label, kind: text|date|number|select|checkbox|url, options).\n\
+Отвечай ТОЛЬКО JSON: {{\"objects\": [{{\"id\": \"ivan\", \"title\": \"Иван\", \"type\": \"human\", \"props\": {{\"role\": \"заказчик\"}}, \"body\": \"…\", \"author\": \"user\"}}], \"relations\": [{{\"from\": \"napisat_doki\", \"to\": \"triad_canvas\", \"kind\": \"belongs_to\", \"label\": \"часть\"}}], \"mentions\": [{{\"message_id\": 12, \"objects\": [\"ivan\"]}}], \"new_types\": []}}"
+    )
+}
+
+pub fn archivist_user(round: &[Message], agents: &[Agent], types: &[crate::models::ObjectType], candidates: &[GraphNode], focus: Option<&GraphNode>) -> String {
+    let cands = if candidates.is_empty() {
+        "(библиотека пуста)".to_string()
+    } else {
+        candidates
+            .iter()
+            .map(|n| {
+                let props = if n.props.0.as_object().map(|o| o.is_empty()).unwrap_or(true) { String::new() } else { format!(" {}", n.props.0) };
+                format!("  {} [{}] «{}»{}", n.id, n.type_id, n.label, props)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let lines = round
+        .iter()
+        .map(|m| format!("#{} [{}]: {}", m.id, sender_name(&m.sender_id, agents), m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "ТИПЫ:\n{}\n\nСУЩЕСТВУЮЩИЕ ОБЪЕКТЫ (кандидаты на совпадение):\n{}\n{}\nРЕПЛИКИ РАУНДА (с id):\n{}",
+        types_summary(types),
+        cands,
+        focus.map(|n| format!("ФОКУС-ОБЪЕКТ: {} «{}» — изменения в первую очередь вокруг него.\n", n.id, n.label)).unwrap_or_default(),
+        lines
+    )
+}
+
+/// Compact digest of library hits for the speakers ("справка").
+pub fn library_digest(hits: &[GraphNode], types: &[crate::models::ObjectType], agents: &[Agent]) -> String {
+    if hits.is_empty() {
+        return "ничего не найдено".into();
+    }
+    hits.iter()
+        .take(8)
+        .map(|n| {
+            let tname = types.iter().find(|t| t.id == n.type_id).map(|t| t.name.as_str()).unwrap_or(n.type_id.as_str());
+            let props = n.props.0.as_object().map(|o| o.iter().map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            format!("- [{}] «{}» ({}){}{}", tname, n.label, sender_name(&n.created_by, agents), if props.is_empty() { String::new() } else { format!(" — {props}") }, if n.body.trim().is_empty() { String::new() } else { format!(": {}", crate::mermaid::truncate_chars(n.body.trim(), 160)) })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

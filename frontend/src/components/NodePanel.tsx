@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Eye, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Swords, Trash2, TrendingUp, X } from 'lucide-react'
-import type { Agent, Graph, GraphNode, NodeNote } from '../types'
-import { AGENT_COLORS, NODE_TYPE_LABEL } from '../types'
+import { Archive, Eye, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import type { Agent, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
+import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
+import { PropsEditor } from './PropsEditor'
+import { api } from '../api'
 
 interface Props {
   node: GraphNode
   graph: Graph
+  types: ObjectType[]
   notes: NodeNote[]
   agents: Agent[]
   disabled: boolean
   onClose: () => void
-  onPatch: (id: string, patch: { label?: string; body?: string; type?: string; pinned?: boolean }) => void
+  onPatch: (id: string, patch: { label?: string; body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; archived?: boolean; pinned?: boolean }) => void
   onDelete: (id: string) => void
   onAsk: (id: string, mode: 'discuss' | 'develop' | 'dispute', message?: string) => void
   onAddNote: (id: string, text: string) => void
@@ -19,12 +22,13 @@ interface Props {
   onSelect: (id: string) => void
 }
 
-export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect }: Props) {
+export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect }: Props) {
   const [label, setLabel] = useState(node.label)
   const [body, setBody] = useState(node.body)
   const [editing, setEditing] = useState(false)
   const [myNote, setMyNote] = useState('')
   const [question, setQuestion] = useState('')
+  const [backlinks, setBacklinks] = useState<Message[]>([])
 
   useEffect(() => {
     setLabel(node.label)
@@ -32,10 +36,21 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
     setEditing(false)
   }, [node.id, node.label, node.body])
 
-  const name = (id: string) => (id === 'user' ? 'ты' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
+  useEffect(() => {
+    let alive = true
+    api
+      .backlinks(node.id)
+      .then((b) => alive && setBacklinks(b))
+      .catch(() => alive && setBacklinks([]))
+    return () => {
+      alive = false
+    }
+  }, [node.id, node.updated_at])
+
+  const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
   const mine = notes.filter((n) => n.node_id === node.id)
   const links = graph.edges.filter((e) => e.source_id === node.id || e.target_id === node.id)
-  const color = AGENT_COLORS[node.created_by] ?? '#aaa'
+  const type = types.find((t) => t.id === node.type_id)
 
   const commit = () => {
     const patch: { label?: string; body?: string } = {}
@@ -46,23 +61,24 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
   }
 
   return (
-    <div className="flex h-full w-full flex-col border-r border-line bg-void/95 backdrop-blur md:w-[380px]">
+    <div className="flex h-full w-full flex-col bg-void">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-        <span className="font-mono text-[10px] uppercase tracking-widest" style={{ color }}>
-          {NODE_TYPE_LABEL[node.node_type] ?? node.node_type} · {name(node.created_by)}
+        <span className="text-base" style={{ color: type?.color }} title={type?.name}>
+          {type?.icon ?? '◇'}
         </span>
         <select
-          value={node.node_type}
-          onChange={(e) => onPatch(node.id, { type: e.target.value })}
-          className="ml-1 rounded border border-line bg-panel px-1 py-0.5 font-mono text-[10px] text-zinc-300"
-          title="Тип узла"
+          value={node.type_id}
+          onChange={(e) => onPatch(node.id, { type_id: e.target.value })}
+          className="rounded border border-line bg-panel px-1 py-0.5 font-mono text-[10px] text-zinc-300"
+          title="Тип объекта"
         >
-          {Object.entries(NODE_TYPE_LABEL).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
+          {types.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.icon} {t.name}
             </option>
           ))}
         </select>
+        <span className="font-mono text-[10px] text-zinc-500">· {name(node.created_by)}</span>
         <div className="ml-auto flex items-center gap-1">
           <button onClick={() => onPatch(node.id, { pinned: node.pinned === 0 })} className="rounded p-1 text-zinc-500 hover:text-zinc-200" title={node.pinned ? 'Открепить' : 'Закрепить (не двигается)'}>
             {node.pinned ? <PinOff size={14} /> : <Pin size={14} />}
@@ -70,9 +86,12 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
           <button onClick={() => setEditing((v) => !v)} className={`rounded p-1 hover:text-zinc-200 ${editing ? 'text-acid' : 'text-zinc-500'}`} title="Редактировать">
             {editing ? <Eye size={14} /> : <Pencil size={14} />}
           </button>
+          <button onClick={() => onPatch(node.id, { archived: node.archived === 0 })} className={`rounded p-1 hover:text-zinc-200 ${node.archived ? 'text-acid' : 'text-zinc-500'}`} title={node.archived ? 'Вернуть из архива' : 'В архив (скрыть из библиотеки)'}>
+            <Archive size={14} />
+          </button>
           <button
             onClick={() => {
-              if (confirm(`Удалить узел «${node.label}» со всеми пометками и связями?`)) {
+              if (confirm(`Удалить «${node.label}» со всеми пометками и связями?`)) {
                 onDelete(node.id)
                 onClose()
               }
@@ -128,6 +147,13 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
               </button>
             )}
           </div>
+        )}
+
+        {type && type.schema.props.length > 0 && (
+          <section>
+            <div className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">свойства · {type.name.toLowerCase()}</div>
+            <PropsEditor schema={type.schema.props} values={node.props} nodes={graph.nodes} onChange={(k, v) => onPatch(node.id, { props: { [k]: v } })} />
+          </section>
         )}
 
         <section>
@@ -214,7 +240,7 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
               return (
                 <div key={e.id} className="flex items-center gap-2 text-[11px]">
                   <span className="text-zinc-600">{e.source_id === node.id ? '→' : '←'}</span>
-                  {e.relation_label && <span className="font-mono text-[10px] text-zinc-500">{e.relation_label}</span>}
+                  <span className="font-mono text-[10px] text-zinc-500">{e.relation_label || RELATION_KIND_LABEL[e.kind] || e.kind}</span>
                   <button onClick={() => onSelect(otherId)} className="truncate text-left text-zinc-300 underline-offset-2 hover:underline">
                     {other?.label ?? otherId}
                   </button>
@@ -224,6 +250,21 @@ export function NodePanel({ node, graph, notes, agents, disabled, onClose, onPat
                 </div>
               )
             })}
+          </div>
+        </section>
+
+        <section>
+          <div className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">где всплывало · {backlinks.length}</div>
+          {backlinks.length === 0 && <div className="text-[11px] text-zinc-600">Архивариус ещё не связал этот объект с репликами.</div>}
+          <div className="space-y-1">
+            {backlinks.slice(-12).map((m) => (
+              <div key={m.id} className="rounded border border-line/60 bg-panel/50 px-2 py-1 text-[11px] text-zinc-400">
+                <span className="mr-1.5 font-mono text-[10px]" style={{ color: AGENT_COLORS[m.sender_id] ?? '#888' }}>
+                  {m.sender_id === 'user' ? 'ты' : name(m.sender_id)} · {new Date(m.created_at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}
+                </span>
+                <span className="text-zinc-300">{m.content.length > 160 ? m.content.slice(0, 160) + '…' : m.content}</span>
+              </div>
+            ))}
           </div>
         </section>
       </div>

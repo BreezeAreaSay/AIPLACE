@@ -21,6 +21,8 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
         stage_reader(user)
     } else if system.contains("[STAGE-CASTER]") {
         stage_caster(user)
+    } else if system.contains("[STAGE-ARCHIVIST]") {
+        stage_archivist(user)
     } else if system.contains("[STAGE-CARTOGRAPHER]") {
         stage_cartographer(user)
     } else if system.contains("[STAGE-PSYCHOLOGIST]") {
@@ -161,7 +163,8 @@ fn stage_reader(user_prompt: &str) -> String {
         "feeds": {"physicist": if t.chars().any(|c| c.is_ascii_digit()) {2} else {0}, "lit_teacher": 1, "graffiti": 0},
         "promises": if promise { json!([{"title": crate::mermaid::truncate_chars(&t, 60), "deadline": deadline}]) } else { json!([]) },
         "contract_reports": [],
-        "node_refs": []
+        "node_refs": [],
+        "memory_query": if regex::Regex::new(r"(?i)что я|что у меня|напомни|какие у меня").map(|r| r.is_match(&t)).unwrap_or(false) { json!({"text": t, "type": null}) } else { json!(null) }
     })
     .to_string()
 }
@@ -178,6 +181,25 @@ fn stage_caster(user_prompt: &str) -> String {
     let scene: Vec<serde_json::Value> = alive.iter().take(n).enumerate().map(|(i, sp)| json!({"speaker": sp, "addressee": if i == 0 {"user".to_string()} else {alive[0].clone()}, "move": moves.choose(&mut rng).copied().unwrap_or("ответ"), "intent": "[MOCK] зацепиться за последнюю фразу", "delivery": if i == 0 {"развёрнуто"} else {"коротко"}})).collect();
     let agendas: serde_json::Map<String, serde_json::Value> = alive.iter().take(n).map(|sp| (sp.clone(), json!(format!("[MOCK] цель для {sp}: вытянуть из игрока конкретику")))).collect();
     json!({"room_mood": "[MOCK] взвинченное", "note": "[MOCK] Постановщик без ключа ставит сцену по ротации", "scene": scene, "agendas": agendas}).to_string()
+}
+
+fn stage_archivist(user_prompt: &str) -> String {
+    let lines: Vec<(i64, String)> = regex::Regex::new(r"(?m)^#(\d+) \[([^\]]+)\]: (.+)$")
+        .ok()
+        .map(|r| r.captures_iter(user_prompt).map(|c| (c[1].parse().unwrap_or(0), c[3].to_string())).collect())
+        .unwrap_or_default();
+    let user_line = lines.iter().find(|(_, t)| !t.starts_with('<')).map(|(_, t)| t.clone()).unwrap_or_default();
+    let title = crate::mermaid::truncate_chars(&user_line, 40);
+    let id = crate::mermaid::safe_id(&title);
+    let is_task = regex::Regex::new(r"(?i)обеща|сделаю|напишу|надо").map(|r| r.is_match(&user_line)).unwrap_or(false);
+    let mut objects = vec![json!({"id": id, "title": title, "type": if is_task {"task"} else {"idea"}, "props": if is_task { json!({"status": "не начата", "priority": "средний"}) } else { json!({"status": "сырая"}) }, "body": "[MOCK] суть из реплики", "author": "user"})];
+    let mut relations = vec![];
+    if user_line.to_lowercase().contains("иван") {
+        objects.push(json!({"id": "ivan", "title": "Иван", "type": "human", "props": {"role": "заказчик"}, "body": "[MOCK] заказчик, сдвигает сроки", "author": "user"}));
+        relations.push(json!({"from": id, "to": "ivan", "kind": "about", "label": "касается"}));
+    }
+    let mentions: Vec<serde_json::Value> = lines.iter().map(|(mid, _)| json!({"message_id": mid, "objects": [id]})).collect();
+    json!({"objects": objects, "relations": relations, "mentions": mentions, "new_types": []}).to_string()
 }
 
 fn stage_cartographer(user_prompt: &str) -> String {
@@ -298,7 +320,7 @@ mod integration {
     use crate::prompts::{director_user, DirectorContext};
 
     fn msg(id: i64, who: &str, text: &str, ego: Option<&str>) -> Message {
-        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None }
+        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None, objects: vec![] }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import type { RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
+import type { GraphNode, Message, ObjectType, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
 import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
@@ -49,6 +49,9 @@ export interface NodePatch {
   label?: string
   body?: string
   type?: string
+  type_id?: string
+  props?: Record<string, unknown>
+  archived?: boolean
   x?: number
   y?: number
   pinned?: boolean
@@ -59,13 +62,18 @@ export const api = {
   state: () => request<RoomState>('/api/state'),
   chat: (message: string, nodeId?: string | null) =>
     request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message, node_id: nodeId ?? null }) }),
-  createNode: (label: string, opts: { body?: string; type?: string; x?: number; y?: number } = {}) =>
+  createNode: (label: string, opts: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number } = {}) =>
     request<RoomState>('/api/nodes', { method: 'POST', body: JSON.stringify({ label, ...opts }) }),
+  types: () => request<ObjectType[]>('/api/types'),
+  createType: (name: string, props: { key: string; label: string; kind: string; options?: string[] }[] = []) =>
+    request<ObjectType[]>('/api/types', { method: 'POST', body: JSON.stringify({ name, props }) }),
+  backlinks: (id: string) => request<Message[]>(`/api/nodes/${encodeURIComponent(id)}/backlinks`),
+  search: (q: string, type?: string) => request<GraphNode[]>(`/api/search?q=${encodeURIComponent(q)}${type ? `&type=${encodeURIComponent(type)}` : ''}`),
   patchNode: (id: string, patch: NodePatch) =>
     request<void>(`/api/nodes/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteNode: (id: string) => request<void>(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  createEdge: (source: string, target: string, label?: string) =>
-    request<void>('/api/edges', { method: 'POST', body: JSON.stringify({ source, target, label }) }),
+  createEdge: (source: string, target: string, label?: string, kind?: string) =>
+    request<void>('/api/edges', { method: 'POST', body: JSON.stringify({ source, target, label, kind }) }),
   deleteEdge: (id: number) => request<void>(`/api/edges/${id}`, { method: 'DELETE' }),
   askNode: (id: string, mode: 'discuss' | 'develop' | 'dispute', message?: string) =>
     request<RoomState>(`/api/nodes/${encodeURIComponent(id)}/ask`, { method: 'POST', body: JSON.stringify({ mode, message }) }),

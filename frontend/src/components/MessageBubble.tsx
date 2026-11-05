@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Terminal } from 'lucide-react'
-import type { Agent, GraphNode, Message } from '../types'
+import type { Agent, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
 
 interface Props {
   message: Message
   agents: Agent[]
   nodes: GraphNode[]
+  types?: ObjectType[]
   showEgo: boolean
   onNodeClick?: (id: string) => void
 }
@@ -25,7 +26,7 @@ function renderSpeech(text: string) {
   )
 }
 
-export function MessageBubble({ message, agents, nodes, showEgo, onNodeClick }: Props) {
+export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick }: Props) {
   const [open, setOpen] = useState(false)
   const agent = agents.find((a) => a.id === message.sender_id)
   const isUser = message.sender_id === 'user'
@@ -35,14 +36,26 @@ export function MessageBubble({ message, agents, nodes, showEgo, onNodeClick }: 
   const node = message.node_id ? nodes.find((n) => n.id === message.node_id) : undefined
   const silent = /^\*[^*]+\*$/.test(message.content.trim())
 
-  const nodeChip = node && (
-    <button
-      onClick={() => onNodeClick?.(node.id)}
-      className="mb-1 inline-flex items-center gap-1 rounded border border-line bg-panel px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-acid hover:text-acid"
-      title="Открыть узел на доске"
-    >
-      ◇ {node.label}
-    </button>
+  const mentioned = (message.objects ?? []).map((id) => nodes.find((n) => n.id === id)).filter((n): n is GraphNode => !!n && n.id !== node?.id)
+  const chip = (n: GraphNode, strong = false) => {
+    const t = types.find((x) => x.id === n.type_id)
+    return (
+      <button
+        key={n.id}
+        onClick={() => onNodeClick?.(n.id)}
+        className={`inline-flex max-w-[220px] items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] hover:border-acid hover:text-acid ${strong ? 'border-zinc-500 text-zinc-200' : 'border-line bg-panel text-zinc-400'}`}
+        title={`${t?.name ?? ''}: открыть`}
+      >
+        <span style={{ color: t?.color }}>{t?.icon ?? '◇'}</span>
+        <span className="truncate">{n.label}</span>
+      </button>
+    )
+  }
+  const nodeChip = (node || mentioned.length > 0) && (
+    <div className="mb-1 flex flex-wrap gap-1">
+      {node && chip(node, true)}
+      {mentioned.map((n) => chip(n))}
+    </div>
   )
 
   if (isSystem) {
@@ -86,7 +99,7 @@ export function MessageBubble({ message, agents, nodes, showEgo, onNodeClick }: 
           {message.move && <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-600">{message.move}</span>}
           <span className="text-[10px] font-mono text-zinc-600">{time}</span>
         </div>
-        {nodeChip}
+        {node && <div className="mb-1 flex flex-wrap gap-1">{chip(node, true)}</div>}
         {showEgo && message.ego_thought && (
           <div className="mb-1 rounded border border-line bg-black/50 font-mono text-[11px]">
             <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-1 px-2 py-1 text-left text-zinc-500 hover:text-zinc-300">
@@ -104,6 +117,7 @@ export function MessageBubble({ message, agents, nodes, showEgo, onNodeClick }: 
         >
           <div className="whitespace-pre-wrap break-words">{renderSpeech(message.content)}</div>
         </div>
+        {mentioned.length > 0 && <div className="mt-1 flex flex-wrap gap-1">{mentioned.map((n) => chip(n))}</div>}
       </div>
     </div>
   )

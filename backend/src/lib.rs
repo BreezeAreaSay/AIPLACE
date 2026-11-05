@@ -20,6 +20,7 @@ pub mod prompts;
 pub mod rooms;
 pub mod state;
 pub mod telegram;
+pub mod types_seed;
 pub mod update;
 pub mod web;
 

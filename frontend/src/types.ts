@@ -22,6 +22,26 @@ export interface Message {
   addressee: string | null
   move: string | null
   node_id: string | null
+  objects: string[]
+}
+
+export interface PropSchema {
+  key: string
+  label: string
+  kind: 'text' | 'date' | 'number' | 'select' | 'checkbox' | 'url' | 'relation' | string
+  options?: string[]
+  to?: string
+}
+
+export interface ObjectType {
+  id: string
+  name: string
+  icon: string
+  color: string
+  schema: { props: PropSchema[] }
+  builtin: number
+  created_by: string
+  created_at: string
 }
 
 export interface GraphNode {
@@ -35,6 +55,9 @@ export interface GraphNode {
   y: number | null
   pinned: number
   updated_at: string
+  type_id: string
+  props: Record<string, unknown>
+  archived: number
 }
 
 export interface NodeNote {
@@ -59,6 +82,19 @@ export interface GraphEdge {
   target_id: string
   relation_label: string
   created_by: string
+  kind: string
+  confidence: number
+}
+
+export const RELATION_KIND_LABEL: Record<string, string> = {
+  related: 'связано',
+  belongs_to: 'часть',
+  about: 'о',
+  blocks: 'блокирует',
+  made_by: 'сделано',
+  assigned_to: 'исполнитель',
+  contradicts: 'противоречит',
+  mentions: 'упоминает',
 }
 
 export interface Graph {
@@ -146,6 +182,7 @@ export interface RoomState {
   agents: Agent[]
   messages: Message[]
   graph: Graph
+  types: ObjectType[]
   node_notes: NodeNote[]
   graph_mermaid: string
   schema: SchemaDoc | null
@@ -198,6 +235,7 @@ export type RoomEvent =
   | { type: 'agents'; agents: Agent[] }
   | { type: 'graph'; graph: Graph; mermaid: string }
   | { type: 'notes'; notes: NodeNote[] }
+  | { type: 'types'; types: ObjectType[] }
   | { type: 'schema'; schema: SchemaDoc }
   | { type: 'contracts'; contracts: Contract[] }
   | { type: 'relations'; relations: Relation[] }

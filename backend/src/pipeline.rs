@@ -12,6 +12,7 @@ use crate::{
     contracts, db,
     director::Trigger,
     mermaid,
+    models::GraphNode,
     models::{Beat, ContractUpdate, DirectorOutput, GraphMutations, NewContract, NodeUpdate, RelationDelta, StatDelta},
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
@@ -55,6 +56,8 @@ pub struct RoundPlan {
     pub reader: Value,
     pub stages: Vec<StageLog>,
     pub first_round_message_id: i64,
+    /// Library digest answering the player's memory question, if any.
+    pub library: Option<String>,
 }
 
 /// Reader → contracts → Caster. Returns the plan with a staged scene.
@@ -83,6 +86,22 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         if let Some(v) = call_json(app, "reader", prompts::reader_system(), prompts::reader_user(&now, &last_user, &recent, &agents, &open, &nodes), 500, &mut stages).await {
             reader = v;
         }
+    }
+    // Memory question → deterministic library lookup, handed to the speakers as a digest.
+    let mut library: Option<String> = None;
+    if let Some(q) = reader.get("memory_query").filter(|q| !q.is_null()) {
+        let text = q.get("text").and_then(|t| t.as_str()).unwrap_or(&last_user).to_string();
+        let type_id = q.get("type").and_then(|t| t.as_str()).filter(|t| !t.is_empty() && *t != "null").map(str::to_string);
+        let hits = db::search_objects(&app.db, &text, type_id.as_deref(), 8).await?;
+        let types = db::list_types(&app.db).await?;
+        let open_words: Vec<String> = db::open_contracts(&app.db).await?.iter().map(|c| format!("- [Слово #{}] «{}» до {} (поручитель {})", c.id, c.title, c.deadline.as_deref().map(contracts::human_deadline).unwrap_or_else(|| "без срока".into()), c.guarantor_id.clone().unwrap_or_default())).collect();
+        let mut digest = prompts::library_digest(&hits, &types, &agents);
+        if !open_words.is_empty() {
+            digest.push('\n');
+            digest.push_str(&open_words.join("\n"));
+        }
+        library = Some(digest);
+        stages.push(StageLog { stage: "library".into(), ok: true, ms: 0, error: None });
     }
     // Contracts from the Reader: the most skeptical living agent guarantees.
     let mut new_contracts: Vec<NewContract> = Vec::new();
@@ -173,7 +192,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         db::mark_events_narrated(&app.db, last.id).await?;
     }
     output.stages = stages.clone();
-    Ok(RoundPlan { output, reader, stages, first_round_message_id })
+    Ok(RoundPlan { output, reader, stages, first_round_message_id, library })
 }
 
 /// Cartographer ∥ Psychologist on the lines spoken this round; applies everything and
@@ -191,21 +210,52 @@ pub async fn after_speech(app: &AppState, trigger: &Trigger, plan: &mut RoundPla
         _ => None,
     };
 
+    let types = db::list_types(&app.db).await?;
+    // Candidates for dedup: recent objects + anything sharing a word with the round.
+    let round_text = round.iter().map(|m| m.content.to_lowercase()).collect::<Vec<_>>().join(" ");
+    let mut candidates: Vec<GraphNode> = nodes.iter().rev().take(25).cloned().collect();
+    for n in nodes.iter() {
+        if candidates.len() >= 60 {
+            break;
+        }
+        if candidates.iter().any(|c| c.id == n.id) {
+            continue;
+        }
+        let hit = n.label.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).any(|w| round_text.contains(w));
+        if hit {
+            candidates.push(n.clone());
+        }
+    }
+    let _ = &edges;
+
     let mut log_a = Vec::new();
     let mut log_b = Vec::new();
-    let (carto, psych) = tokio::join!(
-        call_json(app, "cartographer", prompts::cartographer_system(), prompts::cartographer_user(&round, &agents, &nodes, &edges, focus.as_ref()), 900, &mut log_a),
+    let (arch, psych) = tokio::join!(
+        call_json(app, "archivist", prompts::archivist_system(), prompts::archivist_user(&round, &agents, &types, &candidates, focus.as_ref()), 1200, &mut log_a),
         call_json(app, "psychologist", prompts::psychologist_system(), prompts::psychologist_user(&round, &agents, &relations, &plan.reader, &events), 900, &mut log_b),
     );
     plan.stages.extend(log_a);
     plan.stages.extend(log_b);
 
-    if let Some(v) = carto {
+    if let Some(v) = arch {
+        apply_archivist(app, &v, &round, &types).await?;
+        // Mirror into the legacy DirectorOutput shape for the inspector.
         plan.output.graph_mutations = GraphMutations {
-            nodes: v.get("nodes").cloned().and_then(|x| serde_json::from_value(x).ok()).unwrap_or_default(),
-            edges: v.get("edges").cloned().and_then(|x| serde_json::from_value(x).ok()).unwrap_or_default(),
+            nodes: v.get("objects").and_then(|o| o.as_array()).map(|arr| arr.iter().filter_map(|o| Some(crate::models::NewNode {
+                id: o.get("id")?.as_str()?.to_string(),
+                label: o.get("title")?.as_str()?.to_string(),
+                node_type: o.get("type").and_then(|t| t.as_str()).unwrap_or("note").to_string(),
+                author: o.get("author").and_then(|a| a.as_str()).unwrap_or("user").to_string(),
+                body: o.get("body").and_then(|b| b.as_str()).map(str::to_string),
+            })).collect()).unwrap_or_default(),
+            edges: v.get("relations").and_then(|r| r.as_array()).map(|arr| arr.iter().filter_map(|r| Some(crate::models::NewEdge {
+                from: r.get("from")?.as_str()?.to_string(),
+                to: r.get("to")?.as_str()?.to_string(),
+                label: r.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string(),
+                author: None,
+            })).collect()).unwrap_or_default(),
         };
-        plan.output.node_updates = v.get("node_updates").cloned().and_then(|x| serde_json::from_value::<Vec<NodeUpdate>>(x).ok()).unwrap_or_default();
+        plan.output.node_updates = Vec::<NodeUpdate>::new();
     }
     if let Some(v) = psych {
         plan.output.inner_states = v.get("inner_states").cloned().and_then(|x| serde_json::from_value(x).ok()).unwrap_or_default();
@@ -227,6 +277,77 @@ pub async fn after_speech(app: &AppState, trigger: &Trigger, plan: &mut RoundPla
         }
     }
     plan.output.stages = plan.stages.clone();
-    crate::director::apply_after_round(app, &plan.output, &agents, trigger).await?;
+    // Graph mutations were already applied by the Archivist; hand the rest to the shared path.
+    let mut rest = plan.output.clone();
+    rest.graph_mutations = GraphMutations::default();
+    rest.node_updates.clear();
+    crate::director::apply_after_round(app, &rest, &agents, trigger).await?;
+    Ok(())
+}
+
+/// Apply the Archivist's typed objects, relations, mentions and (at most one) new type.
+async fn apply_archivist(app: &AppState, v: &Value, round: &[crate::models::Message], types: &[crate::models::ObjectType]) -> Result<()> {
+    let mut type_ids: Vec<String> = types.iter().map(|t| t.id.clone()).collect();
+    if let Some(nt) = v.get("new_types").and_then(|x| x.as_array()).and_then(|a| a.first()) {
+        if let (Some(id), Some(name)) = (nt.get("id").and_then(|x| x.as_str()), nt.get("name").and_then(|x| x.as_str())) {
+            let id = mermaid::safe_id(id);
+            if !db::type_exists(&app.db, &id).await? && !id.is_empty() {
+                let props = nt.get("props").cloned().unwrap_or(json!([]));
+                db::insert_type(&app.db, &id, &mermaid::truncate_chars(name.trim(), 40), nt.get("icon").and_then(|x| x.as_str()).unwrap_or("◇"), "#9a9ca8", &json!({ "props": props }), "archivist").await?;
+                type_ids.push(id);
+                app.emit(crate::models::RoomEvent::Types { types: db::list_types(&app.db).await? });
+            }
+        }
+    }
+    let round_ids: Vec<i64> = round.iter().map(|m| m.id).collect();
+    if let Some(objs) = v.get("objects").and_then(|x| x.as_array()) {
+        for o in objs.iter().take(5) {
+            let Some(title) = o.get("title").and_then(|t| t.as_str()) else { continue };
+            let label = mermaid::sanitize_label(title);
+            if label == "…" {
+                continue;
+            }
+            let raw_id = o.get("id").and_then(|i| i.as_str()).filter(|i| !i.trim().is_empty()).unwrap_or(title);
+            let id = mermaid::safe_id(raw_id);
+            let type_id = o.get("type").and_then(|t| t.as_str()).map(|t| t.trim().to_lowercase()).filter(|t| type_ids.contains(t)).unwrap_or_else(|| "note".into());
+            let author = mermaid::normalize_author(o.get("author").and_then(|a| a.as_str()).unwrap_or("user"));
+            let body = o.get("body").and_then(|b| b.as_str()).map(str::trim).filter(|b| !b.is_empty()).map(|b| mermaid::truncate_chars(b, 1500));
+            // keep only schema keys of this type (plus nothing else) so props stay typed
+            let schema_keys: Vec<String> = types.iter().find(|t| t.id == type_id).and_then(|t| t.schema.0.get("props")).and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|p| p.get("key").and_then(|k| k.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+            let props = o.get("props").and_then(|p| p.as_object()).map(|m| {
+                let filtered: serde_json::Map<String, Value> = m.iter().filter(|(k, _)| schema_keys.is_empty() || schema_keys.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                Value::Object(filtered)
+            });
+            db::upsert_object(&app.db, &id, &label, &type_id, author, body.as_deref(), props.as_ref(), None, None).await?;
+        }
+    }
+    if let Some(rels) = v.get("relations").and_then(|x| x.as_array()) {
+        for r in rels.iter().take(8) {
+            let (Some(f), Some(t)) = (r.get("from").and_then(|x| x.as_str()), r.get("to").and_then(|x| x.as_str())) else { continue };
+            let from = mermaid::safe_id(f);
+            let to = mermaid::safe_id(t);
+            if from == to || !db::node_exists(&app.db, &from).await? || !db::node_exists(&app.db, &to).await? {
+                continue;
+            }
+            let kind = r.get("kind").and_then(|k| k.as_str()).map(|k| k.trim().to_lowercase()).filter(|k| ["related", "belongs_to", "about", "blocks", "made_by", "assigned_to", "contradicts", "mentions"].contains(&k.as_str())).unwrap_or_else(|| "related".into());
+            let label = r.get("label").and_then(|l| l.as_str()).map(mermaid::sanitize_label).filter(|l| l != "…").map(|l| mermaid::truncate_chars(&l, 30)).unwrap_or_default();
+            db::insert_relation(&app.db, &from, &to, &kind, &label, "archivist", 0.8).await?;
+        }
+    }
+    if let Some(ms) = v.get("mentions").and_then(|x| x.as_array()) {
+        for m in ms {
+            let Some(mid) = m.get("message_id").and_then(|x| x.as_i64()) else { continue };
+            if !round_ids.contains(&mid) {
+                continue;
+            }
+            for oid in m.get("objects").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()).unwrap_or_default() {
+                let id = mermaid::safe_id(oid);
+                if db::node_exists(&app.db, &id).await? {
+                    db::add_mention(&app.db, mid, &id).await?;
+                }
+            }
+        }
+    }
+    db::place_unpositioned_nodes(&app.db).await?;
     Ok(())
 }

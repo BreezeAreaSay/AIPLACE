@@ -68,6 +68,9 @@ export function useRoom() {
         case 'notes':
           setState((s) => (s ? { ...s, node_notes: ev.notes } : s))
           break
+        case 'types':
+          setState((s) => (s ? { ...s, types: ev.types } : s))
+          break
         case 'schema':
           setState((s) => (s ? { ...s, schema: ev.schema } : s))
           break
@@ -123,8 +126,9 @@ export function useRoom() {
     live,
     refresh,
     send: (text: string, nodeId?: string | null) => run('Отправляю в комнату…', () => api.chat(text, nodeId)),
-    createNode: (label: string, opts?: { body?: string; type?: string; x?: number; y?: number }) =>
-      run('Добавляю заметку…', () => api.createNode(label, opts)),
+    createNode: (label: string, opts?: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number }) =>
+      run('Добавляю объект…', () => api.createNode(label, opts)),
+    createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),
     patchNode: (id: string, patch: Parameters<typeof api.patchNode>[1]) => {
       // optimistic local update so the panel feels instant
       setState((s) =>
@@ -140,6 +144,9 @@ export function useRoom() {
                         label: patch.label ?? n.label,
                         body: patch.body ?? n.body,
                         node_type: patch.type ?? n.node_type,
+                        type_id: patch.type_id ?? n.type_id,
+                        props: patch.props ? { ...n.props, ...patch.props } : n.props,
+                        archived: patch.archived === undefined ? n.archived : patch.archived ? 1 : 0,
                         x: patch.x ?? n.x,
                         y: patch.y ?? n.y,
                         pinned: patch.pinned === undefined ? n.pinned : patch.pinned ? 1 : 0,
@@ -153,7 +160,7 @@ export function useRoom() {
       return quiet(() => api.patchNode(id, patch))
     },
     deleteNode: (id: string) => quiet(() => api.deleteNode(id)),
-    createEdge: (source: string, target: string, label?: string) => quiet(() => api.createEdge(source, target, label)),
+    createEdge: (source: string, target: string, label?: string, kind?: string) => quiet(() => api.createEdge(source, target, label, kind)),
     deleteEdge: (id: number) => quiet(() => api.deleteEdge(id)),
     addNote: (id: string, text: string) => quiet(() => api.addNote(id, text)),
     askNode: (id: string, mode: 'discuss' | 'develop' | 'dispute', message?: string) =>

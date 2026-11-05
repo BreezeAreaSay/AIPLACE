@@ -48,14 +48,34 @@ pub struct Message {
     /// Canvas node this line is about (focus of a node discussion).
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Library objects the Archivist linked to this message (filled on read, not a column).
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub objects: Vec<String>,
 }
 
 // ───────────────────────────── Graph ─────────────────────────────
 
+/// An object type (Anytype-style): name, icon, colour and a property schema
+/// `{ "props": [{key, label, kind: text|date|number|select|checkbox|url|relation, options?, to?}] }`.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ObjectType {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub color: String,
+    pub schema: sqlx::types::Json<serde_json::Value>,
+    pub builtin: i64,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+/// A typed object in the library (the table is still called `graph_nodes` for history).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GraphNode {
     pub id: String,
     pub label: String,
+    /// Legacy coarse kind (concept | task | conflict | insight); kept for the canvas shapes.
     pub node_type: String,
     pub created_by: String,
     pub created_at: String,
@@ -68,6 +88,19 @@ pub struct GraphNode {
     pub pinned: i64,
     #[serde(default)]
     pub updated_at: String,
+    /// Object type id (see `ObjectType`).
+    #[serde(default)]
+    pub type_id: String,
+    /// Typed properties according to the type schema.
+    pub props: sqlx::types::Json<serde_json::Value>,
+    #[serde(default)]
+    pub archived: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Mention {
+    pub message_id: i64,
+    pub object_id: String,
 }
 
 /// An agent's (or the player's) annotation on a canvas node — their memory of that idea.
@@ -87,6 +120,11 @@ pub struct GraphEdge {
     pub target_id: String,
     pub relation_label: String,
     pub created_by: String,
+    /// related | belongs_to | about | blocks | made_by | mentions | contradicts | assigned_to
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -342,6 +380,10 @@ pub struct CreateNodeRequest {
     #[serde(rename = "type", alias = "node_type", default)]
     pub node_type: Option<String>,
     #[serde(default)]
+    pub type_id: Option<String>,
+    #[serde(default)]
+    pub props: Option<serde_json::Value>,
+    #[serde(default)]
     pub x: Option<f64>,
     #[serde(default)]
     pub y: Option<f64>,
@@ -356,6 +398,12 @@ pub struct PatchNodeRequest {
     #[serde(rename = "type", alias = "node_type", default)]
     pub node_type: Option<String>,
     #[serde(default)]
+    pub type_id: Option<String>,
+    #[serde(default)]
+    pub props: Option<serde_json::Value>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+    #[serde(default)]
     pub x: Option<f64>,
     #[serde(default)]
     pub y: Option<f64>,
@@ -369,6 +417,19 @@ pub struct CreateEdgeRequest {
     pub target: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTypeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub props: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -390,6 +451,7 @@ pub struct RoomState {
     pub agents: Vec<Agent>,
     pub messages: Vec<Message>,
     pub graph: Graph,
+    pub types: Vec<ObjectType>,
     pub node_notes: Vec<NodeNote>,
     pub graph_mermaid: String,
     pub schema: Option<SchemaDoc>,
@@ -447,6 +509,7 @@ pub enum RoomEvent {
     Director { entry: DirectorLogEntry },
     Agents { agents: Vec<Agent> },
     Graph { graph: Graph, mermaid: String },
+    Types { types: Vec<ObjectType> },
     Notes { notes: Vec<NodeNote> },
     Schema { schema: SchemaDoc },
     Contracts { contracts: Vec<Contract> },
