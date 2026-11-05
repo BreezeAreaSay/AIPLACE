@@ -27,6 +27,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [contextId, setContextId] = useState<string | null>(null)
   const [profileId, setProfileId] = useState<string | null>(null)
+  const [libraryQuery, setLibraryQuery] = useState<{ q: string; nonce: number } | null>(null)
   const isDesktop = useMedia('(min-width: 900px)')
 
   const unread = useMemo(() => {
@@ -125,6 +126,8 @@ export default function App() {
       disabled={disabled}
       onSelect={selectNode}
       onCreate={(label, opts) => void room.createNode(label, opts)}
+      onImport={room.importMd}
+      libraryQuery={libraryQuery}
       onCreateType={(name) => void room.createType(name)}
       onPatch={(id, patch) => void room.patchNode(id, patch)}
       onDelete={(id) => {
@@ -174,6 +177,15 @@ export default function App() {
       lastSeen={s.last_seen_message_id}
       streaming={room.streaming}
       onSeen={room.markSeen}
+      onCapture={(label, typeId, body) => {
+        void room.createNode(label, { type_id: typeId, body: body || undefined })
+      }}
+      onSearch={(q) => {
+        setLibraryQuery({ q, nonce: Date.now() })
+        setSideTab('library')
+        setSideOpen(true)
+        if (!isDesktop) setMobileTab('side')
+      }}
     />
   )
 

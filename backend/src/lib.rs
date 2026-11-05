@@ -12,6 +12,7 @@ pub mod error;
 pub mod handlers;
 pub mod heartbeat;
 pub mod intake;
+pub mod markdown;
 pub mod memory;
 pub mod mermaid;
 pub mod mock_llm;

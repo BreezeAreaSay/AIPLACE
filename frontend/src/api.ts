@@ -45,6 +45,13 @@ export interface Health {
   telegram: { enabled: boolean; bot_username: string | null; anon_rooms: boolean }
 }
 
+export interface ImportReport {
+  imported: number
+  updated: number
+  linked: number
+  ids: string[]
+}
+
 export interface NodePatch {
   label?: string
   body?: string
@@ -80,6 +87,9 @@ export const api = {
   addNote: (id: string, text: string) =>
     request<void>(`/api/nodes/${encodeURIComponent(id)}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
   exportUrl: () => `${API_BASE}/api/export.md`,
+  nodeExportUrl: (id: string) => `${API_BASE}/api/nodes/${encodeURIComponent(id)}/export.md`,
+  importMd: (files: { name: string; content: string }[]) =>
+    request<ImportReport>('/api/import', { method: 'POST', body: JSON.stringify({ files }) }),
   tick: () => request<RoomState>('/api/tick', { method: 'POST' }),
   schema: () => request<RoomState>('/api/schema', { method: 'POST' }),
   reset: () => request<RoomState>('/api/reset', { method: 'POST' }),

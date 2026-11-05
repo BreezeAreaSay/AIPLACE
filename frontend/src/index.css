@@ -37,6 +37,29 @@ body { background: #0D0E12; overscroll-behavior: none; -webkit-tap-highlight-col
 .react-flow__connectionline path { stroke: #CCFF00; stroke-dasharray: 4 3; }
 .react-flow__node { font-family: inherit; }
 .note-md p { margin: 0 0 .5em; } .note-md ul, .note-md ol { margin: 0 0 .5em 1.1em; } .note-md li { margin: .15em 0; }
+.note-md ul, .chat-md ul { list-style: disc; } .note-md ol, .chat-md ol { list-style: decimal; } .note-md li::marker, .chat-md li::marker { color: #71717a; }
 .note-md code { background: #1a1b26; padding: 0 .25em; border-radius: 3px; color: #CCFF00; font-size: .9em; }
 .note-md strong { color: #f4f4f5; } .note-md h1, .note-md h2, .note-md h3 { font-size: 1em; color: #f4f4f5; margin: .6em 0 .3em; }
-.note-md a { color: #00F0FF; text-decoration: underline; } .note-md blockquote { border-left: 2px solid #3a3b47; padding-left: .6em; color: #9a9ca8; }
+.note-md a { color: #00F0FF; text-decoration: underline; } .note-md blockquote { border-left: 2px solid #3a3b47; padding-left: .6em; color: #9a9ca8; margin: .4em 0; }
+.note-md h1 { font-size: 1.25em; } .note-md h2 { font-size: 1.1em; border-bottom: 1px solid #23242e; padding-bottom: .15em; } .note-md h3 { font-size: 1em; }
+.note-md h4, .note-md h5, .note-md h6 { font-size: .95em; color: #e4e4e7; margin: .5em 0 .25em; }
+.note-md hr { border: 0; border-top: 1px dashed #3a3b47; margin: .8em 0; }
+.note-md img { max-width: 100%; border-radius: 4px; border: 1px solid #23242e; }
+.note-md del { color: #71717a; }
+.note-md li.task-list-item, .chat-md li.task-list-item { list-style: none; margin-left: -1.1em; }
+.note-md ul ul, .note-md ol ol, .note-md ul ol, .note-md ol ul { margin-bottom: 0; }
+.md-pre { background: #0a0b0f; border: 1px solid #23242e; border-radius: 4px; padding: .5em .7em; overflow-x: auto; margin: .4em 0 .6em; font-size: .85em; line-height: 1.45; }
+.md-pre code { background: transparent; padding: 0; color: #d4d4d8; }
+.md-table-wrap { overflow-x: auto; margin: .4em 0 .6em; }
+.note-md table, .chat-md table { border-collapse: collapse; font-size: .9em; }
+.note-md th, .note-md td, .chat-md th, .chat-md td { border: 1px solid #2a2b36; padding: .2em .5em; text-align: left; vertical-align: top; }
+.note-md th, .chat-md th { background: #13141a; color: #f4f4f5; font-weight: 600; }
+.wiki { color: #CCFF00; border-bottom: 1px dotted #CCFF0088; } .wiki:hover { border-bottom-style: solid; }
+.wiki-missing { color: #8a8ca0; border-bottom: 1px dashed #4a4c5c; } .wiki-missing:hover { color: #CCFF00; }
+.chat-md p { margin: 0 0 .35em; } .chat-md p:last-child { margin-bottom: 0; }
+.chat-md ul, .chat-md ol { margin: .1em 0 .35em 1.1em; } .chat-md li { margin: .1em 0; }
+.chat-md code { background: #1a1b26; padding: 0 .25em; border-radius: 3px; color: #CCFF00; font-size: .9em; }
+.chat-md a { color: #00F0FF; text-decoration: underline; } .chat-md em { color: #a1a1aa; }
+.chat-md strong { color: #f4f4f5; } .chat-md h1, .chat-md h2, .chat-md h3 { font-size: 1em; font-weight: 600; color: #f4f4f5; margin: .3em 0 .2em; }
+.chat-md blockquote { border-left: 2px solid #3a3b47; padding-left: .6em; color: #9a9ca8; margin: .2em 0; }
+.chat-md .md-pre { margin: .3em 0; }

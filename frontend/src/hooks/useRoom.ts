@@ -156,6 +156,7 @@ export function useRoom() {
     },
     createNode: (label: string, opts?: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number }) =>
       run('Добавляю объект…', () => api.createNode(label, opts)),
+    importMd: (files: { name: string; content: string }[]) => api.importMd(files).then((r) => (void refresh(), r)),
     createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),
     patchNode: (id: string, patch: Parameters<typeof api.patchNode>[1]) => {
       // optimistic local update so the panel feels instant

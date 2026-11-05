@@ -18,7 +18,9 @@ interface Props {
   hotIds: Set<string>
   disabled: boolean
   onSelect: (id: string | null) => void
-  onCreate: (label: string, opts: { type_id?: string; x?: number; y?: number }) => void
+  onCreate: (label: string, opts: { type_id?: string; body?: string; props?: Record<string, unknown>; x?: number; y?: number }) => void
+  onImport: (files: { name: string; content: string }[]) => Promise<{ imported: number; updated: number; linked: number }>
+  libraryQuery: { q: string; nonce: number } | null
   onCreateType: (name: string) => void
   onPatch: (id: string, patch: Record<string, unknown>) => void
   onDelete: (id: string) => void
@@ -64,7 +66,17 @@ export function SidePanel(p: Props) {
       </div>
       <div className="min-h-0 flex-1">
         {p.tab === 'library' && (
-          <Library nodes={p.graph.nodes} types={p.types} agents={p.agents} selectedId={p.selected?.id ?? null} onSelect={(id) => p.onSelect(id)} onCreate={(label, type_id) => p.onCreate(label, { type_id })} onCreateType={p.onCreateType} />
+          <Library
+            nodes={p.graph.nodes}
+            types={p.types}
+            agents={p.agents}
+            selectedId={p.selected?.id ?? null}
+            externalQuery={p.libraryQuery}
+            onSelect={(id) => p.onSelect(id)}
+            onCreate={(label, type_id) => p.onCreate(label, { type_id })}
+            onCreateType={p.onCreateType}
+            onImport={p.onImport}
+          />
         )}
         {p.tab === 'object' && p.selected && (
           <NodePanel
@@ -84,6 +96,7 @@ export function SidePanel(p: Props) {
             onAddNote={p.onAddNote}
             onDeleteEdge={p.onDeleteEdge}
             onSelect={(id) => p.onSelect(id)}
+            onCreate={(label, opts) => p.onCreate(label, opts)}
           />
         )}
         {p.tab === 'object' && !p.selected && <div className="p-4 font-mono text-xs text-zinc-600">Выбери объект в библиотеке, на графе или по чипу в чате.</div>}

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, ChevronRight, Terminal } from 'lucide-react'
 import type { Agent, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
+import { Markdown } from './Markdown'
 
 interface Props {
   message: Message
@@ -10,20 +11,6 @@ interface Props {
   types?: ObjectType[]
   showEgo: boolean
   onNodeClick?: (id: string) => void
-}
-
-/** `*ремарка*` → italic stage direction; everything else plain. */
-function renderSpeech(text: string) {
-  const parts = text.split(/(\*[^*\n]{1,200}\*)/g)
-  return parts.map((p, i) =>
-    p.startsWith('*') && p.endsWith('*') && p.length > 2 ? (
-      <em key={i} className="text-zinc-400">
-        {p.slice(1, -1)}
-      </em>
-    ) : (
-      <span key={i}>{p}</span>
-    ),
-  )
 }
 
 export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick }: Props) {
@@ -71,7 +58,9 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
       <div className="flex flex-col items-end">
         {nodeChip}
         <div className="max-w-[90%] rounded-lg rounded-br-sm border border-zinc-600 bg-zinc-800/70 px-3 py-2 text-sm text-zinc-100">
-          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          <div className="break-words">
+            <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
+          </div>
           <div className="mt-1 text-right text-[10px] font-mono text-zinc-500">ты · {time}</div>
         </div>
       </div>
@@ -115,7 +104,9 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
           className={`rounded-lg rounded-tl-sm border px-3 py-2 text-sm leading-relaxed ${silent ? 'border-dashed bg-transparent text-zinc-400' : 'bg-panel text-zinc-100'}`}
           style={{ borderColor: `${color}55` }}
         >
-          <div className="whitespace-pre-wrap break-words">{renderSpeech(message.content)}</div>
+          <div className="break-words">
+            <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
+          </div>
         </div>
         {(message.actions ?? []).length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
@@ -130,7 +121,7 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
                   style={{ borderColor: `${color}77` }}
                   title="Действие в библиотеке — открыть объект"
                 >
-                  <span style={{ color: t?.color ?? color }}>{a.op === 'link' ? '⇄' : a.op === 'update' ? '✎' : t?.icon ?? '＋'}</span>
+                  <span style={{ color: t?.color ?? color }}>{a.op === 'link' ? '⇄' : a.op === 'update' ? '✎' : a.op === 'append' ? '✍' : a.op === 'note' ? '✎' : t?.icon ?? '＋'}</span>
                   <span className="truncate">{a.text}</span>
                 </button>
               )

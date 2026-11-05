@@ -43,6 +43,11 @@ pub fn definitions() -> Vec<ToolDef> {
             input_schema: obj(json!({ "id": { "type": "string" }, "title": { "type": "string" }, "body": { "type": "string" }, "type": { "type": "string" }, "props": { "type": "object" } }), &["id"]),
         },
         ToolDef {
+            name: "library_append".into(),
+            description: "Дописать в тело заметки/объекта, не стирая написанное: абзац, пункт списка, запись в лог. Можно указать heading — раздел «## …», куда дописать. Для своих дневников, логов проектов, развития чужой идеи.".into(),
+            input_schema: obj(json!({ "id": { "type": "string" }, "text": { "type": "string", "description": "markdown" }, "heading": { "type": "string" } }), &["id", "text"]),
+        },
+        ToolDef {
             name: "library_link".into(),
             description: "Связать два объекта: kind — belongs_to (задача→проект), about, blocks, assigned_to (задача→человек), contradicts, related.".into(),
             input_schema: obj(json!({ "from": { "type": "string" }, "to": { "type": "string" }, "kind": { "type": "string" }, "label": { "type": "string" } }), &["from", "to"]),
@@ -121,7 +126,7 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
             if db::node_exists(&app.db, &id).await? {
                 id = format!("{}_{}", id, chrono::Utc::now().timestamp() % 10_000);
             }
-            let body = args.get("body").and_then(|b| b.as_str()).map(|b| mermaid::truncate_chars(b.trim(), 1500));
+            let body = args.get("body").and_then(|b| b.as_str()).map(|b| mermaid::truncate_chars(b.trim(), 6000));
             let props = filtered_props(&types, &type_id, args.get("props"));
             db::upsert_object(&app.db, &id, &title, &type_id, actor, body.as_deref(), props.as_ref(), None, None).await?;
             db::place_unpositioned_nodes(&app.db).await?;
@@ -132,7 +137,7 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
             let id = mermaid::safe_id(args.get("id").and_then(|v| v.as_str()).unwrap_or(""));
             let Some(existing) = db::get_node(&app.db, &id).await? else { return Ok((json!({ "error": "нет такого объекта" }), None)) };
             let label = args.get("title").and_then(|t| t.as_str()).map(mermaid::sanitize_label).filter(|t| t != "…");
-            let body = args.get("body").and_then(|b| b.as_str()).map(|b| mermaid::truncate_chars(b.trim(), 1500));
+            let body = args.get("body").and_then(|b| b.as_str()).map(|b| mermaid::truncate_chars(b.trim(), 6000));
             let type_id = args.get("type").and_then(|t| t.as_str()).map(|t| t.trim().to_lowercase()).filter(|t| types.iter().any(|x| &x.id == t));
             let props = args.get("props").cloned().filter(|p| p.is_object());
             if label.is_some() || body.is_some() {
@@ -149,6 +154,16 @@ pub async fn call(app: &AppState, actor: &str, name: &str, args: &Value) -> Resu
                 format!("поправил «{}»", existing.label)
             };
             Ok((json!({ "ok": true, "id": id }), Some(ActionRecord { op: "update".into(), object_id: id, text: what })))
+        }
+        "library_append" => {
+            let id = mermaid::safe_id(args.get("id").and_then(|v| v.as_str()).unwrap_or(""));
+            let Some(existing) = db::get_node(&app.db, &id).await? else { return Ok((json!({ "error": "нет такого объекта" }), None)) };
+            let text = args.get("text").and_then(|t| t.as_str()).map(|t| mermaid::truncate_chars(t.trim(), 3000)).filter(|t| !t.is_empty());
+            let Some(text) = text else { return Ok((json!({ "error": "нужен text" }), None)) };
+            let heading = args.get("heading").and_then(|h| h.as_str()).map(|h| mermaid::truncate_chars(h.trim(), 60)).filter(|h| !h.is_empty());
+            let body = crate::markdown::append_section(&existing.body, heading.as_deref(), &text);
+            db::update_node_fields(&app.db, &id, None, Some(&mermaid::truncate_chars(&body, 60_000)), None, None).await?;
+            Ok((json!({ "ok": true, "id": id, "chars": body.chars().count() }), Some(ActionRecord { op: "append".into(), object_id: id, text: format!("дописал в «{}»", existing.label) })))
         }
         "library_link" => {
             let from = mermaid::safe_id(args.get("from").and_then(|v| v.as_str()).unwrap_or(""));

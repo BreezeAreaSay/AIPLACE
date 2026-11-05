@@ -359,6 +359,10 @@ async fn apply_acts(app: &AppState, agent_id: &str, acts: &[serde_json::Value], 
                     let tname = crate::tools::type_name_acc(types, &type_id);
                     Ok(Some(crate::models::ActionRecord { op: "create".into(), object_id: id, text: format!("завёл {tname} «{title}»") }))
                 }
+                "append" => {
+                    let (_, rec) = crate::tools::call(app, agent_id, "library_append", a).await?;
+                    Ok(rec)
+                }
                 "update" | "done" => {
                     let Some(id) = a.get("id").and_then(|i| i.as_str()).map(crate::mermaid::safe_id) else { return Ok(None) };
                     let Some(existing) = db::get_node(&app.db, &id).await? else { return Ok(None) };

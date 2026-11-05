@@ -26,6 +26,8 @@ interface Props {
   lastSeen: number
   streaming: { agent: string; text: string } | null
   onSeen: (messageId: number) => void
+  onCapture: (label: string, typeId: string, body: string) => void
+  onSearch: (q: string) => void
 }
 
 export function ScenePanel(p: Props) {
@@ -93,6 +95,9 @@ export function ScenePanel(p: Props) {
       </div>
       <Composer
         disabled={p.disabled}
+        types={p.types}
+        onCapture={p.onCapture}
+        onSearch={p.onSearch}
         onSend={p.onSend}
         onTick={p.onTick}
         showEgo={p.showEgo}

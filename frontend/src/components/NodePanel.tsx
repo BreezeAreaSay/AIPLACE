@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import { Archive, Eye, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Swords, Trash2, TrendingUp, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Archive, Check, Copy, Download, Eye, Files, Link2, MessageSquare, Pencil, Pin, PinOff, Send, Swords, Trash2, TrendingUp, X } from 'lucide-react'
 import type { Agent, Graph, GraphNode, Message, NodeNote, ObjectType } from '../types'
 import { AGENT_COLORS, RELATION_KIND_LABEL } from '../types'
 import { PropsEditor } from './PropsEditor'
+import { Markdown } from './Markdown'
+import { MdEditor } from './MdEditor'
 import { api } from '../api'
 
 interface Props {
@@ -20,21 +21,47 @@ interface Props {
   onAddNote: (id: string, text: string) => void
   onDeleteEdge: (id: number) => void
   onSelect: (id: string) => void
+  onCreate: (label: string, opts: { type_id?: string; body?: string; props?: Record<string, unknown> }) => void
 }
 
-export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect }: Props) {
+function wordCount(s: string) {
+  return s.trim() ? s.trim().split(/\s+/).length : 0
+}
+
+/** Object page: editable markdown note with autosave, properties, triad buttons, notes, links, backlinks. */
+export function NodePanel({ node, graph, types, notes, agents, disabled, onClose, onPatch, onDelete, onAsk, onAddNote, onDeleteEdge, onSelect, onCreate }: Props) {
   const [label, setLabel] = useState(node.label)
   const [body, setBody] = useState(node.body)
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState(() => !node.body.trim())
+  const [saved, setSaved] = useState<'idle' | 'dirty' | 'saved'>('idle')
+  const [copied, setCopied] = useState(false)
   const [myNote, setMyNote] = useState('')
   const [question, setQuestion] = useState('')
   const [backlinks, setBacklinks] = useState<Message[]>([])
+  const timer = useRef<number | null>(null)
+  const lastSent = useRef({ label: node.label, body: node.body })
 
+  // New object selected: reset local draft (but never clobber a draft of the same object).
   useEffect(() => {
     setLabel(node.label)
     setBody(node.body)
-    setEditing(false)
-  }, [node.id, node.label, node.body])
+    lastSent.current = { label: node.label, body: node.body }
+    setEditing(!node.body.trim())
+    setSaved('idle')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.id])
+
+  // Remote change (agent appended, import) while not editing → follow it.
+  useEffect(() => {
+    if (!editing && node.body !== lastSent.current.body) {
+      setBody(node.body)
+      lastSent.current.body = node.body
+    }
+    if (!editing && node.label !== lastSent.current.label) {
+      setLabel(node.label)
+      lastSent.current.label = node.label
+    }
+  }, [node.body, node.label, editing])
 
   useEffect(() => {
     let alive = true
@@ -47,18 +74,77 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
     }
   }, [node.id, node.updated_at])
 
-  const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
+  const flush = useCallback(
+    (l: string, b: string) => {
+      const patch: { label?: string; body?: string } = {}
+      const title = l.trim()
+      if (title && title !== lastSent.current.label) patch.label = title
+      if (b !== lastSent.current.body) patch.body = b
+      if (Object.keys(patch).length) {
+        onPatch(node.id, patch)
+        lastSent.current = { label: patch.label ?? lastSent.current.label, body: patch.body ?? lastSent.current.body }
+        setSaved('saved')
+        window.setTimeout(() => setSaved((s) => (s === 'saved' ? 'idle' : s)), 1500)
+      } else {
+        setSaved('idle')
+      }
+    },
+    [node.id, onPatch],
+  )
+
+  // Autosave: 900ms after the last keystroke, and on unmount / object switch.
+  const schedule = (l: string, b: string) => {
+    setSaved('dirty')
+    if (timer.current) window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => flush(l, b), 900)
+  }
+  const draft = useRef({ label, body })
+  draft.current = { label, body }
+  useEffect(
+    () => () => {
+      if (timer.current) {
+        window.clearTimeout(timer.current)
+        flush(draft.current.label, draft.current.body)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [node.id],
+  )
+
+  const changeBody = (v: string) => {
+    setBody(v)
+    schedule(label, v)
+  }
+  const changeLabel = (v: string) => {
+    setLabel(v)
+    schedule(v, body)
+  }
+  const finish = () => {
+    if (timer.current) window.clearTimeout(timer.current)
+    flush(label, body)
+    setEditing(false)
+  }
+
+  const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : id === 'mcp' ? 'mcp' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
   const mine = notes.filter((n) => n.node_id === node.id)
   const links = graph.edges.filter((e) => e.source_id === node.id || e.target_id === node.id)
   const type = types.find((t) => t.id === node.type_id)
 
-  const commit = () => {
-    const patch: { label?: string; body?: string } = {}
-    if (label.trim() && label.trim() !== node.label) patch.label = label.trim()
-    if (body !== node.body) patch.body = body
-    if (Object.keys(patch).length) onPatch(node.id, patch)
-    setEditing(false)
+  const asMarkdown = () => {
+    const fm = [`title: ${node.label}`, `type: ${node.type_id}`, ...Object.entries(node.props).filter(([, v]) => v !== null && v !== '').map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)]
+    return `---\n${fm.join('\n')}\n---\n\n# ${node.label}\n\n${body.trim()}\n`
   }
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(asMarkdown())
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  const iconBtn = 'rounded p-1 text-zinc-500 hover:text-zinc-200'
 
   return (
     <div className="flex h-full w-full flex-col bg-void">
@@ -66,12 +152,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
         <span className="text-base" style={{ color: type?.color }} title={type?.name}>
           {type?.icon ?? '◇'}
         </span>
-        <select
-          value={node.type_id}
-          onChange={(e) => onPatch(node.id, { type_id: e.target.value })}
-          className="rounded border border-line bg-panel px-1 py-0.5 font-mono text-[10px] text-zinc-300"
-          title="Тип объекта"
-        >
+        <select value={node.type_id} onChange={(e) => onPatch(node.id, { type_id: e.target.value })} className="rounded border border-line bg-panel px-1 py-0.5 font-mono text-[10px] text-zinc-300" title="Тип объекта">
           {types.map((t) => (
             <option key={t.id} value={t.id}>
               {t.icon} {t.name}
@@ -79,14 +160,24 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           ))}
         </select>
         <span className="font-mono text-[10px] text-zinc-500">· {name(node.created_by)}</span>
-        <div className="ml-auto flex items-center gap-1">
-          <button onClick={() => onPatch(node.id, { pinned: node.pinned === 0 })} className="rounded p-1 text-zinc-500 hover:text-zinc-200" title={node.pinned ? 'Открепить' : 'Закрепить (не двигается)'}>
+        <span className={`font-mono text-[9px] ${saved === 'dirty' ? 'text-zinc-500' : saved === 'saved' ? 'text-acid' : 'text-transparent'}`}>{saved === 'dirty' ? '…' : '✓ сохранено'}</span>
+        <div className="ml-auto flex items-center gap-0.5">
+          <button onClick={() => onPatch(node.id, { pinned: node.pinned === 0 })} className={iconBtn} title={node.pinned ? 'Открепить' : 'Закрепить'}>
             {node.pinned ? <PinOff size={14} /> : <Pin size={14} />}
           </button>
-          <button onClick={() => setEditing((v) => !v)} className={`rounded p-1 hover:text-zinc-200 ${editing ? 'text-acid' : 'text-zinc-500'}`} title="Редактировать">
+          <button onClick={() => (editing ? finish() : setEditing(true))} className={`rounded p-1 hover:text-zinc-200 ${editing ? 'text-acid' : 'text-zinc-500'}`} title={editing ? 'Готово — показать (Ctrl+Enter)' : 'Редактировать'}>
             {editing ? <Eye size={14} /> : <Pencil size={14} />}
           </button>
-          <button onClick={() => onPatch(node.id, { archived: node.archived === 0 })} className={`rounded p-1 hover:text-zinc-200 ${node.archived ? 'text-acid' : 'text-zinc-500'}`} title={node.archived ? 'Вернуть из архива' : 'В архив (скрыть из библиотеки)'}>
+          <button onClick={() => void copy()} className={iconBtn} title="Скопировать как markdown">
+            {copied ? <Check size={14} className="text-acid" /> : <Copy size={14} />}
+          </button>
+          <a href={api.nodeExportUrl(node.id)} download className={iconBtn} title="Скачать .md (с frontmatter и связями)">
+            <Download size={14} />
+          </a>
+          <button onClick={() => onCreate(`${node.label} (копия)`, { type_id: node.type_id, body, props: node.props })} className={iconBtn} title="Дублировать">
+            <Files size={14} />
+          </button>
+          <button onClick={() => onPatch(node.id, { archived: node.archived === 0 })} className={`rounded p-1 hover:text-zinc-200 ${node.archived ? 'text-acid' : 'text-zinc-500'}`} title={node.archived ? 'Вернуть из архива' : 'В архив'}>
             <Archive size={14} />
           </button>
           <button
@@ -101,53 +192,51 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           >
             <Trash2 size={14} />
           </button>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:text-zinc-200" aria-label="Закрыть">
+          <button onClick={onClose} className={iconBtn} aria-label="Закрыть">
             <X size={16} />
           </button>
         </div>
       </div>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-3">
-        {editing ? (
-          <div className="space-y-2">
-            <input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              className="w-full rounded border border-line bg-panel px-2 py-1.5 text-sm font-semibold text-zinc-100 focus:border-acid focus:outline-none"
-            />
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={10}
-              placeholder="Тело заметки (markdown)…"
-              className="w-full resize-y rounded border border-line bg-panel px-2 py-1.5 font-mono text-xs leading-relaxed text-zinc-200 placeholder:text-zinc-600 focus:border-acid focus:outline-none"
-            />
-            <div className="flex gap-2">
-              <button onClick={commit} className="rounded bg-acid px-3 py-1 font-mono text-xs font-bold text-void">
-                сохранить
-              </button>
-              <button onClick={() => setEditing(false)} className="rounded border border-line px-3 py-1 font-mono text-xs text-zinc-400">
-                отмена
-              </button>
-            </div>
+        <div>
+          <input
+            value={label}
+            onChange={(e) => changeLabel(e.target.value)}
+            onBlur={() => flush(label, body)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                ;(e.target as HTMLInputElement).blur()
+              }
+            }}
+            className="w-full bg-transparent text-base font-semibold leading-snug text-zinc-100 focus:outline-none"
+            placeholder="Заголовок"
+            aria-label="Заголовок"
+          />
+          <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-zinc-600">
+            <span>{node.id}</span>
+            <span>·</span>
+            <span>{new Date(node.updated_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+            <span>·</span>
+            <span>{wordCount(body)} слов</span>
           </div>
-        ) : (
-          <div>
-            <h2 className="text-base font-semibold leading-snug text-zinc-100">{node.label}</h2>
-            <div className="mt-1 font-mono text-[10px] text-zinc-600">
-              {node.id} · {new Date(node.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+          {editing ? (
+            <div className="mt-2">
+              <MdEditor value={body} onChange={changeBody} nodes={graph.nodes.filter((n) => n.id !== node.id)} types={types} autoFocus onDone={finish} />
             </div>
-            {node.body.trim() ? (
-              <div className="note-md mt-2 text-[13px] leading-relaxed text-zinc-300">
-                <ReactMarkdown>{node.body}</ReactMarkdown>
-              </div>
-            ) : (
-              <button onClick={() => setEditing(true)} className="mt-2 text-xs text-zinc-600 underline hover:text-zinc-400">
-                тело пустое — написать
-              </button>
-            )}
-          </div>
-        )}
+          ) : (
+            <div className="mt-2 cursor-text text-[13px] leading-relaxed text-zinc-300" onDoubleClick={() => setEditing(true)} title="Двойной клик — редактировать">
+              {body.trim() ? (
+                <Markdown text={body} nodes={graph.nodes} types={types} onOpen={onSelect} onCreate={(title) => onCreate(title, { type_id: 'note' })} onChange={changeBody} />
+              ) : (
+                <button onClick={() => setEditing(true)} className="text-xs text-zinc-600 underline hover:text-zinc-400">
+                  тело пустое — написать
+                </button>
+              )}
+            </div>
+          )}
+        </div>
 
         {type && type.schema.props.length > 0 && (
           <section>
@@ -181,7 +270,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
                   setQuestion('')
                 }
               }}
-              placeholder="спросить про этот узел…"
+              placeholder="спросить про этот объект… (они могут дописать в него)"
               className="flex-1 rounded border border-line bg-panel px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-acid focus:outline-none"
             />
             <button
@@ -202,13 +291,13 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
         <section>
           <div className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">пометки · {mine.length}</div>
           <div className="space-y-1.5">
-            {mine.length === 0 && <div className="text-[11px] text-zinc-600">Пока никто ничего не написал на этом узле.</div>}
+            {mine.length === 0 && <div className="text-[11px] text-zinc-600">Пока никто ничего не написал на этом объекте.</div>}
             {mine.map((n) => (
               <div key={n.id} className="rounded border-l-2 bg-panel px-2.5 py-1.5 text-[12px] leading-snug text-zinc-200" style={{ borderColor: AGENT_COLORS[n.author] ?? '#666' }}>
                 <span className="mr-1.5 font-mono text-[10px]" style={{ color: AGENT_COLORS[n.author] }}>
                   {name(n.author)}
                 </span>
-                {n.text}
+                <Markdown text={n.text} nodes={graph.nodes} types={types} onOpen={onSelect} variant="chat" />
               </div>
             ))}
           </div>
@@ -232,7 +321,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
             <Link2 size={11} /> связи · {links.length}
           </div>
-          {links.length === 0 && <div className="text-[11px] text-zinc-600">Потяни за точку на карточке к другому узлу, чтобы связать.</div>}
+          {links.length === 0 && <div className="text-[11px] text-zinc-600">Напиши в тексте [[Название]] — или потяни за точку на графе к другому объекту.</div>}
           <div className="space-y-1">
             {links.map((e) => {
               const otherId = e.source_id === node.id ? e.target_id : e.source_id

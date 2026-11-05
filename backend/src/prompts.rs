@@ -351,6 +351,7 @@ pub fn tools_block(types: &[crate::models::ObjectType], relevant: &[GraphNode], 
   <act>{{\"op\":\"create\",\"type\":\"task\",\"title\":\"…\",\"props\":{{\"due\":\"2026-11-08\",\"priority\":\"высокий\"}},\"body\":\"…\"}}</act>\n\
   <act>{{\"op\":\"update\",\"id\":\"id_объекта\",\"props\":{{\"done\":true}}}}</act>   (или \"title\", \"body\", \"type\")\n\
   <act>{{\"op\":\"link\",\"from\":\"id\",\"to\":\"id\",\"kind\":\"belongs_to|about|blocks|assigned_to|contradicts|related\",\"label\":\"глагол\"}}</act>\n\
+  <act>{{\"op\":\"append\",\"id\":\"id_объекта\",\"heading\":\"Лог\",\"text\":\"markdown-абзац, дописать в тело не стирая\"}}</act>\n\
 Делай это, когда это в характере и по делу: завести задачу игроку, записать человека, поставить срок, закрыть сделанное, связать идею с проектом, завести СВОЙ объект (твоя идея, твоя задача, твой проект — автор ты). 0–2 действия за реплику, не ради галочки. Для пометки на объекте — <note node=\"id\">…</note>.",
         types_summary(types),
         objs

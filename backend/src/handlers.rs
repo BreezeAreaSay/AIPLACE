@@ -24,7 +24,7 @@ use crate::{
     memory, mermaid,
     models::{
         AskNodeRequest, ChatRequest, CreateEdgeRequest, CreateNodeRequest, CreateTypeRequest, Graph, NoteRequest, PatchNodeRequest,
-        ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
+        ImportReport, ImportRequest, ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID,
     },
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
@@ -102,6 +102,8 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp", post(mcp_rpc).get(mcp_info))
         .route("/api/edges/:id", delete(delete_edge))
         .route("/api/export.md", get(export_markdown))
+        .route("/api/nodes/:id/export.md", get(export_node_markdown))
+        .route("/api/import", post(import_markdown))
         .with_state(state)
 }
 
@@ -450,7 +452,7 @@ async fn patch_node(Room { app, .. }: Room, Path(id): Path<String>, Json(req): J
         db::set_node_position(&app.db, &id, x, y).await?;
     }
     let label = req.label.as_deref().map(|l| mermaid::sanitize_label(l.trim())).filter(|l| l != "…");
-    let body = req.body.as_deref().map(|b| mermaid::truncate_chars(b.trim(), 4000));
+    let body = req.body.as_deref().map(|b| mermaid::truncate_chars(b.trim(), 60_000));
     let nt = req.node_type.as_deref().map(mermaid::normalize_node_type);
     let mut changed = false;
     if label.is_some() || body.is_some() || nt.is_some() || req.pinned.is_some() {
@@ -541,6 +543,110 @@ async fn ask_node(Room { app, editable, user }: Room, Path(id): Path<String>, Js
 }
 
 /// Whole canvas as Markdown: notes with bodies, agents' annotations and links.
+/// One object as a standalone `.md` (frontmatter + body + notes + wikilinked relations).
+async fn export_node_markdown(Room { app, .. }: Room, Path(id): Path<String>) -> AppResult<Response> {
+    let id = mermaid::safe_id(&id);
+    let Some(node) = db::get_node(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого узла")) };
+    let agents = db::list_agents(&app.db).await?;
+    let nodes = db::list_nodes(&app.db).await?;
+    let edges = db::list_edges(&app.db).await?;
+    let notes = db::list_notes(&app.db, 5000).await?;
+    let types = db::list_types(&app.db).await?;
+    let ty = types.iter().find(|t| t.id == node.type_id);
+    let name = |id: &str| prompts::sender_name(id, &agents);
+    let md = crate::markdown::render_note(&node, ty, &notes, &edges, &nodes, &name);
+    let fname: String = node.label.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_').take(60).collect();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/markdown; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}.md", urlencoding(&fname.trim().replace(' ', "_")))),
+        ],
+        md,
+    )
+        .into_response())
+}
+
+fn urlencoding(s: &str) -> String {
+    form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// Drop a folder of `.md` files (Obsidian / Anytype export / plain notes) into the library.
+/// Frontmatter `type:` picks the type (id or name), other known keys become props, `[[wikilinks]]`
+/// between imported or existing objects become `related` edges.
+async fn import_markdown(Room { app, .. }: Room, Json(req): Json<ImportRequest>) -> AppResult<Json<ImportReport>> {
+    if req.files.is_empty() || req.files.len() > 500 {
+        return Err(AppError::bad_request("нужно от 1 до 500 файлов"));
+    }
+    let types = db::list_types(&app.db).await?;
+    let mut report = ImportReport { imported: 0, updated: 0, linked: 0, ids: vec![] };
+    let mut pending_links: Vec<(String, Vec<String>)> = vec![];
+    for f in &req.files {
+        if f.content.chars().count() > 200_000 {
+            continue;
+        }
+        let stem = f.name.rsplit('/').next().unwrap_or(&f.name).trim_end_matches(".md").trim_end_matches(".txt").trim_end_matches(".markdown");
+        let doc = crate::markdown::parse(&f.content, stem);
+        let label = mermaid::sanitize_label(&doc.title);
+        if label == "…" {
+            continue;
+        }
+        let type_id = doc
+            .front
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(|t| t.trim().to_lowercase())
+            .and_then(|t| types.iter().find(|x| x.id == t || x.name.to_lowercase() == t).map(|x| x.id.clone()))
+            .unwrap_or_else(|| "note".to_string());
+        let schema_keys: Vec<String> = types.iter().find(|t| t.id == type_id).and_then(|t| t.schema.0.get("props")).and_then(|p| p.as_array()).map(|arr| arr.iter().filter_map(|p| p.get("key").and_then(|k| k.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+        let mut props = serde_json::Map::new();
+        for (k, v) in &doc.front {
+            if ["title", "type", "id", "author", "created", "updated", "pinned", "archived", "aliases"].contains(&k.as_str()) || v.is_null() {
+                continue;
+            }
+            if schema_keys.iter().any(|s| s == k) || k == "tags" || k == "url" || k == "source" {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+        let id = doc.front.get("id").and_then(|v| v.as_str()).map(mermaid::safe_id).filter(|s| !s.is_empty()).unwrap_or_else(|| mermaid::safe_id(&label));
+        let existed = db::node_exists(&app.db, &id).await?;
+        let body = mermaid::truncate_chars(&doc.body, 60_000);
+        db::upsert_object(&app.db, &id, &label, &type_id, USER_ID, Some(&body), Some(&serde_json::Value::Object(props)), None, None).await?;
+        if doc.front.get("pinned").and_then(|v| v.as_bool()) == Some(true) {
+            db::update_node_fields(&app.db, &id, None, None, None, Some(true)).await?;
+        }
+        if doc.front.get("archived").and_then(|v| v.as_bool()) == Some(true) {
+            db::update_object_meta(&app.db, &id, None, None, Some(true)).await?;
+        }
+        if existed {
+            report.updated += 1;
+        } else {
+            report.imported += 1;
+        }
+        report.ids.push(id.clone());
+        let links = crate::markdown::wikilinks(&doc.body);
+        if !links.is_empty() {
+            pending_links.push((id, links));
+        }
+    }
+    // Resolve wikilinks against the whole library (imported + existing), by id or by title.
+    let nodes = db::list_nodes(&app.db).await?;
+    for (from, targets) in pending_links {
+        for t in targets {
+            let tid = mermaid::safe_id(&t);
+            let found = nodes.iter().find(|n| n.id == tid || n.label.eq_ignore_ascii_case(&t) || n.label.to_lowercase() == t.to_lowercase());
+            if let Some(n) = found {
+                if n.id != from {
+                    db::insert_relation(&app.db, &from, &n.id, "related", "", USER_ID, 1.0).await?;
+                    report.linked += 1;
+                }
+            }
+        }
+    }
+    db::place_unpositioned_nodes(&app.db).await?;
+    emit_graph(&app).await?;
+    Ok(Json(report))
+}
+
 async fn export_markdown(Room { app, .. }: Room) -> AppResult<Response> {
     let agents = db::list_agents(&app.db).await?;
     let nodes = db::list_nodes(&app.db).await?;

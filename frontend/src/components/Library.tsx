@@ -1,16 +1,20 @@
-import { useMemo, useState } from 'react'
-import { Plus, Search } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Download, FolderInput, Plus, Search } from 'lucide-react'
 import type { Agent, GraphNode, ObjectType } from '../types'
 import { AGENT_COLORS } from '../types'
+import { api } from '../api'
 
 interface Props {
   nodes: GraphNode[]
   types: ObjectType[]
   agents: Agent[]
   selectedId: string | null
+  /** Search text pushed from outside (e.g. `/найти` in the composer). */
+  externalQuery?: { q: string; nonce: number } | null
   onSelect: (id: string) => void
   onCreate: (label: string, typeId: string) => void
   onCreateType: (name: string) => void
+  onImport: (files: { name: string; content: string }[]) => Promise<{ imported: number; updated: number; linked: number }>
 }
 
 function propPreview(n: GraphNode, t: ObjectType | undefined): string {
@@ -34,13 +38,28 @@ function propPreview(n: GraphNode, t: ObjectType | undefined): string {
   return parts.join(' · ')
 }
 
-/** Anytype-style browser: objects grouped by type, searchable, with key properties. */
-export function Library({ nodes, types, agents, selectedId, onSelect, onCreate, onCreateType }: Props) {
+async function readFiles(list: FileList | File[]): Promise<{ name: string; content: string }[]> {
+  const files = Array.from(list).filter((f) => /\.(md|markdown|txt)$/i.test(f.name))
+  return Promise.all(files.map(async (f) => ({ name: (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name, content: await f.text() })))
+}
+
+/** Anytype-style browser: objects grouped by type, searchable, with key properties; `.md` import by drop. */
+export function Library({ nodes, types, agents, selectedId, externalQuery, onSelect, onCreate, onCreateType, onImport }: Props) {
   const [typeId, setTypeId] = useState<string>('all')
   const [q, setQ] = useState('')
   const [adding, setAdding] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const [newType, setNewType] = useState('note')
+  const [drag, setDrag] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (externalQuery) {
+      setQ(externalQuery.q)
+      setTypeId('all')
+    }
+  }, [externalQuery])
 
   const live = useMemo(() => nodes.filter((n) => n.archived === 0), [nodes])
   const counts = useMemo(() => {
@@ -53,23 +72,77 @@ export function Library({ nodes, types, agents, selectedId, onSelect, onCreate, 
     () =>
       live
         .filter((n) => (typeId === 'all' || n.type_id === typeId) && (!ql || n.label.toLowerCase().includes(ql) || n.body.toLowerCase().includes(ql) || JSON.stringify(n.props).toLowerCase().includes(ql)))
-        .sort((a, b) => (b.pinned - a.pinned) || b.updated_at.localeCompare(a.updated_at)),
+        .sort((a, b) => b.pinned - a.pinned || b.updated_at.localeCompare(a.updated_at)),
     [live, typeId, ql],
   )
   const tmap = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types])
-  const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
+  const name = (id: string) => (id === 'user' ? 'ты' : id === 'archivist' ? 'архивариус' : id === 'mcp' ? 'mcp' : agents.find((a) => a.id === id)?.name.split(' ')[0] ?? id)
+
+  const doImport = async (list: FileList | File[]) => {
+    const files = await readFiles(list)
+    if (!files.length) {
+      setToast('нужны .md / .txt файлы')
+      window.setTimeout(() => setToast(null), 2000)
+      return
+    }
+    setToast(`импортирую ${files.length}…`)
+    try {
+      const r = await onImport(files)
+      setToast(`+${r.imported} новых · ${r.updated} обновлено · ${r.linked} связей по [[ссылкам]]`)
+    } catch (e) {
+      setToast(`ошибка: ${(e as Error).message}`)
+    }
+    window.setTimeout(() => setToast(null), 4000)
+  }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className={`relative flex h-full min-h-0 flex-col ${drag ? 'ring-2 ring-inset ring-acid' : ''}`}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes('Files')) {
+          e.preventDefault()
+          setDrag(true)
+        }
+      }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={(e) => {
+        e.preventDefault()
+        setDrag(false)
+        void doImport(e.dataTransfer.files)
+      }}
+    >
       <div className="flex items-center gap-2 border-b border-line px-2 py-1.5">
         <div className="flex flex-1 items-center gap-1.5 rounded border border-line bg-panel px-2 py-1">
           <Search size={12} className="text-zinc-500" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="поиск по библиотеке" className="w-full bg-transparent font-mono text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none" />
+          {q && (
+            <button onClick={() => setQ('')} className="text-zinc-600 hover:text-zinc-200" aria-label="Очистить">
+              ×
+            </button>
+          )}
         </div>
         <button onClick={() => setAdding((v) => !v)} className="flex items-center gap-1 rounded border border-acid/60 px-2 py-1 font-mono text-[11px] text-acid hover:bg-acid/10" title="Новый объект">
           <Plus size={12} />
         </button>
+        <button onClick={() => fileInput.current?.click()} className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Импорт .md (Obsidian, Anytype, просто заметки). Можно перетащить файлы сюда.">
+          <FolderInput size={13} />
+        </button>
+        <a href={api.exportUrl()} download className="rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid" title="Экспорт всей библиотеки в .md">
+          <Download size={13} />
+        </a>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          accept=".md,.markdown,.txt,text/markdown,text/plain"
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files) void doImport(e.target.files)
+            e.target.value = ''
+          }}
+        />
       </div>
+      {toast && <div className="border-b border-acid/30 bg-acid/5 px-3 py-1 font-mono text-[10px] text-acid">{toast}</div>}
       {adding && (
         <div className="flex items-center gap-1.5 border-b border-line bg-panel/60 px-2 py-1.5">
           <select value={newType} onChange={(e) => setNewType(e.target.value)} className="rounded border border-line bg-void px-1 py-1 font-mono text-[11px] text-zinc-300">
@@ -128,7 +201,7 @@ export function Library({ nodes, types, agents, selectedId, onSelect, onCreate, 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {list.length === 0 && (
           <div className="px-4 py-6 text-center font-mono text-[11px] text-zinc-600">
-            {live.length === 0 ? 'Библиотека пуста. Просто разговаривай — Архивариус заведёт людей, задачи, идеи и ссылки сам.' : 'ничего не найдено'}
+            {live.length === 0 ? 'Библиотека пуста. Просто разговаривай — Архивариус заведёт людей, задачи, идеи и ссылки сам. Или перетащи сюда папку .md-заметок.' : 'ничего не найдено'}
           </div>
         )}
         {list.map((n) => {
@@ -151,12 +224,17 @@ export function Library({ nodes, types, agents, selectedId, onSelect, onCreate, 
                     {name(n.created_by)}
                   </span>
                 </div>
-                {(preview || n.body) && <div className="truncate text-[11px] text-zinc-500">{preview || n.body.replace(/[#*`>_]/g, '')}</div>}
+                {(preview || n.body) && <div className="truncate text-[11px] text-zinc-500">{preview || n.body.replace(/[#*`>_[\]]/g, '')}</div>}
               </div>
             </button>
           )
         })}
       </div>
+      {drag && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-void/80 font-mono text-sm text-acid">
+          отпусти — .md-файлы станут объектами, [[ссылки]] — связями
+        </div>
+      )}
     </div>
   )
 }

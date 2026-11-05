@@ -422,6 +422,25 @@ pub struct PatchNodeRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ImportFile {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportRequest {
+    pub files: Vec<ImportFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportReport {
+    pub imported: usize,
+    pub updated: usize,
+    pub linked: usize,
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateEdgeRequest {
     pub source: String,
     pub target: String,
