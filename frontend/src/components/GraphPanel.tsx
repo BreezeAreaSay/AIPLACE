@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { Maximize2, Scan } from 'lucide-react'
-import type { Agent, DirectorLogEntry, Graph, SchemaDoc } from '../types'
+import type { Agent, AgentMemory, Contract, DirectorLogEntry, Graph, Relation, RoomEventRecord, SchemaDoc } from '../types'
 import { AGENT_COLORS } from '../types'
 import { MermaidView } from './MermaidView'
 import { DirectorInspector } from './DirectorInspector'
+import { ContractsPanel } from './ContractsPanel'
 
-type Tab = 'graph' | 'schema' | 'director'
+type Tab = 'graph' | 'schema' | 'contracts' | 'director'
 
 interface Props {
   graph: Graph
@@ -18,14 +19,22 @@ interface Props {
   onTick: () => void
   onSchema: () => void
   initialTab?: Tab
+  contracts: Contract[]
+  relations: Relation[]
+  memories: AgentMemory[]
+  events: RoomEventRecord[]
+  now: string
+  onResolve: (id: number, status: 'done' | 'failed' | 'cancelled') => void
+  onPromise: (text: string) => void
 }
 
-export function GraphPanel({ graph, graphMermaid, schema, director, agents, directorModel, disabled, onTick, onSchema, initialTab = 'graph' }: Props) {
+export function GraphPanel({ graph, graphMermaid, schema, director, agents, directorModel, disabled, onTick, onSchema, initialTab = 'graph', contracts, relations, memories, events, now, onResolve, onPromise }: Props) {
   const [tab, setTab] = useState<Tab>(initialTab)
   const [mode, setMode] = useState<'fit' | 'natural'>(() => (window.innerWidth < 768 ? 'natural' : 'fit'))
   const tabs: { id: Tab; label: string }[] = [
     { id: 'graph', label: `Живой граф · ${graph.nodes.length}/${graph.edges.length}` },
     { id: 'schema', label: 'Схема' },
+    { id: 'contracts', label: `Слово · ${contracts.filter((c) => c.status === 'open').length}` },
     { id: 'director', label: 'Режиссёр' },
   ]
   return (
@@ -106,7 +115,12 @@ export function GraphPanel({ graph, graphMermaid, schema, director, agents, dire
               Схемы ещё нет. Нажми «⚡ Собрать схему» — Триада превратит спор в структурированную блок-схему с язвительными аннотациями.
             </div>
           ))}
-        {tab === 'director' && <DirectorInspector entry={director} agents={agents} directorModel={directorModel} />}
+        {tab === 'contracts' && (
+          <ContractsPanel contracts={contracts} agents={agents} now={now} disabled={disabled} onResolve={onResolve} onPromise={onPromise} />
+        )}
+        {tab === 'director' && (
+          <DirectorInspector entry={director} agents={agents} directorModel={directorModel} relations={relations} memories={memories} events={events} />
+        )}
       </div>
     </div>
   )

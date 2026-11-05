@@ -6,7 +6,7 @@ use anyhow::Result;
 use rand::seq::SliceRandom;
 
 use crate::{
-    db, mermaid,
+    contracts, db, mermaid,
     models::{Agent, DirectorLogEntry, DirectorOutput, Graph, RoomEvent},
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts::{self, DirectorContext},
@@ -17,6 +17,8 @@ use crate::{
 pub enum Trigger {
     UserMessage,
     Tick,
+    /// A contract was resolved from the UI — the room reacts without a new player line.
+    Event,
 }
 
 impl Trigger {
@@ -24,6 +26,7 @@ impl Trigger {
         match self {
             Trigger::UserMessage => "user_message",
             Trigger::Tick => "tick",
+            Trigger::Event => "event",
         }
     }
 }
@@ -37,6 +40,11 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
     let messages = db::recent_messages(&app.db, app.cfg.context_messages).await?;
     let nodes = db::list_nodes(&app.db).await?;
     let edges = db::list_edges(&app.db).await?;
+    let open_contracts = db::open_contracts(&app.db).await?;
+    let relations = db::list_relations(&app.db).await?;
+    let memories = db::list_memories(&app.db).await?;
+    let events = db::pending_events(&app.db).await?;
+    let now = contracts::now_rfc3339();
 
     let ctx = DirectorContext {
         trigger: trigger.as_str(),
@@ -44,6 +52,11 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
         messages: &messages,
         nodes: &nodes,
         edges: &edges,
+        contracts: &open_contracts,
+        relations: &relations,
+        memories: &memories,
+        events: &events,
+        now: &now,
     };
     let msgs = [
         ChatMessage::system(prompts::director_system()),
@@ -75,6 +88,28 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
     apply_agendas(app, &output, &agents).await?;
     apply_stats(app, &output, &agents, trigger).await?;
     apply_graph(app, &output).await?;
+    apply_relations(app, &output, &agents).await?;
+    // Contracts: verdicts first (they may kill someone), then new promises.
+    contracts::apply_updates(app, &output.contract_updates).await?;
+    let fresh_agents = db::list_agents(&app.db).await?;
+    let created = contracts::apply_new(app, &output.new_contracts, &fresh_agents).await?;
+    // A freshly appointed guarantor must speak this round.
+    for c in &created {
+        if let Some(g) = &c.guarantor_id {
+            if !output.next_speakers.contains(g) {
+                if output.next_speakers.len() >= MAX_SPEAKERS {
+                    output.next_speakers.pop();
+                }
+                output.next_speakers.insert(0, g.clone());
+            }
+        }
+    }
+    if !created.is_empty() {
+        contracts::emit_contracts(app).await?;
+    }
+    if let Some(last) = events.last() {
+        db::mark_events_narrated(&app.db, last.id).await?;
+    }
 
     let entry = db::insert_director_log(&app.db, trigger.as_str(), source, &output).await?;
     app.emit(RoomEvent::Director { entry: entry.clone() });
@@ -86,7 +121,32 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
     };
     let mermaid = mermaid::build_graph(&graph.nodes, &graph.edges);
     app.emit(RoomEvent::Graph { graph, mermaid });
+    app.emit(RoomEvent::Relations { relations: db::list_relations(&app.db).await? });
     Ok(entry)
+}
+
+async fn apply_relations(app: &AppState, out: &DirectorOutput, agents: &[Agent]) -> Result<()> {
+    let current = db::list_relations(&app.db).await?;
+    for d in out.relation_deltas.iter().take(4) {
+        let a = mermaid::normalize_author(&d.a);
+        let b = mermaid::normalize_author(&d.b);
+        if a == b || a == "user" || b == "user" || !agents.iter().any(|x| x.id == a) || !agents.iter().any(|x| x.id == b) {
+            continue;
+        }
+        let (a, b) = db::order_pair(a, b);
+        let base = current
+            .iter()
+            .find(|r| r.a_id == a && r.b_id == b)
+            .map(|r| r.affinity)
+            .unwrap_or(0);
+        let delta = clamp(d.delta.round() as i64, -20, 20);
+        if delta == 0 {
+            continue;
+        }
+        let label = d.label.as_deref().map(|l| mermaid::truncate_chars(l.trim(), 80));
+        db::upsert_relation(&app.db, a, b, clamp(base + delta, -100, 100), label.as_deref()).await?;
+    }
+    Ok(())
 }
 
 /// Safety net: keep the room alive even with no model. Agendas are left untouched (we never
@@ -95,7 +155,7 @@ fn fallback_plan(agents: &[Agent], trigger: Trigger) -> DirectorOutput {
     let mut alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
     let mut rng = rand::thread_rng();
     alive.shuffle(&mut rng);
-    let n = if trigger == Trigger::Tick { 2 } else { 1 };
+    let n = if trigger == Trigger::UserMessage { 1 } else { 2 };
     DirectorOutput {
         room_mood: Some("помехи в эфире".into()),
         director_note: Some(
@@ -172,6 +232,7 @@ async fn apply_stats(app: &AppState, out: &DirectorOutput, agents: &[Agent], tri
                 &format!("☠ {} больше не отвечает. HP = 0. Комната стала тише.", a.name),
             )
             .await?;
+            db::insert_event(&app.db, "agent_died", &serde_json::json!({ "agent": a.id, "cause": "entropy" })).await?;
         }
     }
     Ok(())

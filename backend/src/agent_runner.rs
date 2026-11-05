@@ -14,19 +14,32 @@ use crate::{
 };
 
 pub async fn run_agent(app: &AppState, agent_id: &str, room_mood: Option<&str>) -> Result<Message> {
+    run_agent_inner(app, agent_id, room_mood, false).await
+}
+
+/// Final words of an agent that just hit 0 HP (bypasses the alive check once).
+pub async fn run_last_words(app: &AppState, agent_id: &str) -> Result<Message> {
+    run_agent_inner(app, agent_id, Some("траур и злорадство"), true).await
+}
+
+async fn run_agent_inner(app: &AppState, agent_id: &str, room_mood: Option<&str>, dying: bool) -> Result<Message> {
     let agents = db::list_agents(&app.db).await?;
     let agent = agents
         .iter()
         .find(|a| a.id == agent_id)
         .cloned()
         .ok_or_else(|| anyhow!("unknown agent {agent_id}"))?;
-    if !agent.is_alive() {
+    if !agent.is_alive() && !dying {
         return Err(anyhow!("{} is dead and cannot speak", agent.name));
     }
     let others: Vec<_> = agents.iter().filter(|a| a.id != agent_id).cloned().collect();
     let messages = db::recent_messages(&app.db, app.cfg.context_messages).await?;
     let nodes = db::list_nodes(&app.db).await?;
     let last_ego = db::last_ego_thought(&app.db, agent_id).await?;
+    let contracts = db::open_contracts(&app.db).await?;
+    let relations = db::list_relations(&app.db).await?;
+    let memory = db::get_memory(&app.db, agent_id).await?;
+    let events = db::recent_events(&app.db, 4).await?;
 
     let ctx = AgentContext {
         agent: &agent,
@@ -35,6 +48,11 @@ pub async fn run_agent(app: &AppState, agent_id: &str, room_mood: Option<&str>) 
         nodes: &nodes,
         last_ego: last_ego.as_deref(),
         room_mood,
+        contracts: &contracts,
+        relations: &relations,
+        memory: memory.as_ref().map(|m| m.summary.as_str()),
+        events: &events,
+        dying,
     };
     let msgs = [
         ChatMessage::system(prompts::agent_system(&ctx)),

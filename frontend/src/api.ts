@@ -28,6 +28,8 @@ export const api = {
   tick: () => request<RoomState>('/api/tick', { method: 'POST' }),
   schema: () => request<RoomState>('/api/schema', { method: 'POST' }),
   reset: () => request<RoomState>('/api/reset', { method: 'POST' }),
+  resolveContract: (id: number, status: 'done' | 'failed' | 'cancelled', note?: string) =>
+    request<RoomState>(`/api/contracts/${id}/resolve`, { method: 'POST', body: JSON.stringify({ status, note }) }),
   settings: () => request<SettingsView>('/api/settings'),
   saveSettings: (patch: SettingsPatch) => request<SettingsView>('/api/settings', { method: 'POST', body: JSON.stringify(patch) }),
 }

@@ -4,10 +4,12 @@
 mod agent_runner;
 mod cli;
 mod config;
+mod contracts;
 mod db;
 mod director;
 mod error;
 mod handlers;
+mod memory;
 mod mermaid;
 mod mock_llm;
 mod models;

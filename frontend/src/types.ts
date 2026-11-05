@@ -48,6 +48,41 @@ export interface StatDelta {
   reason?: string | null
 }
 
+export interface Contract {
+  id: number
+  title: string
+  details: string | null
+  deadline: string | null
+  status: 'open' | 'done' | 'failed' | 'cancelled' | string
+  guarantor_id: string | null
+  stake: number
+  created_at: string
+  resolved_at: string | null
+  resolution_note: string | null
+}
+
+export interface Relation {
+  a_id: string
+  b_id: string
+  affinity: number
+  label: string
+}
+
+export interface AgentMemory {
+  agent_id: string
+  summary: string
+  covered_until: number
+  updated_at: string
+}
+
+export interface RoomEventRecord {
+  id: number
+  kind: string
+  payload: string
+  narrated: number
+  created_at: string
+}
+
 export interface DirectorOutput {
   room_mood?: string | null
   director_note?: string | null
@@ -58,6 +93,9 @@ export interface DirectorOutput {
     nodes: { id: string; label: string; type: string; author: string }[]
     edges: { from: string; to: string; label: string; author?: string | null }[]
   }
+  new_contracts: { title: string; deadline?: string | null; guarantor: string; stake?: number | null; why?: string | null }[]
+  contract_updates: { id: number | string; status: string; note?: string | null }[]
+  relation_deltas: { a: string; b: string; delta: number; label?: string | null }[]
 }
 
 export interface DirectorLogEntry {
@@ -88,6 +126,11 @@ export interface RoomState {
   version: string
   update: UpdateInfo | null
   settings_editable: boolean
+  contracts: Contract[]
+  relations: Relation[]
+  memories: AgentMemory[]
+  events: RoomEventRecord[]
+  now: string
 }
 
 export interface UpdateInfo {
@@ -122,6 +165,9 @@ export type RoomEvent =
   | { type: 'agents'; agents: Agent[] }
   | { type: 'graph'; graph: Graph; mermaid: string }
   | { type: 'schema'; schema: SchemaDoc }
+  | { type: 'contracts'; contracts: Contract[] }
+  | { type: 'relations'; relations: Relation[] }
+  | { type: 'memories'; memories: AgentMemory[] }
   | { type: 'done' }
 
 export const AGENT_COLORS: Record<string, string> = {

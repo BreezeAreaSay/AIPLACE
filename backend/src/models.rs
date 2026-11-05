@@ -64,7 +64,95 @@ pub struct Graph {
     pub edges: Vec<GraphEdge>,
 }
 
+// ───────────────────────────── Contracts / relations / memory ─────────────────────────────
+
+/// A promise the player made. One agent guarantees it with their own HP.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Contract {
+    pub id: i64,
+    pub title: String,
+    pub details: Option<String>,
+    /// RFC3339 UTC; `None` = no deadline (open-ended word).
+    pub deadline: Option<String>,
+    /// open | done | failed | cancelled
+    pub status: String,
+    pub guarantor_id: Option<String>,
+    pub stake: i64,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    pub resolution_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Relation {
+    pub a_id: String,
+    pub b_id: String,
+    /// -100 (ненависть) .. 100 (союз)
+    pub affinity: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AgentMemory {
+    pub agent_id: String,
+    pub summary: String,
+    pub covered_until: i64,
+    pub updated_at: String,
+}
+
+/// Mechanical fact recorded by code. Never shown as prose by code — the Director narrates it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RoomEventRecord {
+    pub id: i64,
+    pub kind: String,
+    pub payload: String,
+    pub narrated: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolveContractRequest {
+    pub status: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 // ───────────────────────────── Director output (LLM JSON) ─────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NewContract {
+    pub title: String,
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub deadline: Option<String>,
+    #[serde(alias = "guarantor_id", default)]
+    pub guarantor: String,
+    #[serde(default)]
+    pub stake: Option<f64>,
+    #[serde(default)]
+    pub why: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContractUpdate {
+    #[serde(default)]
+    pub id: serde_json::Value,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RelationDelta {
+    pub a: String,
+    pub b: String,
+    #[serde(default)]
+    pub delta: f64,
+    #[serde(default)]
+    pub label: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatDelta {
@@ -125,6 +213,12 @@ pub struct DirectorOutput {
     pub stat_deltas: HashMap<String, StatDelta>,
     #[serde(default)]
     pub graph_mutations: GraphMutations,
+    #[serde(default)]
+    pub new_contracts: Vec<NewContract>,
+    #[serde(default)]
+    pub contract_updates: Vec<ContractUpdate>,
+    #[serde(default)]
+    pub relation_deltas: Vec<RelationDelta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +275,11 @@ pub struct RoomState {
     pub update: Option<crate::update::UpdateInfo>,
     /// Can this client change the key/model via `POST /api/settings`?
     pub settings_editable: bool,
+    pub contracts: Vec<Contract>,
+    pub relations: Vec<Relation>,
+    pub memories: Vec<AgentMemory>,
+    pub events: Vec<RoomEventRecord>,
+    pub now: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,6 +310,7 @@ pub struct SettingsPatch {
 /// Live events pushed over SSE (`GET /api/events`) while a round is running.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RoomEvent {
     Status { stage: String, detail: String },
     Message { message: Message },
@@ -218,5 +318,8 @@ pub enum RoomEvent {
     Agents { agents: Vec<Agent> },
     Graph { graph: Graph, mermaid: String },
     Schema { schema: SchemaDoc },
+    Contracts { contracts: Vec<Contract> },
+    Relations { relations: Vec<Relation> },
+    Memories { memories: Vec<AgentMemory> },
     Done,
 }

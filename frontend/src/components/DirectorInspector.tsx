@@ -1,10 +1,68 @@
-import type { Agent, DirectorLogEntry } from '../types'
+import { useState } from 'react'
+import { BookOpen, ChevronDown, ChevronRight } from 'lucide-react'
+import type { Agent, AgentMemory, DirectorLogEntry, Relation, RoomEventRecord } from '../types'
 import { AGENT_COLORS } from '../types'
+import { RelationsTriangle } from './RelationsTriangle'
 
 interface Props {
   entry: DirectorLogEntry | null
   agents: Agent[]
   directorModel: string
+  relations: Relation[]
+  memories: AgentMemory[]
+  events: RoomEventRecord[]
+}
+
+function eventLine(e: RoomEventRecord, agents: Agent[]): string {
+  let p: Record<string, unknown> = {}
+  try {
+    p = JSON.parse(e.payload)
+  } catch {
+    /* ignore */
+  }
+  const who = (id: unknown) => agents.find((a) => a.id === id)?.name.split(' ')[0] ?? String(id ?? '—')
+  switch (e.kind) {
+    case 'room_opened':
+      return 'комната открыта'
+    case 'contract_created':
+      return `🤝 слово #${p.id} «${p.title}» · поручитель ${who(p.guarantor)} · ${p.stake} HP`
+    case 'contract_done':
+      return `✅ слово #${p.id} сдержано · ${who(p.guarantor)} +HP`
+    case 'contract_failed':
+      return `💀 слово #${p.id} нарушено (${p.by}) · ${who(p.guarantor)} −${p.stake} HP`
+    case 'contract_cancelled':
+      return `✖ слово #${p.id} отозвано`
+    case 'agent_died':
+      return `☠ ${who(p.agent)} умер (${p.cause})`
+    default:
+      return `${e.kind} ${e.payload}`
+  }
+}
+
+function Diaries({ memories, agents }: { memories: AgentMemory[]; agents: Agent[] }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({})
+  if (memories.length === 0) return <div className="text-[11px] text-zinc-600">Дневники пусты — заполняются после первых ~8 сообщений.</div>
+  return (
+    <div className="space-y-1.5">
+      {memories.map((m) => {
+        const a = agents.find((x) => x.id === m.agent_id)
+        const isOpen = !!open[m.agent_id]
+        return (
+          <div key={m.agent_id} className="rounded border border-line bg-panel">
+            <button onClick={() => setOpen((o) => ({ ...o, [m.agent_id]: !isOpen }))} className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left">
+              {isOpen ? <ChevronDown size={12} className="text-zinc-500" /> : <ChevronRight size={12} className="text-zinc-500" />}
+              <BookOpen size={12} style={{ color: AGENT_COLORS[m.agent_id] }} />
+              <span className="text-xs font-medium" style={{ color: AGENT_COLORS[m.agent_id] }}>
+                {a?.name ?? m.agent_id}
+              </span>
+              <span className="ml-auto font-mono text-[10px] text-zinc-600">до #{m.covered_until}</span>
+            </button>
+            {isOpen && <div className="whitespace-pre-wrap border-t border-line px-3 py-2 text-[12px] leading-relaxed text-zinc-300">{m.summary}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function name(id: string, agents: Agent[]) {
@@ -15,11 +73,46 @@ function fmt(n: number) {
   return n > 0 ? `+${n}` : `${n}`
 }
 
-export function DirectorInspector({ entry, agents, directorModel }: Props) {
+export function DirectorInspector({ entry, agents, directorModel, relations, memories, events }: Props) {
+  const scene = (
+    <>
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">отношения</h4>
+          <RelationsTriangle agents={agents} relations={relations} />
+          <div className="space-y-0.5 font-mono text-[10px] text-zinc-500">
+            {relations.map((r) => (
+              <div key={r.a_id + r.b_id} className="truncate" title={r.label}>
+                <span style={{ color: AGENT_COLORS[r.a_id] }}>{name(r.a_id, agents)}</span>
+                {' ↔ '}
+                <span style={{ color: AGENT_COLORS[r.b_id] }}>{name(r.b_id, agents)}</span>
+                <span className={r.affinity < 0 ? ' text-magenta' : r.affinity > 0 ? ' text-acid' : ''}> {fmt(r.affinity)}</span>
+                {r.label && <span className="text-zinc-600"> · {r.label}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">дневники · долговременная память</h4>
+          <Diaries memories={memories} agents={agents} />
+          <h4 className="mb-1.5 mt-3 font-mono text-[10px] uppercase tracking-widest text-zinc-500">лента событий</h4>
+          <div className="max-h-40 space-y-0.5 overflow-y-auto font-mono text-[10px] text-zinc-400">
+            {events.length === 0 && <div className="text-zinc-600">пусто</div>}
+            {[...events].reverse().map((e) => (
+              <div key={e.id} className={e.narrated ? '' : 'text-zinc-200'}>
+                <span className="text-zinc-600">{new Date(e.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span> {eventLine(e, agents)}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </>
+  )
   if (!entry) {
     return (
-      <div className="p-4 text-xs font-mono text-zinc-500">
-        Режиссёр ещё не выходил на сцену. Отправь сообщение или нажми «Автономный тик».
+      <div className="space-y-4 p-3 text-xs">
+        {scene}
+        <div className="font-mono text-zinc-500">Режиссёр ещё не выходил на сцену. Отправь сообщение или нажми «Автономный тик».</div>
       </div>
     )
   }
@@ -27,6 +120,8 @@ export function DirectorInspector({ entry, agents, directorModel }: Props) {
   const time = new Date(entry.created_at).toLocaleTimeString('ru-RU')
   return (
     <div className="space-y-4 p-3 text-xs">
+      {scene}
+      <div className="border-t border-line" />
       <div className="flex flex-wrap items-center gap-2 font-mono text-[10px]">
         <span className="rounded border border-line px-1.5 py-0.5 text-zinc-400">#{entry.id}</span>
         <span className="rounded border border-line px-1.5 py-0.5 text-zinc-400">
@@ -102,6 +197,41 @@ export function DirectorInspector({ entry, agents, directorModel }: Props) {
           </tbody>
         </table>
       </section>
+
+      {((o.new_contracts?.length ?? 0) > 0 || (o.contract_updates?.length ?? 0) > 0) && (
+        <section>
+          <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">contracts · слово игрока</h4>
+          <div className="space-y-1 text-[11px]">
+            {(o.new_contracts ?? []).map((c, i) => (
+              <div key={`c${i}`} className="text-zinc-300">
+                🤝 «{c.title}» · поручитель <span style={{ color: AGENT_COLORS[c.guarantor] }}>{name(c.guarantor, agents)}</span> · ставка {c.stake ?? 15}
+                {c.deadline && <span className="text-zinc-500"> · до {new Date(c.deadline).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>}
+                {c.why && <span className="text-zinc-500"> — {c.why}</span>}
+              </div>
+            ))}
+            {(o.contract_updates ?? []).map((u, i) => (
+              <div key={`u${i}`} className={u.status === 'done' ? 'text-acid' : 'text-magenta'}>
+                вердикт по #{String(u.id)}: {u.status} {u.note && <span className="text-zinc-500">— {u.note}</span>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {(o.relation_deltas?.length ?? 0) > 0 && (
+        <section>
+          <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">relation_deltas</h4>
+          <div className="space-y-0.5 font-mono text-[11px]">
+            {(o.relation_deltas ?? []).map((d, i) => (
+              <div key={i} className="text-zinc-300">
+                <span style={{ color: AGENT_COLORS[d.a] }}>{name(d.a, agents)}</span> ↔ <span style={{ color: AGENT_COLORS[d.b] }}>{name(d.b, agents)}</span>
+                <span className={d.delta < 0 ? ' text-magenta' : ' text-acid'}> {fmt(d.delta)}</span>
+                {d.label && <span className="text-zinc-500"> · {d.label}</span>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">graph_mutations</h4>

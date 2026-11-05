@@ -56,6 +56,15 @@ export function useRoom() {
         case 'schema':
           setState((s) => (s ? { ...s, schema: ev.schema } : s))
           break
+        case 'contracts':
+          setState((s) => (s ? { ...s, contracts: ev.contracts } : s))
+          break
+        case 'relations':
+          setState((s) => (s ? { ...s, relations: ev.relations } : s))
+          break
+        case 'memories':
+          setState((s) => (s ? { ...s, memories: ev.memories } : s))
+          break
       }
     }
     const unsub = subscribeEvents(apply, setLive)
@@ -90,6 +99,8 @@ export function useRoom() {
     send: (text: string) => run('Отправляю в комнату…', () => api.chat(text)),
     tick: () => run('Автономный тик…', api.tick),
     synthesize: () => run('Собираю схему…', api.schema),
+    resolveContract: (id: number, status: 'done' | 'failed' | 'cancelled', note?: string) =>
+      run('Выношу вердикт…', () => api.resolveContract(id, status, note)),
     reset: () => run('Новая комната…', api.reset),
   }
 }

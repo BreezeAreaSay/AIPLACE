@@ -21,6 +21,8 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
         director(user)
     } else if system.contains("SCHEMA-SYNTH") {
         schema(user)
+    } else if system.contains("ЛИЧНЫЙ ДНЕВНИК") {
+        diary(system)
     } else {
         agent(system)
     }
@@ -58,6 +60,22 @@ fn director(user_prompt: &str) -> String {
         "lit_teacher": format!("Увидеть в «{topic}» обломовщину и мягко довести игрока до признания, чего он на самом деле боится."),
         "graffiti": format!("Перехватить тему «{topic}», предложить самый короткий дерзкий путь и подколоть деда за занудство."),
     });
+    let user_turn = user_prompt.contains("ТРИГГЕР: НОВАЯ РЕПЛИКА ИГРОКА");
+    let promise = user_turn && regex::Regex::new(r"(?i)обеща|даю слово|сделаю|напишу|до пятницы|до завтра").map(|r| r.is_match(&topic)).unwrap_or(false);
+    let report = regex::Regex::new(r"(?i)^(сделал|готово|выполнил|не успел|провалил|забил)").map(|r| r.is_match(&topic)).unwrap_or(false);
+    let open_ids: Vec<i64> = regex::Regex::new(r"(?m)^\s+#(\d+) «").ok().map(|r| r.captures_iter(user_prompt).filter_map(|c| c[1].parse().ok()).collect()).unwrap_or_default();
+    let new_contracts = if promise {
+        let deadline = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        json!([{"title": topic, "deadline": deadline, "guarantor": alive[0], "stake": 15, "why": "[MOCK] не верит игроку"}])
+    } else {
+        json!([])
+    };
+    let contract_updates = if user_turn && report && !open_ids.is_empty() {
+        let done = !regex::Regex::new(r"(?i)не успел|провалил|забил").map(|r| r.is_match(&topic)).unwrap_or(false);
+        json!([{"id": open_ids[0], "status": if done { "done" } else { "failed" }, "note": "[MOCK] вердикт по отчёту"}])
+    } else {
+        json!([])
+    };
     let node_id = crate::mermaid::safe_id(&topic);
     let sp = speakers[0].clone();
     let node2 = format!("{sp}_vs_{node_id}");
@@ -88,9 +106,26 @@ fn director(user_prompt: &str) -> String {
             "edges": [
                 {"from": node2, "to": node_id, "label": "оспаривает", "author": sp}
             ]
-        }
+        },
+        "new_contracts": new_contracts,
+        "contract_updates": contract_updates,
+        "relation_deltas": [
+            {"a": "physicist", "b": "lit_teacher", "delta": rng.gen_range(-8..=8), "label": "[MOCK] очередная пикировка"},
+            {"a": "graffiti", "b": sp, "delta": rng.gen_range(-6..=6), "label": "[MOCK] подкол"}
+        ]
     })
     .to_string()
+}
+
+fn diary(system_prompt: &str) -> String {
+    let who = if system_prompt.starts_with("Ты — Аркадий") {
+        "Игрок — система с КПД ниже паровоза. Обещания его записал, проверю по срокам. Софья опять шумит, хулиган ворует розетки."
+    } else if system_prompt.starts_with("Ты — Софья") {
+        "Голубчик мечется между Обломовым и Раскольниковым. Я запомнила каждое его «сделаю». Аркадий бездушен, Кэп — дитя."
+    } else {
+        "Пацан вроде свой, но ноет. Слово дал — посмотрим. Дед душнит, тётя Соня грузит. Стена ждёт."
+    };
+    format!("[MOCK дневник] {who}")
 }
 
 fn agent(system_prompt: &str) -> String {
@@ -190,7 +225,18 @@ mod integration {
             msg(3, "physicist", "Второе начало.", Some("мысль")),
             msg(4, "user", "Короче, я хочу сделать стартап, но мне впадлу писать документацию, хочу сразу кодить", None),
         ];
-        let ctx = DirectorContext { trigger: "user_message", agents: &agents, messages: &messages, nodes: &[], edges: &[] };
+        let ctx = DirectorContext {
+            trigger: "user_message",
+            agents: &agents,
+            messages: &messages,
+            nodes: &[],
+            edges: &[],
+            contracts: &[],
+            relations: &[],
+            memories: &[],
+            events: &[],
+            now: "2026-11-05T00:00:00Z",
+        };
         let prompt = director_user(&ctx);
         eprintln!("{prompt}");
         assert_eq!(topic(&prompt), "Короче, я хочу сделать стартап, но мн…");

@@ -67,6 +67,13 @@ export default function App() {
       disabled={disabled}
       onTick={room.tick}
       onSchema={room.synthesize}
+      contracts={s.contracts}
+      relations={s.relations}
+      memories={s.memories}
+      events={s.events}
+      now={s.now}
+      onResolve={room.resolveContract}
+      onPromise={room.send}
     />
   )
 
@@ -124,7 +131,8 @@ export default function App() {
         className="fixed right-3 z-30 flex items-center gap-1.5 rounded-full border border-acid/60 bg-void/90 px-3 py-2 font-mono text-[11px] text-acid shadow-glow md:hidden"
         style={{ bottom: 'calc(7.5rem + var(--tg-safe-bottom))' }}
       >
-        <PanelRightOpen size={14} /> граф · {s.graph.nodes.length}
+        <PanelRightOpen size={14} /> доска · {s.graph.nodes.length}
+        {s.contracts.some((c) => c.status === 'open') && <span className="text-zinc-400">· 🤝 {s.contracts.filter((c) => c.status === 'open').length}</span>}
       </button>
       <Drawer open={drawer && !isDesktop} onClose={() => setDrawer(false)} title="Доска комнаты">
         {panel}

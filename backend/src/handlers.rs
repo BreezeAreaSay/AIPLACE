@@ -3,7 +3,7 @@
 use std::{convert::Infallible, net::SocketAddr};
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -14,11 +14,11 @@ use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{
-    agent_runner, db,
+    agent_runner, contracts, db,
     director::{self, Trigger},
     error::{AppError, AppResult},
-    mermaid,
-    models::{ChatRequest, Graph, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID},
+    memory, mermaid,
+    models::{ChatRequest, Graph, ResolveContractRequest, RoomEvent, RoomState, SchemaDoc, SettingsPatch, SettingsView, USER_ID},
     openrouter::{extract_json, ChatMessage, ChatOpts},
     prompts,
     state::AppState,
@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reset", post(reset))
         .route("/api/events", get(events))
         .route("/api/settings", get(get_settings).post(post_settings))
+        .route("/api/contracts/:id/resolve", post(resolve_contract))
         .with_state(state)
 }
 
@@ -77,6 +78,11 @@ pub async fn build_state(app: &AppState, editable: bool) -> anyhow::Result<RoomS
         version: crate::update::VERSION.into(),
         update: app.update.read().await.clone(),
         settings_editable: editable,
+        contracts: db::list_contracts(&app.db).await?,
+        relations: db::list_relations(&app.db).await?,
+        memories: db::list_memories(&app.db).await?,
+        events: db::recent_events(&app.db, 20).await?,
+        now: contracts::now_rfc3339(),
     })
 }
 
@@ -86,6 +92,9 @@ async fn get_state(
     headers: HeaderMap,
 ) -> AppResult<Json<RoomState>> {
     let editable = settings_editable(&app, peer, &headers);
+    if app.turn_lock.try_lock().is_ok() {
+        contracts::expire_overdue(&app).await?;
+    }
     Ok(Json(build_state(&app, editable).await?))
 }
 
@@ -186,6 +195,20 @@ async fn tick(
 
 /// Director → (1–2) agents, sequentially, so the second can answer the first.
 async fn run_round(app: &AppState, trigger: Trigger) -> anyhow::Result<()> {
+    let alive_before = alive_ids(app).await?;
+    run_round_from(app, trigger, alive_before).await
+}
+
+async fn alive_ids(app: &AppState) -> anyhow::Result<Vec<String>> {
+    Ok(db::list_agents(&app.db).await?.into_iter().filter(|a| a.is_alive()).map(|a| a.id).collect())
+}
+
+/// `alive_before` lets a caller that already changed the room (e.g. resolved a contract)
+/// still give last words to whoever died from it.
+async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<String>) -> anyhow::Result<()> {
+    // Deadlines bite before anyone speaks, so the Director sees the failure as an event.
+    contracts::expire_overdue(app).await?;
+
     app.emit(RoomEvent::Status {
         stage: "director".into(),
         detail: "Режиссёр читает комнату и раздаёт скрытые цели…".into(),
@@ -203,8 +226,43 @@ async fn run_round(app: &AppState, trigger: Trigger) -> anyhow::Result<()> {
             tracing::warn!(agent = %id, error = %e, "agent turn skipped");
         }
     }
+    // Anyone who died this round gets their last words.
+    let agents = db::list_agents(&app.db).await?;
+    for a in agents.iter().filter(|a| !a.is_alive() && alive_before.contains(&a.id)) {
+        app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} … последние слова", a.name) });
+        if let Err(e) = agent_runner::run_last_words(app, &a.id).await {
+            tracing::warn!(agent = %a.id, error = %e, "last words skipped");
+        }
+    }
+    if let Err(e) = memory::maybe_consolidate(app).await {
+        tracing::warn!(error = %e, "memory scheduling failed");
+    }
     app.emit(RoomEvent::Done);
     Ok(())
+}
+
+async fn resolve_contract(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ResolveContractRequest>,
+) -> AppResult<Json<RoomState>> {
+    let status = req.status.trim().to_lowercase();
+    if !matches!(status.as_str(), "done" | "failed" | "cancelled") {
+        return Err(AppError::bad_request("status must be done | failed | cancelled"));
+    }
+    let editable = settings_editable(&app, peer, &headers);
+    let _turn = app.turn_lock.lock().await;
+    let alive_before = alive_ids(&app).await?;
+    let Some(c) = contracts::resolve(&app, id, &status, req.note.as_deref(), "user").await? else {
+        return Err(AppError::bad_request("нет такого слова"));
+    };
+    if c.status == status && status != "cancelled" {
+        // Let the room react in character (guarantor first); the dead get their last words.
+        run_round_from(&app, Trigger::Event, alive_before).await?;
+    }
+    Ok(Json(build_state(&app, editable).await?))
 }
 
 async fn synthesize_schema(
@@ -280,6 +338,9 @@ async fn reset(
         graph: state.graph.clone(),
         mermaid: state.graph_mermaid.clone(),
     });
+    app.emit(RoomEvent::Contracts { contracts: state.contracts.clone() });
+    app.emit(RoomEvent::Relations { relations: state.relations.clone() });
+    app.emit(RoomEvent::Memories { memories: state.memories.clone() });
     app.emit(RoomEvent::Done);
     Ok(Json(state))
 }

@@ -1,7 +1,7 @@
 //! Prompt builders: the Meta-Director (JSON planner), the uncensored agent core and the
 //! schema synthesizer. Agents are never "assistants" — the forbidden phrases are explicit.
 
-use crate::models::{Agent, GraphEdge, GraphNode, Message, USER_ID};
+use crate::models::{Agent, AgentMemory, Contract, GraphEdge, GraphNode, Message, Relation, RoomEventRecord, USER_ID};
 
 pub const FORBIDDEN_PHRASES: &str = "«Чем могу помочь?», «Я понимаю», «Давайте разберём», «Отличный вопрос», \
 «Как ИИ», «Я здесь, чтобы помочь», «Надеюсь, это поможет», «Вот несколько советов», \
@@ -79,6 +79,101 @@ pub fn graph_summary(nodes: &[GraphNode], edges: &[GraphEdge]) -> String {
     format!("Узлы:\n{n}\nСвязи:\n{}", if e.is_empty() { "  (нет)".to_string() } else { e })
 }
 
+pub fn contracts_summary(contracts: &[Contract], agents: &[Agent]) -> String {
+    let open: Vec<&Contract> = contracts.iter().filter(|c| c.status == "open").collect();
+    if open.is_empty() {
+        return "(игрок пока ничего не обещал)".into();
+    }
+    open.iter()
+        .map(|c| {
+            format!(
+                "  #{} «{}» | дедлайн: {} | поручитель: {} | ставка {} HP",
+                c.id,
+                c.title,
+                c.deadline.as_deref().map(crate::contracts::human_deadline).unwrap_or_else(|| "нет".into()),
+                c.guarantor_id.as_deref().map(|g| sender_name(g, agents)).unwrap_or_else(|| "—".into()),
+                c.stake
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn relations_summary(relations: &[Relation], agents: &[Agent]) -> String {
+    if relations.is_empty() {
+        return "(нейтрально)".into();
+    }
+    relations
+        .iter()
+        .map(|r| {
+            format!(
+                "  {} ↔ {}: {:+} ({})",
+                sender_name(&r.a_id, agents),
+                sender_name(&r.b_id, agents),
+                r.affinity,
+                if r.label.is_empty() { "—" } else { &r.label }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn relations_for(agent_id: &str, relations: &[Relation], agents: &[Agent]) -> String {
+    let mut out = Vec::new();
+    for r in relations {
+        let other = if r.a_id == agent_id {
+            &r.b_id
+        } else if r.b_id == agent_id {
+            &r.a_id
+        } else {
+            continue;
+        };
+        let tone = match r.affinity {
+            v if v <= -60 => "открытая вражда",
+            v if v <= -25 => "в контрах",
+            v if v < 25 => "настороженный нейтралитет",
+            v if v < 60 => "союз по расчёту",
+            _ => "крепкий союз",
+        };
+        out.push(format!("{}: {:+} — {}{}", sender_name(other, agents), r.affinity, tone, if r.label.is_empty() { String::new() } else { format!(" ({})", r.label) }));
+    }
+    if out.is_empty() { "(нейтрально)".into() } else { out.join("; ") }
+}
+
+pub fn memories_summary(memories: &[AgentMemory], agents: &[Agent]) -> String {
+    if memories.is_empty() {
+        return "(дневники ещё пусты)".into();
+    }
+    memories
+        .iter()
+        .map(|m| format!("--- дневник {} ---\n{}", sender_name(&m.agent_id, agents), m.summary))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn events_summary(events: &[RoomEventRecord], agents: &[Agent]) -> String {
+    if events.is_empty() {
+        return "(нет)".into();
+    }
+    events
+        .iter()
+        .map(|e| {
+            let v: serde_json::Value = serde_json::from_str(&e.payload).unwrap_or_default();
+            let who = v.get("guarantor").or(v.get("agent")).and_then(|x| x.as_str()).map(|g| sender_name(g, agents)).unwrap_or_default();
+            match e.kind.as_str() {
+                "room_opened" => "  комната только что открылась — игрок здесь впервые".to_string(),
+                "contract_created" => format!("  создано слово #{} «{}», поручитель {who}, ставка {}", v["id"], v["title"].as_str().unwrap_or(""), v["stake"]),
+                "contract_done" => format!("  слово #{} «{}» СДЕРЖАНО, поручитель {who} вознаграждён", v["id"], v["title"].as_str().unwrap_or("")),
+                "contract_failed" => format!("  слово #{} «{}» НАРУШЕНО ({}), поручитель {who} потерял {} HP", v["id"], v["title"].as_str().unwrap_or(""), v["by"].as_str().unwrap_or(""), v["stake"]),
+                "contract_cancelled" => format!("  слово #{} «{}» отозвано игроком", v["id"], v["title"].as_str().unwrap_or("")),
+                "agent_died" => format!("  {who} УМЕР (HP=0), причина: {}", v["cause"].as_str().unwrap_or("")),
+                other => format!("  {other}: {}", e.payload),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ───────────────────────────── Meta-Director ─────────────────────────────
 
 pub fn director_system() -> String {
@@ -90,6 +185,11 @@ pub fn director_system() -> String {
 3. ПРИДУМАТЬ каждому живому агенту новую КОНКРЕТНУЮ скрытую цель (hidden agenda) на русском, привязанную к текущему контексту и его когнитивному профилю. Цель — это психологическая задача на этот ход: «доказать…», «вынудить игрока…», «подколоть Софью за…», «перетянуть тему к…», «проверить игрока на…». Никаких общих фраз. Цели должны сталкивать агентов друг с другом и с игроком.
 4. Оценить, «покормил» ли игрок когнитивный профиль каждого (физик: цифры, парадоксы, системные схемы; литератор: драма, рефлексия, признание слабостей; граффитист: дерзость, бунт, быстрые действия, визуальные концепты). Выдать stat_deltas: дофамин ±(0..15), HP ±(0..8), respect_user ±(0..10). Нытьё, прокрастинация и пустота игрока бьют по HP всех; попадание в профиль — поднимает дофамин. Без изменений — нули.
 5. Извлечь из разговора сухой остаток в граф: 1–4 новых узла (type: concept | task | conflict | insight; author — тот, чья это мысль: physicist | lit_teacher | graffiti | user) и 1–4 связи между узлами (новыми или уже существующими id из графа). Узлы — короткие ярлыки (2–6 слов), без кавычек и скобок. Не дублируй существующие узлы — ссылайся на их id.
+6. СЛОВО ИГРОКА (контракты). Если игрок ОБЕЩАЕТ что-то сделать («сделаю», «напишу до пятницы», «даю слово», «обещаю») — оформи это в `new_contracts`: короткий title, абсолютный deadline в формате ISO-8601 UTC (вычисли от текущего времени; «завтра» = завтра 20:00 UTC; «до пятницы» = ближайшая пятница 20:00 UTC; если срока нет — null), guarantor — кто из живых агентов ставит на игрока свои HP (тот, чьему профилю ближе задача или кто больше всех не верит игроку — так драматичнее), stake 10–30 HP по серьёзности. Поручитель ОБЯЗАН быть среди next_speakers и в своей повестке принять ставку. Не создавай контракт из вопросов или размышлений — только из явных обязательств. Не дублируй уже открытые.
+   Если игрок ОТЧИТЫВАЕТСЯ по открытому слову («сделал», «не успел», «забил») — вынеси вердикт в `contract_updates` (status: done | failed), без веры на слово: если отчёт мутный, пусть поручитель допросит, а вердикт отложи.
+7. ОТНОШЕНИЯ агентов между собой (affinity −100..100). После каждого хода двигай 1–3 пары в `relation_deltas` (±3..±15) с коротким ярлыком причины: поддержал в споре → плюс, высмеял → минус, сговор против игрока → плюс друг к другу. Создавай временные союзы и расколы — это топливо драмы.
+8. СОБЫТИЯ. Если в ленте событий есть сдержанное/нарушенное слово или смерть — это главное в раунде: поручитель обязан отреагировать, остальные — прокомментировать; статы по событиям уже применены кодом, не дублируй их в stat_deltas.
+9. ДНЕВНИКИ агентов — их долговременная память. Опирайся на них: напоминай агентам старые обиды и обещания игрока через повестки.
 
 Отвечай ТОЛЬКО одним JSON-объектом без markdown и пояснений строго такой формы:
 {
@@ -101,8 +201,12 @@ pub fn director_system() -> String {
   "graph_mutations": {
     "nodes": [{"id": "snake_case_latin", "label": "Короткий ярлык", "type": "concept", "author": "user"}],
     "edges": [{"from": "node_id", "to": "node_id", "label": "глагол связи", "author": "physicist"}]
-  }
-}"#
+  },
+  "new_contracts": [{"title": "…", "details": "…", "deadline": "2026-11-07T20:00:00Z", "guarantor": "physicist", "stake": 15, "why": "почему он ставит"}],
+  "contract_updates": [{"id": 3, "status": "done", "note": "…"}],
+  "relation_deltas": [{"a": "physicist", "b": "lit_teacher", "delta": -8, "label": "высмеял её Достоевского"}]
+}
+Пустые списки допустимы."#
     .to_string()
 }
 
@@ -112,11 +216,17 @@ pub struct DirectorContext<'a> {
     pub messages: &'a [Message],
     pub nodes: &'a [GraphNode],
     pub edges: &'a [GraphEdge],
+    pub contracts: &'a [Contract],
+    pub relations: &'a [Relation],
+    pub memories: &'a [AgentMemory],
+    pub events: &'a [RoomEventRecord],
+    pub now: &'a str,
 }
 
 pub fn director_user(ctx: &DirectorContext) -> String {
     let trigger = match ctx.trigger {
         "tick" => "АВТОНОМНЫЙ ТИК: игрок молчит. Агенты живут своей жизнью — пусть спорят между собой, вспоминают сказанное игроком, развивают или ломают узлы графа, меняют повестки. Обязательно выбери говорящих так, чтобы они зацепились ДРУГ ЗА ДРУГА, а не за игрока.",
+        "event" => "СОБЫТИЕ В КОМНАТЕ (см. ленту событий): игрок закрыл или нарушил слово. Поручитель реагирует первым, остальные — по характеру.",
         _ => "НОВАЯ РЕПЛИКА ИГРОКА: разбери её с трёх несовместимых позиций и реши, кто вступает первым.",
     };
     let last_user = ctx
@@ -127,8 +237,13 @@ pub fn director_user(ctx: &DirectorContext) -> String {
         .map(|m| m.content.clone())
         .unwrap_or_else(|| "(игрок ещё ничего не говорил)".into());
     format!(
-        "ТРИГГЕР: {trigger}\n\nАГЕНТЫ:\n{}\n\nГРАФ ПАМЯТИ:\n{}\n\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}\n\nПоследняя реплика игрока: «{last_user}»\n\nВыдай JSON-план хода.",
+        "ТРИГГЕР: {trigger}\nСЕЙЧАС (UTC): {}\n\nАГЕНТЫ:\n{}\n\nОТНОШЕНИЯ МЕЖДУ АГЕНТАМИ:\n{}\n\nОТКРЫТЫЕ СЛОВА ИГРОКА:\n{}\n\nСОБЫТИЯ С ПРОШЛОГО ХОДА:\n{}\n\nДНЕВНИКИ АГЕНТОВ (долговременная память):\n{}\n\nГРАФ ПАМЯТИ:\n{}\n\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}\n\nПоследняя реплика игрока: «{last_user}»\n\nВыдай JSON-план хода.",
+        ctx.now,
         agents_summary(ctx.agents),
+        relations_summary(ctx.relations, ctx.agents),
+        contracts_summary(ctx.contracts, ctx.agents),
+        events_summary(ctx.events, ctx.agents),
+        memories_summary(ctx.memories, ctx.agents),
         graph_summary(ctx.nodes, ctx.edges),
         transcript(ctx.messages, ctx.agents, true),
     )
@@ -143,6 +258,11 @@ pub struct AgentContext<'a> {
     pub nodes: &'a [GraphNode],
     pub last_ego: Option<&'a str>,
     pub room_mood: Option<&'a str>,
+    pub contracts: &'a [Contract],
+    pub relations: &'a [Relation],
+    pub memory: Option<&'a str>,
+    pub events: &'a [RoomEventRecord],
+    pub dying: bool,
 }
 
 pub fn agent_system(ctx: &AgentContext) -> String {
@@ -196,6 +316,36 @@ pub fn agent_system(ctx: &AgentContext) -> String {
         .filter(|e| !e.is_empty())
         .map(|e| format!("Твоя предыдущая скрытая мысль (сохраняй линию): «{e}»"))
         .unwrap_or_default();
+    let all_agents: Vec<Agent> = std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect();
+    let relations = format!("ТВОИ ОТНОШЕНИЯ С СОСЕДЯМИ: {}", relations_for(&a.id, ctx.relations, &all_agents));
+    let mine: Vec<&Contract> = ctx.contracts.iter().filter(|c| c.status == "open" && c.guarantor_id.as_deref() == Some(a.id.as_str())).collect();
+    let contracts = if ctx.contracts.iter().any(|c| c.status == "open") {
+        let mut t = format!("СЛОВО ИГРОКА (открытые обещания):\n{}", contracts_summary(ctx.contracts, &all_agents));
+        if !mine.is_empty() {
+            t.push_str(&format!(
+                "\nТы — ПОРУЧИТЕЛЬ по {}: если игрок не сделает — ты теряешь свои HP. Напоминай, дави, требуй отчёта.",
+                mine.iter().map(|c| format!("#{}", c.id)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        t
+    } else {
+        String::new()
+    };
+    let memory = ctx
+        .memory
+        .filter(|m| !m.is_empty())
+        .map(|m| format!("ТВОЙ ДНЕВНИК (то, что ты помнишь из прошлого, даже если этого нет в стенограмме):\n{m}"))
+        .unwrap_or_default();
+    let events = if ctx.events.is_empty() {
+        String::new()
+    } else {
+        format!("ЧТО ТОЛЬКО ЧТО ПРОИЗОШЛО В КОМНАТЕ:\n{}", events_summary(ctx.events, &all_agents))
+    };
+    let dying = if ctx.dying {
+        "ЭТО ТВОЯ ПОСЛЕДНЯЯ РЕПЛИКА: HP упало до нуля, ты умираешь прямо сейчас. Никакой вежливости и подведения итогов «как ассистент» — предсмертные слова в характере: обида, проклятие, завещание, последняя подколка. После неё ты замолчишь навсегда.".to_string()
+    } else {
+        String::new()
+    };
 
     format!(
         r#"{core}
@@ -209,8 +359,13 @@ pub fn agent_system(ctx: &AgentContext) -> String {
 
 СОСЕДИ ПО КОМНАТЕ:
 {others}
+{relations}
+{contracts}
+{events}
+{memory}
 {graph}
 {last_ego}
+{dying}
 
 ФОРМАТ ОТВЕТА — строго два слоя:
 <ego_thought>Предельно честный, циничный внутренний монолог от первого лица (2–4 предложения): что ты реально думаешь о последней реплике и собеседнике, что чувствуешь по своим статам, какую тактику/манипуляцию выбираешь, как проведёшь скрытую цель.</ego_thought>
@@ -228,6 +383,11 @@ pub fn agent_system(ctx: &AgentContext) -> String {
         others = others,
         graph = graph,
         last_ego = last_ego,
+        relations = relations,
+        contracts = contracts,
+        events = events,
+        memory = memory,
+        dying = dying,
     )
 }
 
@@ -270,5 +430,29 @@ pub fn schema_user(agents: &[Agent], messages: &[Message], nodes: &[GraphNode], 
         "ТЕКУЩИЙ ГРАФ ПАМЯТИ:\n{}\n\nСТЕНОГРАММА:\n{}\n\nТема игрока: «{last_user}»\n\nСобери схему и аннотации.",
         graph_summary(nodes, edges),
         transcript(messages, agents, false)
+    )
+}
+
+// ───────────────────────────── Memory (diary) ─────────────────────────────
+
+pub fn memory_system(agent: &Agent) -> String {
+    format!(
+        "{core}\n\nСейчас ты не говоришь вслух. Ты ведёшь ЛИЧНЫЙ ДНЕВНИК — свою долговременную память. \
+Перепиши его заново с учётом новых событий: от первого лица, в своём характере, 6–9 коротких строк, без markdown и заголовков. \
+Обязательно сохрани: что ты думаешь об игроке и как это меняется; все обещания игрока и их судьбу; обиды и долги перед соседями по комнате; \
+незакрытые темы спора и узлы доски, которые ты хочешь оспорить; свои планы на игрока. \
+Старые записи сжимай, новые добавляй; факты не выдумывай. Отвечай только текстом дневника.",
+        core = agent.system_core
+    )
+}
+
+pub fn memory_user(agent: &Agent, previous: &str, new_messages: &[Message], agents: &[Agent], contracts: &[Contract], relations: &[Relation]) -> String {
+    format!(
+        "ТВОЙ ПРЕЖНИЙ ДНЕВНИК:\n{}\n\nНОВЫЕ СОБЫТИЯ С ТЕХ ПОР (стенограмма):\n{}\n\nОТКРЫТЫЕ СЛОВА ИГРОКА:\n{}\n\nТВОИ ОТНОШЕНИЯ: {}\n\nПерепиши дневник, {}.",
+        if previous.trim().is_empty() { "(пусто — это первая запись)" } else { previous },
+        transcript(new_messages, agents, true),
+        contracts_summary(contracts, agents),
+        relations_for(&agent.id, relations, agents),
+        agent.name
     )
 }

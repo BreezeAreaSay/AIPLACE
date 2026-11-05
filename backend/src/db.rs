@@ -9,7 +9,8 @@ use sqlx::{
 };
 
 use crate::models::{
-    Agent, DirectorLogEntry, DirectorOutput, GraphEdge, GraphNode, Message, SchemaDoc,
+    Agent, AgentMemory, Contract, DirectorLogEntry, DirectorOutput, GraphEdge, GraphNode, Message,
+    Relation, RoomEventRecord, SchemaDoc,
 };
 
 pub type Db = SqlitePool;
@@ -70,6 +71,38 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             source      TEXT NOT NULL DEFAULT 'llm',
             output_json TEXT NOT NULL,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        CREATE TABLE IF NOT EXISTS contracts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            title           TEXT NOT NULL,
+            details         TEXT,
+            deadline        TEXT,
+            status          TEXT NOT NULL DEFAULT 'open',
+            guarantor_id    TEXT,
+            stake           INTEGER NOT NULL DEFAULT 15,
+            created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            resolved_at     TEXT,
+            resolution_note TEXT
+        );
+        CREATE TABLE IF NOT EXISTS relations (
+            a_id     TEXT NOT NULL,
+            b_id     TEXT NOT NULL,
+            affinity INTEGER NOT NULL DEFAULT 0,
+            label    TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (a_id, b_id)
+        );
+        CREATE TABLE IF NOT EXISTS agent_memory (
+            agent_id      TEXT PRIMARY KEY,
+            summary       TEXT NOT NULL DEFAULT '',
+            covered_until INTEGER NOT NULL DEFAULT 0,
+            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        CREATE TABLE IF NOT EXISTS room_events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind       TEXT NOT NULL,
+            payload    TEXT NOT NULL DEFAULT '{}',
+            narrated   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
         CREATE TABLE IF NOT EXISTS schemas (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,7 +181,32 @@ const SEEDS: [Seed; 3] = [
     },
 ];
 
+const RELATION_SEEDS: [(&str, &str, i64, &str); 3] = [
+    ("lit_teacher", "physicist", -35, "старая вражда интеллигенции: Базаров против Достоевского"),
+    ("graffiti", "physicist", -10, "дед и хулиган: взаимное подозрение с проблесками уважения"),
+    ("graffiti", "lit_teacher", -20, "училка и вандал: она жалеет, он стебёт"),
+];
+
+pub async fn seed_relations_if_empty(pool: &Db) -> Result<()> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relations").fetch_one(pool).await?;
+    if n > 0 {
+        return Ok(());
+    }
+    for (a, b, aff, label) in RELATION_SEEDS {
+        let (a, b) = order_pair(a, b);
+        sqlx::query("INSERT OR IGNORE INTO relations (a_id, b_id, affinity, label) VALUES (?, ?, ?, ?)")
+            .bind(a)
+            .bind(b)
+            .bind(aff)
+            .bind(label)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn seed_if_empty(pool: &Db) -> Result<()> {
+    seed_relations_if_empty(pool).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
         .fetch_one(pool)
         .await?;
@@ -180,6 +238,7 @@ pub async fn seed_if_empty(pool: &Db) -> Result<()> {
         "Комната открыта. Трое обитателей смотрят на тебя. Скажи что-нибудь — любое: от «я устал» до «как спроектировать базу данных».",
     )
     .await?;
+    insert_event(pool, "room_opened", &serde_json::json!({})).await?;
     Ok(())
 }
 
@@ -187,7 +246,8 @@ pub async fn seed_if_empty(pool: &Db) -> Result<()> {
 pub async fn reset_room(pool: &Db) -> Result<()> {
     sqlx::query(
         "DELETE FROM graph_edges; DELETE FROM graph_nodes; DELETE FROM messages;
-         DELETE FROM director_log; DELETE FROM schemas; DELETE FROM agents;",
+         DELETE FROM director_log; DELETE FROM schemas; DELETE FROM agents;
+         DELETE FROM contracts; DELETE FROM relations; DELETE FROM agent_memory; DELETE FROM room_events;",
     )
     .execute(pool)
     .await?;
@@ -414,4 +474,183 @@ pub async fn last_schema(pool: &Db) -> Result<Option<SchemaDoc>> {
         annotations: serde_json::from_str(&ann).unwrap_or_default(),
         created_at,
     }))
+}
+
+// ───────────────────────────── Contracts ─────────────────────────────
+
+pub async fn list_contracts(pool: &Db) -> Result<Vec<Contract>> {
+    Ok(sqlx::query_as::<_, Contract>(
+        "SELECT * FROM contracts ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, id DESC LIMIT 60",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn open_contracts(pool: &Db) -> Result<Vec<Contract>> {
+    Ok(sqlx::query_as::<_, Contract>("SELECT * FROM contracts WHERE status = 'open' ORDER BY deadline IS NULL, deadline, id")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn get_contract(pool: &Db, id: i64) -> Result<Option<Contract>> {
+    Ok(sqlx::query_as::<_, Contract>("SELECT * FROM contracts WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn insert_contract(
+    pool: &Db,
+    title: &str,
+    details: Option<&str>,
+    deadline: Option<&str>,
+    guarantor_id: Option<&str>,
+    stake: i64,
+) -> Result<Contract> {
+    let res = sqlx::query(
+        "INSERT INTO contracts (title, details, deadline, guarantor_id, stake) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(title)
+    .bind(details)
+    .bind(deadline)
+    .bind(guarantor_id)
+    .bind(stake)
+    .execute(pool)
+    .await?;
+    Ok(sqlx::query_as::<_, Contract>("SELECT * FROM contracts WHERE id = ?")
+        .bind(res.last_insert_rowid())
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn resolve_contract(pool: &Db, id: i64, status: &str, note: Option<&str>) -> Result<()> {
+    sqlx::query(
+        "UPDATE contracts SET status = ?, resolution_note = ?,
+         resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND status = 'open'",
+    )
+    .bind(status)
+    .bind(note)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ───────────────────────────── Relations ─────────────────────────────
+
+pub fn order_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+pub async fn list_relations(pool: &Db) -> Result<Vec<Relation>> {
+    Ok(sqlx::query_as::<_, Relation>("SELECT * FROM relations ORDER BY a_id, b_id")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn upsert_relation(pool: &Db, a: &str, b: &str, affinity: i64, label: Option<&str>) -> Result<()> {
+    let (a, b) = order_pair(a, b);
+    sqlx::query(
+        "INSERT INTO relations (a_id, b_id, affinity, label) VALUES (?, ?, ?, COALESCE(?, ''))
+         ON CONFLICT(a_id, b_id) DO UPDATE SET affinity = excluded.affinity,
+         label = CASE WHEN excluded.label = '' THEN relations.label ELSE excluded.label END",
+    )
+    .bind(a)
+    .bind(b)
+    .bind(affinity)
+    .bind(label)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ───────────────────────────── Memory ─────────────────────────────
+
+pub async fn list_memories(pool: &Db) -> Result<Vec<AgentMemory>> {
+    Ok(sqlx::query_as::<_, AgentMemory>("SELECT * FROM agent_memory ORDER BY agent_id")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn get_memory(pool: &Db, agent_id: &str) -> Result<Option<AgentMemory>> {
+    Ok(sqlx::query_as::<_, AgentMemory>("SELECT * FROM agent_memory WHERE agent_id = ?")
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn upsert_memory(pool: &Db, agent_id: &str, summary: &str, covered_until: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO agent_memory (agent_id, summary, covered_until, updated_at)
+         VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         ON CONFLICT(agent_id) DO UPDATE SET summary = excluded.summary,
+         covered_until = excluded.covered_until, updated_at = excluded.updated_at",
+    )
+    .bind(agent_id)
+    .bind(summary)
+    .bind(covered_until)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn last_message_id(pool: &Db) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(id) FROM messages")
+        .fetch_one(pool)
+        .await?
+        .unwrap_or(0))
+}
+
+/// Messages with id in (after, until], chronological, capped.
+pub async fn messages_between(pool: &Db, after: i64, until: i64, limit: usize) -> Result<Vec<Message>> {
+    let mut rows = sqlx::query_as::<_, Message>(
+        "SELECT * FROM messages WHERE id > ? AND id <= ? ORDER BY id DESC LIMIT ?",
+    )
+    .bind(after)
+    .bind(until)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+// ───────────────────────────── Room events ─────────────────────────────
+
+pub async fn insert_event(pool: &Db, kind: &str, payload: &serde_json::Value) -> Result<()> {
+    sqlx::query("INSERT INTO room_events (kind, payload) VALUES (?, ?)")
+        .bind(kind)
+        .bind(payload.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn pending_events(pool: &Db) -> Result<Vec<RoomEventRecord>> {
+    Ok(sqlx::query_as::<_, RoomEventRecord>(
+        "SELECT * FROM room_events WHERE narrated = 0 ORDER BY id LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn recent_events(pool: &Db, limit: usize) -> Result<Vec<RoomEventRecord>> {
+    let mut rows = sqlx::query_as::<_, RoomEventRecord>("SELECT * FROM room_events ORDER BY id DESC LIMIT ?")
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+pub async fn mark_events_narrated(pool: &Db, up_to_id: i64) -> Result<()> {
+    sqlx::query("UPDATE room_events SET narrated = 1 WHERE id <= ?")
+        .bind(up_to_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

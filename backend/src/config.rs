@@ -64,6 +64,8 @@ pub struct Config {
     /// anyone opening the Mini App could otherwise swap your API key).
     pub allow_remote_settings: bool,
     pub update_check: bool,
+    /// Rewrite each agent's diary after this many new messages.
+    pub memory_every: usize,
 }
 
 impl Config {
@@ -82,6 +84,7 @@ impl Config {
             tick_entropy_dopamine: env_or("TICK_ENTROPY_DOPAMINE", "3").parse().unwrap_or(3),
             allow_remote_settings: env_bool("ALLOW_REMOTE_SETTINGS"),
             update_check: !env_bool("TRIAD_NO_UPDATE_CHECK"),
+            memory_every: env_or("MEMORY_EVERY", "8").parse().unwrap_or(8),
         })
     }
 }
