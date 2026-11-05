@@ -33,6 +33,10 @@ dirs = "5"
 self_update = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
 
 
+[lib]
+name = "triad_canvas_backend"
+path = "src/lib.rs"
+
 [[bin]]
 name = "triad"
 path = "src/main.rs"

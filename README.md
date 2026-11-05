@@ -26,6 +26,22 @@ frontend/  (Vite + React + TS + Tailwind + Mermaid)   ──HTTP /api/* + SSE─
   плюс он сам отдаёт встроенный UI. Telegram Mini App просто указывает на его URL, а сервер по `initData`
   раскладывает пользователей по отдельным комнатам.
 
+## Десктоп-приложение (Tauri)
+
+Нативное окно + иконка в трее, внутри — тот же Rust-сервер на `127.0.0.1:<свободный порт>` и тот же UI.
+Наружу ничего не торчит; данные в `~/.triad` общие с CLI-версией, так что комната переезжает без потерь.
+Закрытие окна сворачивает в трей (комната продолжает жить), выход — из меню трея; там же «🎲 Автономный тик».
+
+Сборка у себя (Windows: нужны Rust + Node + C++ Build Tools, WebView2 уже есть в Windows 10/11):
+
+```powershell
+cd desktop; npm install; npm run build
+```
+
+Инсталлятор: `desktop\src-tauri\target\release\bundle\nsis\Triad Canvas_<ver>_x64-setup.exe` (и `.msi` рядом).
+Для разработки — `npm run dev` в `desktop/` (перед этим один раз `npm run build` в `frontend/`, UI встраивается в сервер).
+`.github/workflows/desktop.yml` собирает инсталляторы под Windows/macOS/Linux и прикладывает к релизу.
+
 ## Установка за минуту (готовый бинарник)
 
 Один файл `triad` со встроенным UI, без Node/Rust на машине:
@@ -219,7 +235,8 @@ WantedBy=multi-user.target
 
 ```
 backend/src/
-  main.rs         CLI-диспетчер, старт сервера, CORS, роутер
+  lib.rs          библиотека: bind / build_app / serve — её встраивают CLI и десктоп
+  main.rs         CLI-диспетчер (`triad`), баннер
   cli.rs          triad setup / key / config / update, подсказка ключа при первом запуске
   config.rs       ~/.triad/config.env, приоритеты env, горячие LlmSettings
   update.rs       самообновление с GitHub Releases + тихая проверка версии
@@ -238,6 +255,8 @@ backend/src/
   mermaid.rs      safe_id, sanitize_label, build_graph, classDef-раскраска
   handlers.rs     axum-роуты + SSE + /api/settings (только localhost)
   state.rs        AppState
+desktop/
+  src-tauri/src/main.rs  запуск встроенного сервера, окно, трей; tauri.conf.json, иконки
 frontend/src/
   App.tsx, hooks/useRoom.ts (SSE + REST), api.ts, telegram.ts, types.ts
   components/ TopBar · AgentCard · StatBar · ChatStream · MessageBubble · Composer

@@ -1,43 +1,14 @@
-//! Triad Canvas — one binary: embedded UI + API. Runs on a laptop today and on a VPS behind
-//! a Telegram Mini App tomorrow; the frontend never talks to anything but `/api/*`.
+//! `triad` CLI: setup / key / config / update, and `serve` (default) — the same server the
+//! desktop app embeds.
 
-mod agent_runner;
-mod cli;
-mod config;
-mod contracts;
-mod db;
-mod director;
-mod error;
-mod handlers;
-mod memory;
-mod mermaid;
-mod mock_llm;
-mod models;
-mod openrouter;
-mod prompts;
-mod rooms;
-mod state;
-mod telegram;
-mod update;
-mod web;
-
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::io::Write;
 
 use anyhow::Context;
 use clap::Parser;
-use tokio::sync::RwLock;
-use tower_http::{
-    cors::CorsLayer,
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
-use tracing_subscriber::EnvFilter;
-
-use crate::{
-    cli::{Cli, Cmd},
-    config::{Config, LlmSettings},
-    openrouter::LlmClient,
-    state::AppState,
+use triad_canvas_backend::{
+    cli::{self, Cli, Cmd},
+    config::{self, Config, LlmSettings},
+    update, web,
 };
 
 fn main() {
@@ -62,7 +33,6 @@ fn real_main() -> anyhow::Result<()> {
             cli::setup_wizard()?;
             if cli::interactive() {
                 print!("Запустить комнату сейчас? [Y/n] ");
-                use std::io::Write;
                 std::io::stdout().flush()?;
                 let mut a = String::new();
                 std::io::stdin().read_line(&mut a)?;
@@ -85,7 +55,8 @@ fn real_main() -> anyhow::Result<()> {
 fn serve(no_prompt: bool) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn,tower_http=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,sqlx=warn,tower_http=warn".into()),
         )
         .init();
 
@@ -101,70 +72,16 @@ fn serve(no_prompt: bool) -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("tokio runtime")?
-        .block_on(run(cfg, settings))
+        .block_on(async {
+            let listener = tokio::net::TcpListener::bind((cfg.host.as_str(), cfg.port))
+                .await
+                .with_context(|| format!("cannot bind {}:{}", cfg.host, cfg.port))?;
+            banner(&cfg, &settings);
+            triad_canvas_backend::serve(listener, cfg, settings).await
+        })
 }
 
-async fn run(cfg: Config, settings: LlmSettings) -> anyhow::Result<()> {
-    std::fs::create_dir_all(config::triad_home()).ok();
-    let cfg = Arc::new(cfg);
-    let rooms = Arc::new(rooms::RoomManager::new(cfg.clone()));
-    let local = rooms.get(rooms::LOCAL_ROOM).await?;
-
-    let settings = Arc::new(RwLock::new(settings));
-    let state = AppState {
-        cfg: cfg.clone(),
-        settings: settings.clone(),
-        llm: Arc::new(LlmClient::new(settings.clone(), cfg.app_url.clone())?),
-        update: Arc::new(RwLock::new(None)),
-        rooms,
-        bot_username: Arc::new(RwLock::new(None)),
-        room_id: rooms::LOCAL_ROOM.to_string(),
-        db: local.db,
-        events: local.events,
-        turn_lock: local.turn_lock,
-    };
-
-    if cfg.telegram_bot_token.is_some() && cfg.telegram_polling {
-        tokio::spawn(telegram::run_bot(cfg.clone(), state.bot_username.clone()));
-    }
-
-    if cfg.update_check {
-        let slot = state.update.clone();
-        tokio::spawn(async move {
-            if let Some(info) = update::check_latest().await {
-                tracing::info!("доступна новая версия v{} (у тебя v{}) → `triad update`", info.latest, info.current);
-                *slot.write().await = Some(info);
-            }
-        });
-    }
-
-    let mut app = handlers::router(state)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
-
-    // UI: explicit on-disk folder (dev / custom) → embedded bundle (release) → hint page.
-    let on_disk = cfg.static_dir.as_deref().map(Path::new).filter(|p| p.join("index.html").exists());
-    if let Some(dir) = on_disk {
-        tracing::info!(dir = %dir.display(), "serving UI from disk");
-        let index = ServeFile::new(dir.join("index.html"));
-        app = app.fallback_service(ServeDir::new(dir).not_found_service(index));
-    } else {
-        app = app.fallback(web::serve);
-    }
-
-    let addr = format!("{}:{}", cfg.host, cfg.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("cannot bind {addr}"))?;
-    banner(&cfg, &*settings.read().await).await;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .context("server error")?;
-    Ok(())
-}
-
-async fn banner(cfg: &Config, s: &LlmSettings) {
-    let _ = cfg;
+fn banner(cfg: &Config, s: &LlmSettings) {
     let url = format!("http://localhost:{}", cfg.port);
     println!("┌─ TRIAD CANVAS v{} ─────────────────────────────────", update::VERSION);
     println!("│ UI / API : {url}   (bind {}:{})", cfg.host, cfg.port);

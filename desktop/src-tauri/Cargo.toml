@@ -1,0 +1,24 @@
+[package]
+name = "triad-desktop"
+version = "0.3.0"
+edition = "2021"
+description = "Triad Canvas — desktop app (Tauri shell around the embedded Rust room server)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+triad-canvas-backend = { path = "../../backend" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
