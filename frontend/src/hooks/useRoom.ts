@@ -97,6 +97,9 @@ export function useRoom() {
         case 'attachments':
           setState((s) => (s ? { ...s, attachments: ev.attachments } : s))
           break
+        case 'message_deleted':
+          setState((s) => (s ? { ...s, messages: s.messages.filter((m) => m.id !== ev.id), message_count: Math.max(0, s.message_count - 1) } : s))
+          break
       }
     }
     const unsub = subscribeEvents(apply, setLive)
@@ -170,6 +173,19 @@ export function useRoom() {
     autofill: (id: string, kind?: string, query?: string) => api.autofill(id, kind, query).then((r) => (void refresh(), r)),
     githubInto: (id: string) => api.githubInto(id).then((r) => (void refresh(), r)),
     pollFeeds: () => api.pollFeeds().then((r) => (void refresh(), r)),
+    loadOlder: async () => {
+      const first = state?.messages[0]?.id
+      if (!first) return 0
+      const older = await api.olderMessages(first, 60)
+      setState((s) => (s ? { ...s, messages: mergeMessages(older, s.messages) } : s))
+      return older.length
+    },
+    loadAround: async (id: number) => {
+      const around = await api.messagesAround(id, 40)
+      setState((s) => (s ? { ...s, messages: mergeMessages(s.messages, around) } : s))
+    },
+    editMessage: (id: number, content: string) => quiet(() => api.editMessage(id, content)),
+    deleteMessage: (id: number) => quiet(() => api.deleteMessage(id)),
     createAgent: (body: Parameters<typeof api.createAgent>[0]) => api.createAgent(body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),
     patchAgent: (id: string, body: Parameters<typeof api.patchAgent>[1]) => api.patchAgent(id, body).then((a) => (registerAgents(a), setState((s) => (s ? { ...s, agents: a } : s)), a)),
     createType: (name: string, props?: { key: string; label: string; kind: string; options?: string[] }[]) => quiet(() => api.createType(name, props)),

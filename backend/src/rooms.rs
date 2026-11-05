@@ -50,6 +50,9 @@ impl RoomManager {
             std::fs::create_dir_all(&dir)?;
             format!("sqlite://{}?mode=rwc", dir.join(format!("{id}.db")).display())
         };
+        if let Err(e) = crate::backup::apply_pending(id, &url) {
+            tracing::warn!(room = %id, error = %e, "pending restore failed");
+        }
         let pool = db::connect(&url).await?;
         db::migrate(&pool).await?;
         db::seed_if_empty(&pool).await?;

@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react'
-import { ArrowUpCircle, Copy, Globe, KeyRound, Lock, X } from 'lucide-react'
+import { ArrowUpCircle, Copy, Download, Globe, GitBranch, KeyRound, Lock, RefreshCw, Upload, Wand2, X } from 'lucide-react'
 import { api, API_BASE } from '../api'
-import type { SettingsView } from '../types'
+import type { SettingsView, SourceUpdate } from '../types'
 import { ModelPicker, type ModelInfo } from './ModelPicker'
 
 interface Props {
   open: boolean
   onClose: () => void
   onSaved: () => void
+  sourceUpdate: SourceUpdate | null
+  restorePending: string | null
+  onWizard: () => void
 }
 
 const GROUPS: { title: string; note: string; keys: string[] }[] = [
@@ -19,7 +22,12 @@ const GROUPS: { title: string; note: string; keys: string[] }[] = [
   { title: 'Ленты', note: 'объекты типа «Лента» опрашиваются сами', keys: ['FEEDS_EVERY_MIN'] },
 ]
 
-export function SettingsModal({ open, onClose, onSaved }: Props) {
+export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePending, onWizard }: Props) {
+  const [restoreMsg, setRestoreMsg] = useState<string | null>(null)
+  const [su, setSu] = useState<SourceUpdate | null>(sourceUpdate)
+  const [suBusy, setSuBusy] = useState<'idle' | 'check' | 'run' | 'gone'>('idle')
+  const [suErr, setSuErr] = useState<string | null>(null)
+  useEffect(() => setSu(sourceUpdate), [sourceUpdate])
   const [view, setView] = useState<SettingsView | null>(null)
   const [key, setKey] = useState('')
   const [model, setModel] = useState('')
@@ -256,6 +264,137 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
                 >
                   удалить ключ
                 </button>
+              )}
+            </div>
+
+            <div className="border-t border-line pt-3">
+              <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                <Download size={12} className="text-acid" /> бэкап комнаты
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <a href={api.backupUrl()} download className="flex items-center gap-1 rounded border border-line px-3 py-1.5 font-mono text-xs text-zinc-300 hover:border-acid hover:text-acid">
+                  <Download size={12} /> скачать .zip
+                </a>
+                <label className={`flex cursor-pointer items-center gap-1 rounded border border-line px-3 py-1.5 font-mono text-xs text-zinc-300 hover:border-acid hover:text-acid ${!editable ? 'pointer-events-none opacity-40' : ''}`}>
+                  <Upload size={12} /> восстановить из .zip
+                  <input
+                    type="file"
+                    accept=".zip,application/zip"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      e.target.value = ''
+                      if (!f) return
+                      if (!confirm('Текущая комната будет заменена при следующем запуске (старая база останется рядом). Продолжить?')) return
+                      void api
+                        .restore(f)
+                        .then((r) => {
+                          setRestoreMsg(r.message)
+                          onSaved()
+                        })
+                        .catch((err) => setRestoreMsg(`ошибка: ${(err as Error).message}`))
+                    }}
+                  />
+                </label>
+                <button onClick={onWizard} className="flex items-center gap-1 rounded border border-line px-3 py-1.5 font-mono text-xs text-zinc-300 hover:border-acid hover:text-acid">
+                  <Wand2 size={12} /> мастер первого запуска
+                </button>
+              </div>
+              {(restorePending || restoreMsg) && (
+                <div className="mt-2 flex items-center gap-2 rounded border border-acid/40 bg-acid/5 px-3 py-2 text-[11px] text-acid">
+                  <span>{restoreMsg ?? 'Бэкап подготовлен — перезапусти приложение, чтобы он применился.'}</span>
+                  {restorePending && (
+                    <button
+                      onClick={() => {
+                        void api.restoreCancel().then(() => {
+                          setRestoreMsg(null)
+                          onSaved()
+                        })
+                      }}
+                      className="ml-auto underline"
+                    >
+                      отменить
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="mt-1 text-[10px] text-zinc-600">В архиве база комнаты и все вложения. Положи в облако или перенеси на другую машину.</div>
+            </div>
+
+            <div className="border-t border-line pt-3">
+              <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                <GitBranch size={12} className="text-acid" /> обновление из исходников
+                {su && (
+                  <span className="ml-auto normal-case tracking-normal text-zinc-600">
+                    {su.branch} · {su.head}
+                    {su.dirty ? ' · есть локальные правки' : ''}
+                  </span>
+                )}
+              </div>
+              {su ? (
+                <div className="space-y-2 text-[11px]">
+                  {su.behind > 0 ? (
+                    <div className="rounded border border-acid/40 bg-acid/5 px-3 py-2">
+                      <div className="text-acid">
+                        Доступно {su.behind} {su.behind === 1 ? 'новый коммит' : su.behind < 5 ? 'новых коммита' : 'новых коммитов'} в origin/{su.branch}:
+                      </div>
+                      <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-zinc-300">
+                        {su.commits.slice(0, 8).map((c) => (
+                          <li key={c} className="truncate">
+                            {c}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <div className="text-zinc-500">
+                      Ты на последней версии{su.error ? ` (проверка не удалась: ${su.error})` : ''}. Проверено {new Date(su.checked_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setSuBusy('check')
+                        setSuErr(null)
+                        void api
+                          .updateCheck()
+                          .then(setSu)
+                          .catch((e) => setSuErr((e as Error).message))
+                          .finally(() => setSuBusy('idle'))
+                      }}
+                      disabled={suBusy !== 'idle'}
+                      className="flex items-center gap-1 rounded border border-line px-3 py-1.5 font-mono text-xs text-zinc-300 hover:border-acid hover:text-acid disabled:opacity-40"
+                    >
+                      <RefreshCw size={12} className={suBusy === 'check' ? 'animate-spin' : ''} /> проверить
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!confirm(`Приложение закроется, в отдельном окне пройдут git pull и сборка (${su.mode === 'desktop' ? 'frontend + tauri, несколько минут' : 'frontend + cargo, пара минут'}), потом оно запустится само. Поехали?`)) return
+                        setSuBusy('run')
+                        setSuErr(null)
+                        void api
+                          .updateRun()
+                          .then(() => setSuBusy('gone'))
+                          .catch((e) => {
+                            setSuErr((e as Error).message)
+                            setSuBusy('idle')
+                          })
+                      }}
+                      disabled={suBusy !== 'idle' || !editable || su.dirty}
+                      className="flex items-center gap-1 rounded bg-acid px-3 py-1.5 font-mono text-xs font-bold text-void hover:shadow-glow disabled:opacity-40"
+                      title={su.dirty ? 'Сначала убери локальные правки (git stash)' : 'git pull → сборка → перезапуск'}
+                    >
+                      <ArrowUpCircle size={12} /> {su.behind > 0 ? 'обновить и перезапустить' : 'пересобрать и перезапустить'}
+                    </button>
+                    {suBusy === 'gone' && <span className="text-acid">закрываюсь… смотри окно сборки, приложение вернётся само</span>}
+                  </div>
+                  {suErr && <div className="rounded border border-magenta/50 bg-magenta/10 px-3 py-2 text-xs text-magenta">{suErr}</div>}
+                  <div className="font-mono text-[10px] text-zinc-600">
+                    {su.repo_dir} · {su.mode === 'desktop' ? 'десктоп' : 'cli'} · лог в ~/.triad/update.log
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[11px] text-zinc-600">Приложение запущено не из git-клона — обновляйся через релиз или задай TRIAD_REPO=путь к папке AIPLACE.</div>
               )}
             </div>
 

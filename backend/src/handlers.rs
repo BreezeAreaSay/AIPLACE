@@ -119,6 +119,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stt", post(stt))
         .route("/api/feeds/poll", post(poll_feeds))
         .route("/api/roles", get(list_roles))
+        .route("/api/messages", get(older_messages))
+        .route("/api/messages/search", get(search_messages))
+        .route("/api/messages/:id", axum::routing::patch(edit_message).delete(delete_message))
+        .route("/api/llm/log", get(llm_log))
+        .route("/api/backup.zip", get(backup_zip))
+        .route("/api/restore", post(restore_upload).delete(restore_cancel))
+        .route("/api/update/check", post(update_check))
+        .route("/api/update/run", post(update_run))
+        .route("/api/update/status", get(update_status).delete(update_ack))
         .route("/api/agents", post(create_agent))
         .route("/api/agents/:id", axum::routing::patch(patch_agent).delete(retire_agent))
         .layer(DefaultBodyLimit::max(60 * 1024 * 1024))
@@ -174,6 +183,11 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
         usage: app.llm.usage(),
         heartbeat_minutes: app.cfg.heartbeat_minutes,
         attachments: db::list_attachments(&app.db).await?,
+        source_update: app.source_update.read().await.clone(),
+        message_count: db::message_count(&app.db).await?,
+        restore_pending: crate::backup::pending_info(&app.room_id),
+        player_name: s_feat.get("PLAYER_NAME").map(str::to_string),
+        update_status: crate::selfupdate::status(),
         world: crate::integrations::world_line(app).await,
         features: crate::integrations::features(&s_feat),
     })
@@ -1015,6 +1029,123 @@ async fn poll_feeds(Room { app, .. }: Room) -> AppResult<Json<serde_json::Value>
     db::meta_set(&app.db, "feeds_last_poll", &chrono::Utc::now().to_rfc3339()).await?;
     emit_graph(&app).await?;
     Ok(Json(json!({ "created": n })))
+}
+
+// ───────────────────────────── Messages: history, search, edit ─────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct OlderQuery {
+    before: Option<i64>,
+    around: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn older_messages(Room { app, .. }: Room, Query(q): Query<OlderQuery>) -> AppResult<Json<Vec<crate::models::Message>>> {
+    let limit = q.limit.unwrap_or(60).clamp(1, 200);
+    let msgs = match (q.around, q.before) {
+        (Some(id), _) => db::messages_around(&app.db, id, limit / 2).await?,
+        (None, Some(b)) => db::messages_before(&app.db, b, limit).await?,
+        _ => db::recent_messages(&app.db, limit).await?,
+    };
+    Ok(Json(db::with_mentions(&app.db, msgs).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct SearchMsgQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+async fn search_messages(Room { app, .. }: Room, Query(q): Query<SearchMsgQuery>) -> AppResult<Json<Vec<crate::models::Message>>> {
+    if q.q.trim().chars().count() < 2 {
+        return Ok(Json(vec![]));
+    }
+    Ok(Json(db::search_messages(&app.db, &q.q, q.limit.unwrap_or(40).clamp(1, 200)).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct EditMessage {
+    content: String,
+}
+
+/// Edit your own line (agents' lines are theirs). Mentions stay; a round is not re-run.
+async fn edit_message(Room { app, .. }: Room, Path(id): Path<i64>, Json(req): Json<EditMessage>) -> AppResult<Json<crate::models::Message>> {
+    let Some(m) = db::get_message(&app.db, id).await? else { return Err(AppError::bad_request("нет такого сообщения")) };
+    if m.sender_id != USER_ID {
+        return Err(AppError::bad_request("править можно только свои реплики"));
+    }
+    let content = req.content.trim();
+    if content.is_empty() || content.chars().count() > 4000 {
+        return Err(AppError::bad_request("пустое или слишком длинное"));
+    }
+    db::update_message_content(&app.db, id, content).await?;
+    let updated = db::with_mentions(&app.db, vec![db::get_message(&app.db, id).await?.unwrap()]).await?.remove(0);
+    app.emit(RoomEvent::Message { message: updated.clone() });
+    Ok(Json(updated))
+}
+
+/// Delete any line from the room's history (yours or theirs — it's your room).
+async fn delete_message(Room { app, .. }: Room, Path(id): Path<i64>) -> AppResult<StatusCode> {
+    if !db::delete_message(&app.db, id).await? {
+        return Err(AppError::bad_request("нет такого сообщения"));
+    }
+    app.emit(RoomEvent::MessageDeleted { id });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn llm_log(State(app): State<AppState>) -> Json<Vec<crate::openrouter::CallLog>> {
+    Json(app.llm.journal())
+}
+
+// ───────────────────────────── Backup / restore ─────────────────────────────
+
+async fn backup_zip(Room { app, .. }: Room) -> AppResult<Response> {
+    let bytes = crate::backup::make_zip(&app).await?;
+    let name = format!("triad-{}-{}.zip", mermaid::safe_id(&app.room_id), chrono::Local::now().format("%Y%m%d-%H%M"));
+    Ok(([(header::CONTENT_TYPE, "application/zip".to_string()), (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))], bytes).into_response())
+}
+
+async fn restore_upload(Room { app, editable, .. }: Room, mp: Multipart) -> AppResult<Json<serde_json::Value>> {
+    if !editable {
+        return Err(AppError::bad_request("восстанавливать можно только с машины, где запущено приложение"));
+    }
+    let (files, _) = read_multipart(mp).await?;
+    let Some(f) = files.into_iter().next() else { return Err(AppError::bad_request("нет файла")) };
+    let manifest = crate::backup::stage_restore(&app.room_id, &f.bytes).map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "staged": true, "manifest": manifest, "message": "Бэкап подготовлен. Перезапусти приложение — комната заменится (текущая база останется рядом как .before-restore)." })))
+}
+
+async fn restore_cancel(Room { app, .. }: Room) -> StatusCode {
+    crate::backup::cancel_pending(&app.room_id);
+    StatusCode::NO_CONTENT
+}
+
+// ───────────────────────────── Update from source ─────────────────────────────
+
+async fn update_check(Room { app, .. }: Room) -> AppResult<Json<crate::selfupdate::SourceUpdate>> {
+    let u = crate::selfupdate::check().await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    *app.source_update.write().await = Some(u.clone());
+    Ok(Json(u))
+}
+
+async fn update_run(Room { app, editable, .. }: Room) -> AppResult<Json<serde_json::Value>> {
+    if !editable {
+        return Err(AppError::bad_request("обновлять можно только с машины, где запущено приложение"));
+    }
+    if app.turn_lock.try_lock().is_err() {
+        return Err(AppError::bad_request("идёт раунд — дождись, пока договорят"));
+    }
+    let log = crate::selfupdate::run().await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true, "log": log.display().to_string(), "message": "Приложение закроется; сборка идёт в отдельном окне, потом оно запустится само." })))
+}
+
+async fn update_status() -> Json<crate::selfupdate::UpdateStatus> {
+    Json(crate::selfupdate::status())
+}
+
+async fn update_ack() -> StatusCode {
+    crate::selfupdate::ack();
+    StatusCode::NO_CONTENT
 }
 
 // ───────────────────────────── Двор: the cast ─────────────────────────────

@@ -74,6 +74,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
     let settings = app.llm_settings().await;
     let world = crate::integrations::world_line(app).await;
     let can_search = settings.search_provider().is_some();
+    let player = prompts::player_line(&settings);
     let types = db::list_types(&app.db).await?;
     // Objects the agent can act on: by the topic of the last lines + their own things.
     let topic_text: String = messages.iter().rev().take(4).map(|m| m.content.clone()).collect::<Vec<_>>().join(" ");
@@ -108,6 +109,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         focus_files: focus_files.as_deref(),
         world: world.as_deref(),
         can_search,
+        player: player.as_deref(),
         types: &types,
         relevant: &relevant,
     };
@@ -247,7 +249,7 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
             silence_line(&ctx.agent.id)
         }
     };
-    let speech = strip_labels(&speech);
+    let speech = dedupe_thought(&strip_labels(&speech), &ego);
 
     let mut speech = speech;
     if let Some((node, _)) = ctx.focus {
@@ -314,7 +316,14 @@ async fn speak_with_tools(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
             }
         }
     }
-    let speech = strip_labels(text.trim().trim_matches('"'));
+    if text.trim().is_empty() {
+        // the tool loop returned nothing usable (null content / dropped): plain line, no tools
+        tracing::warn!(agent = %ctx.agent.id, "tool loop produced no text → plain call");
+        if let Ok(t) = app.llm.chat(model, &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, ego, hook, found))], &opts).await {
+            text = t;
+        }
+    }
+    let speech = dedupe_thought(&strip_labels(text.trim().trim_matches('"')), ego);
     // Carry the tool records through the common path as synthetic <act> markers.
     let mut tail = String::new();
     for r in records {
@@ -323,6 +332,25 @@ async fn speak_with_tools(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
     app.emit(RoomEvent::StreamStart { agent: ctx.agent.id.clone() });
     app.emit(RoomEvent::Delta { agent: ctx.agent.id.clone(), text: speech.clone() });
     (if ego.is_empty() { None } else { Some(ego.to_string()) }, format!("{speech}{tail}"))
+}
+
+/// Models sometimes read their own thought back as the opening of the line. Drop that echo.
+fn dedupe_thought(speech: &str, thought: &str) -> String {
+    let t = thought.trim();
+    if t.chars().count() < 40 {
+        return speech.to_string();
+    }
+    let key: String = t.chars().take(60).collect();
+    let sp = speech.trim_start();
+    if let Some(rest) = sp.strip_prefix(&key) {
+        // skip to the end of the echoed thought (sentence boundary) and keep what follows
+        let after = rest.find(['.', '!', '?']).map(|i| &rest[i + 1..]).unwrap_or("");
+        let cleaned = after.trim_start_matches(|c: char| c == '*' || c == '»' || c.is_whitespace());
+        if cleaned.chars().count() >= 20 {
+            return cleaned.to_string();
+        }
+    }
+    speech.to_string()
 }
 
 fn strip_labels(s: &str) -> String {

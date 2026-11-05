@@ -331,6 +331,8 @@ pub struct AgentContext<'a> {
     pub world: Option<&'a str>,
     /// Whether web search is available (think stage may ask for it).
     pub can_search: bool,
+    /// "ИГРОК: имя — о себе", when the player filled the profile.
+    pub player: Option<&'a str>,
     /// Object types the agent may use in <act> tags.
     pub types: &'a [crate::models::ObjectType],
     /// Objects relevant to the moment (by topic + the agent's own), with ids, so actions can target them.
@@ -679,6 +681,19 @@ pub struct CasterInput<'a> {
     /// Fresh feed items (title, summary, url) for `news` beats.
     pub news: &'a [(String, String, String)],
     pub focus_files: Option<&'a str>,
+    pub player: Option<&'a str>,
+}
+
+/// Player profile line for prompts (None when nothing is set).
+pub fn player_line(s: &crate::config::LlmSettings) -> Option<String> {
+    let name = s.get("PLAYER_NAME").map(str::trim).filter(|n| !n.is_empty());
+    let bio = s.get("PLAYER_BIO").map(str::trim).filter(|b| !b.is_empty());
+    match (name, bio) {
+        (None, None) => None,
+        (Some(n), None) => Some(format!("ИГРОК: зовут {n}.")),
+        (None, Some(b)) => Some(format!("ИГРОК О СЕБЕ: {}", crate::mermaid::truncate_chars(b, 400))),
+        (Some(n), Some(b)) => Some(format!("ИГРОК: зовут {n}. О себе: {}", crate::mermaid::truncate_chars(b, 400))),
+    }
 }
 
 pub fn caster_user(i: &CasterInput) -> String {
@@ -709,8 +724,9 @@ pub fn caster_user(i: &CasterInput) -> String {
     let world = i.world.map(|w| format!("\nЗА ОКНОМ: {w} — пусть это иногда просачивается в сцену (настроение, планы, реплики), но не каждый раз.")).unwrap_or_default();
     let cal = i.calendar.map(|c| format!("\nКАЛЕНДАРЬ ИГРОКА (ближайшее):\n{c}")).unwrap_or_default();
     let files = i.focus_files.map(|f| format!("\nК ОБЪЕКТУ ПРИЛОЖЕНЫ ФАЙЛЫ (персонажи их читали):\n{f}")).unwrap_or_default();
+    let player = i.player.map(|p| format!("\n{p}")).unwrap_or_default();
     format!(
-        "{trigger}{world}{cal}{files}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ: {}\nГОВОРИЛИ В ПОСЛЕДНИХ РАУНДАХ (свежие первыми): {}\nПЕРСОНАЖИ:\n{}\nОТНОШЕНИЯ:\n{}\nСОБЫТИЯ:\n{}\nИЗ ДНЕВНИКОВ:\n{}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}",
+        "{trigger}{player}{world}{cal}{files}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ: {}\nГОВОРИЛИ В ПОСЛЕДНИХ РАУНДАХ (свежие первыми): {}\nПЕРСОНАЖИ:\n{}\nОТНОШЕНИЯ:\n{}\nСОБЫТИЯ:\n{}\nИЗ ДНЕВНИКОВ:\n{}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}",
         i.reader,
         if i.recent_speakers.is_empty() { "никто".to_string() } else { i.recent_speakers.join(", ") },
         short_agents(i.agents),
@@ -803,7 +819,7 @@ fn short_state(a: &Agent) -> String {
 pub fn think_system(ctx: &AgentContext) -> String {
     let a = ctx.agent;
     format!(
-        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Если тебе нужны факты из библиотеки комнаты (дела игрока, люди, сроки, твои объекты) — добавь строку ИЩУ В БИБЛИОТЕКЕ: ключевые слова — и получишь результат перед репликой.{search} Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
+        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица — 1–3 коротких предложения, без заголовков вроде «Мысль:», без обращений к собеседнику, без ремарок в звёздочках: это НЕ реплика, её никто не услышит. Что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Если тебе нужны факты из библиотеки комнаты (дела игрока, люди, сроки, твои объекты) — добавь строку ИЩУ В БИБЛИОТЕКЕ: ключевые слова — и получишь результат перед репликой.{search} Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
         core = a.system_core,
         state = short_state(a),
         agenda = a.current_agenda,
@@ -823,8 +839,9 @@ pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
     let focus = ctx.focus.map(|(n, _)| format!("\nРЕЧЬ ИДЁТ ОБ ОБЪЕКТЕ «{}» [{}]{}: {}", n.label, n.type_id, props_inline(n), crate::mermaid::truncate_chars(&n.body, 600))).unwrap_or_default();
     let files = ctx.focus_files.map(|f| format!("\nК НЕМУ ПРИЛОЖЕНО (ты это читал):\n{f}")).unwrap_or_default();
     let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
+    let player = ctx.player.map(|p| format!("\n{p}")).unwrap_or_default();
     let library = ctx.library.map(|l| format!("\nСПРАВКА ИЗ БИБЛИОТЕКИ (точные факты, на них можно опираться):\n{l}")).unwrap_or_default();
-    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{files}{world}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
+    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}{files}{world}{player}{library}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
 }
 
 /// Split the think-stage output into (thought, hook phrase, library query, web query).
@@ -850,10 +867,34 @@ pub fn split_thought(raw: &str) -> (String, String, Option<String>, Option<Strin
                 web = Some(crate::mermaid::truncate_chars(&q, 120));
             }
         } else if !l.is_empty() {
-            thought.push(l);
+            thought.push(strip_thought_label(l));
         }
     }
-    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120), query, web)
+    let joined = thought.join(" ");
+    // A thought is 1–3 sentences; anything longer is the model writing its line early.
+    let mut out = String::new();
+    let mut sentences = 0;
+    for ch in joined.chars() {
+        out.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            sentences += 1;
+            if sentences >= 3 || out.chars().count() > 320 {
+                break;
+            }
+        }
+    }
+    (crate::mermaid::truncate_chars(out.trim(), 360), crate::mermaid::truncate_chars(&hook, 120), query, web)
+}
+
+/// "Мысль:", "Мысль (внутренняя):", "Внутренняя мысль:", "Мои мысли:", "Думаю:" → gone.
+fn strip_thought_label(l: &str) -> &str {
+    let lower = l.to_lowercase();
+    for prefix in ["мысль (внутренняя):", "внутренняя мысль:", "мысль:", "мои мысли:", "думаю:", "про себя:", "ego_thought:", "<ego_thought>"] {
+        if lower.starts_with(prefix) {
+            return l[prefix.len()..].trim_start_matches(|c: char| c == '*' || c == '«' || c.is_whitespace());
+        }
+    }
+    l
 }
 
 /// `key=value, …` for an object's non-empty props (prompt helper).
@@ -911,8 +952,9 @@ pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str, 
     let found = found.map(|f| format!("\nТЫ ИСКАЛ — НАЙДЕНО (опирайся на это, ссылки можно называть):\n{f}")).unwrap_or_default();
     let files = ctx.focus_files.map(|f| format!("\nПРИЛОЖЕННЫЕ ФАЙЛЫ ОБЪЕКТА (ты их читал — ссылайся на конкретное):\n{f}")).unwrap_or_default();
     let world = ctx.world.map(|w| format!("\nЗА ОКНОМ: {w}")).unwrap_or_default();
+    let player = ctx.player.map(|p| format!("\n{p} Обращайся по имени, когда уместно.")).unwrap_or_default();
     format!(
-        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}{files}{world}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        "СТЕНОГРАММА:\n{}{scene}{own}{library}{found}{files}{world}{player}\n\nТВОЯ МЫСЛЬ (для себя, в реплике её не повторяй дословно): {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
         transcript(&recent, all, false),
         if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
         if hook.is_empty() { "последняя реплика" } else { hook }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, Terminal, Volume2, VolumeX } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Pencil, Terminal, Trash2, Volume2, VolumeX, X } from 'lucide-react'
 import { api } from '../api'
 import type { Agent, GraphNode, Message, ObjectType } from '../types'
 import { AGENT_COLORS, AGENT_GLYPH } from '../types'
@@ -14,6 +14,9 @@ interface Props {
   onNodeClick?: (id: string) => void
   /** Server TTS configured; otherwise the browser's own voices are used. */
   serverTts?: boolean
+  onEdit?: (id: number, content: string) => void
+  onDelete?: (id: number) => void
+  highlight?: boolean
 }
 
 const VOICE_PREF: Record<string, { pitch: number; rate: number }> = {
@@ -94,8 +97,10 @@ function useSpeaker(agentId: string, text: string, serverTts: boolean) {
   return { state, play, stop }
 }
 
-export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick, serverTts = false }: Props) {
+export function MessageBubble({ message, agents, nodes, types = [], showEgo, onNodeClick, serverTts = false, onEdit, onDelete, highlight }: Props) {
   const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(message.content)
   const speaker = useSpeaker(message.sender_id, message.content, serverTts)
   const canSpeak = serverTts || 'speechSynthesis' in window
   const agent = agents.find((a) => a.id === message.sender_id)
@@ -138,13 +143,45 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
 
   if (isUser) {
     return (
-      <div className="flex flex-col items-end">
+      <div className="group flex flex-col items-end">
         {nodeChip}
-        <div className="max-w-[90%] rounded-lg rounded-br-sm border border-zinc-600 bg-zinc-800/70 px-3 py-2 text-sm text-zinc-100">
-          <div className="break-words">
-            <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
+        <div className={`max-w-[90%] rounded-lg rounded-br-sm border bg-zinc-800/70 px-3 py-2 text-sm text-zinc-100 ${highlight ? 'border-acid shadow-glow' : 'border-zinc-600'}`}>
+          {editing ? (
+            <div className="min-w-[260px]">
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.min(8, draft.split('\n').length + 1)} className="w-full resize-y rounded border border-line bg-void px-2 py-1 text-sm text-zinc-100 focus:border-acid focus:outline-none" autoFocus />
+              <div className="mt-1 flex justify-end gap-1">
+                <button onClick={() => setEditing(false)} className="rounded border border-line px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                  <X size={10} className="inline" /> отмена
+                </button>
+                <button
+                  onClick={() => {
+                    if (draft.trim() && draft.trim() !== message.content) onEdit?.(message.id, draft.trim())
+                    setEditing(false)
+                  }}
+                  className="rounded bg-acid px-2 py-0.5 font-mono text-[10px] font-bold text-void"
+                >
+                  <Check size={10} className="inline" /> сохранить
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="break-words">
+              <Markdown text={message.content} nodes={nodes} types={types} onOpen={onNodeClick} variant="chat" />
+            </div>
+          )}
+          <div className="mt-1 flex items-center justify-end gap-2 text-right text-[10px] font-mono text-zinc-500">
+            {!editing && onEdit && (
+              <button onClick={() => { setDraft(message.content); setEditing(true) }} className="hidden text-zinc-600 hover:text-zinc-200 group-hover:inline" title="Править">
+                <Pencil size={11} />
+              </button>
+            )}
+            {onDelete && (
+              <button onClick={() => { if (confirm('Удалить сообщение из истории?')) onDelete(message.id) }} className="hidden text-zinc-600 hover:text-magenta group-hover:inline" title="Удалить">
+                <Trash2 size={11} />
+              </button>
+            )}
+            <span>ты · {time}</span>
           </div>
-          <div className="mt-1 text-right text-[10px] font-mono text-zinc-500">ты · {time}</div>
         </div>
       </div>
     )
@@ -158,7 +195,7 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
       : null
 
   return (
-    <div className="flex gap-2">
+    <div className={`group flex gap-2 ${highlight ? 'rounded-lg ring-1 ring-acid/70' : ''}`}>
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-sm border text-sm font-bold" style={{ borderColor: color, color }}>
         {AGENT_GLYPH[message.sender_id] ?? '?'}
       </div>
@@ -177,6 +214,11 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
               title={speaker.state === 'idle' ? (serverTts ? 'Озвучить' : 'Озвучить голосом браузера') : 'Стоп'}
             >
               {speaker.state === 'idle' ? <Volume2 size={12} /> : speaker.state === 'loading' ? <Volume2 size={12} className="animate-pulse" /> : <VolumeX size={12} />}
+            </button>
+          )}
+          {onDelete && (
+            <button onClick={() => { if (confirm('Удалить реплику из истории?')) onDelete(message.id) }} className="hidden rounded p-0.5 text-zinc-700 hover:text-magenta group-hover:inline" title="Удалить из истории">
+              <Trash2 size={11} />
             </button>
           )}
         </div>

@@ -126,6 +126,8 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 | `TTS_URL`, `TTS_API_KEY`, `TTS_MODEL`, `TTS_VOICES`, `STT_URL`, `STT_API_KEY`, `STT_MODEL` | — | озвучка и диктовка (OpenAI-совместимые) |
 | `FEEDS_EVERY_MIN` | `180` | период опроса RSS-лент |
 | `FILES_DIR` | `~/.triad/files` | куда класть вложения |
+| `PLAYER_NAME`, `PLAYER_BIO` | — | кто ты для жителей двора (удобнее через мастер первого запуска) |
+| `TRIAD_REPO` | авто | путь к git-клону для обновления из приложения |
 | `TICK_ENTROPY_HP` / `TICK_ENTROPY_DOPAMINE` | `2` / `3` | Сколько теряет каждый за автономный тик |
 
 ## Релизы (для мейнтейнера)
@@ -194,6 +196,28 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
 - **Слэш-команды в композере** (начни с `/`): `/заметка`, `/задача`, `/идея`, `/человек`, `/цель`,
   `/дневник` — сохранить в библиотеку молча (первая строка — заголовок, остальное — тело); `/найти слова` —
   поиск; `/спор` — пусть поспорят сами. Кнопка 🔖 рядом с «отправить» — то же, что `/заметка`.
+
+## Первый запуск, история, бэкап и обновление из приложения
+
+- **Мастер первого запуска** открывается сам в пустой комнате без ключа (и всегда доступен из ⚙): ключ и
+  модель → как тебя зовут, пара строк о себе, город → кто живёт во дворе. Имя и «о себе» попадают в промпты
+  жителей (`PLAYER_NAME`, `PLAYER_BIO`): они знают, с кем говорят, и обращаются по имени.
+- **История чата**: в состояние приходит последняя страница, кнопка «показать раньше» подгружает дальше,
+  поиск по репликам и мыслям (иконка в строке настроения) с переходом к найденному. Свои сообщения можно
+  править и удалять, чужие — удалять из истории (наведи на реплику).
+- **Журнал вызовов LLM** во вкладке «Режиссёр»: модель, тип вызова, время, объём, ошибка — чтобы на free-tier
+  было видно, кто упал и почему. Обрывы стрима теперь допрашиваются обычным запросом, пустые ответы
+  (`null`) не попадают в чат, мысль не утекает в реплику.
+- **Бэкап**: ⚙ → «скачать .zip» (снимок базы `VACUUM INTO` + все вложения + manifest). «Восстановить из .zip»
+  подготавливает замену; она применяется при следующем запуске, старая база остаётся рядом как
+  `*.before-restore-*`.
+- **Обновление из приложения** (пока релизы на GitHub недоступны): если приложение запущено из git-клона,
+  ⚙ показывает, сколько коммитов в `origin/<ветка>` впереди, и кнопка «обновить и перезапустить» делает то же,
+  что ты руками: `git pull --ff-only` → `npm run build` во frontend → `cargo build --release` (cli) или
+  `tauri build --no-bundle` (десктоп) → подмена бинарника → перезапуск. Сборка идёт в отдельном окне
+  PowerShell/sh, лог в `~/.triad/update.log`, результат показывается баннером после старта. Если приложение
+  запущено не из клона, задай `TRIAD_REPO=путь к папке AIPLACE`. `API: POST /api/update/check`,
+  `POST /api/update/run`, `GET /api/update/status`.
 
 ## Двор: состав по ролям
 
@@ -371,6 +395,11 @@ Claude Desktop (`claude_desktop_config.json`): `{"mcpServers":{"triad":{"url":"h
 | `GET` | `/api/weather` · `/api/calendar` · `/api/calendar.ics` | погода · ближайшие события · ICS-фид библиотеки |
 | `POST` | `/api/tts` `{text, agent}` · `/api/stt` (multipart) · `/api/feeds/poll` | озвучить · распознать · опросить ленты |
 | `GET` | `/api/tools` | реестр инструментов агентов (MCP-схемы) |
+| `GET` | `/api/messages?before=&limit=` · `?around=` · `/api/messages/search?q=` | история чата страницами · вокруг id · поиск |
+| `PATCH/DELETE` | `/api/messages/{id}` | править свою реплику · удалить из истории |
+| `GET` | `/api/llm/log` | журнал последних вызовов LLM |
+| `GET` | `/api/backup.zip` · `POST/DELETE /api/restore` | бэкап комнаты · подготовить/отменить восстановление |
+| `POST` | `/api/update/check` · `/api/update/run` · `GET/DELETE /api/update/status` | обновление из исходников |
 | `GET`/`POST` | `/mcp` | MCP-сервер: JSON-RPC 2.0 `initialize` / `tools/list` / `tools/call`; auth — localhost или `Authorization: Bearer <MCP_TOKEN>` |
 | `POST` | `/api/schema` | (legacy) Mermaid-схема спора |
 | `POST` | `/api/contracts/{id}/resolve` `{status: done\|failed\|cancelled}` | закрыть слово из UI; done/failed запускают раунд реакции (поручитель первым) |
@@ -462,6 +491,8 @@ backend/src/
   pipeline.rs     субагенты Reader / Caster / Archivist / Psychologist
   types_seed.rs   встроенные типы объектов (Anytype-style) со схемами свойств
   roles.rs        пресеты ролей двора: характеры, цели, личные проекты
+  selfupdate.rs   обновление из git-клона: проверка, апдейтер-скрипт, статус
+  backup.rs       бэкап комнаты в zip и отложенное восстановление
   catalog.rs      каталог моделей OpenRouter для селектора
   tools.rs        MCP-реестр инструментов библиотеки: схемы, исполнитель, бриф «где ты»
   markdown.rs     frontmatter, [[wikilinks]], экспорт заметки, дописывание под заголовок
@@ -481,7 +512,7 @@ frontend/src/
   components/ ScenePanel · AgentStrip · AgentProfile · MessageBubble (чипы объектов) · Composer
               Markdown (GFM + [[wiki]] + чекбоксы) · MdEditor (панель, автодополнение [[, списки)
               PropsEditor (рейтинг, теги, мультивыбор…) · TypeEditor (конструктор типов) · Attachments (файлы, галерея)
-              YardModal (двор: жители, роли, модель и голос на персонажа) · AgentStrip · RelationsTriangle (N жителей по кругу)
+              Onboarding (первый запуск) · YardModal (двор: жители, роли, модель и голос на персонажа) · AgentStrip · RelationsTriangle (N жителей по кругу)
               SidePanel: Library (по типам, импорт .md и файлов) · NodePanel (заметка с автосохранением, файлы, автозаполнение) · Canvas (граф) ·
               ContractsPanel · DirectorInspector · RelationsTriangle · SettingsModal · ModelPicker
 .github/workflows/  ci.yml (build+clippy+test) · release.yml (теги v* → бинарники под 5 платформ)

@@ -282,6 +282,43 @@ export interface RoomState {
   attachments: Attachment[]
   world: string | null
   features: Features
+  source_update: SourceUpdate | null
+  update_status: UpdateStatus
+  message_count: number
+  restore_pending: string | null
+  player_name: string | null
+}
+
+export interface CallLog {
+  at: string
+  kind: string
+  model: string
+  ms: number
+  ok: boolean
+  error: string | null
+  prompt_chars: number
+  completion_chars: number
+}
+
+export interface SourceUpdate {
+  repo_dir: string
+  branch: string
+  head: string
+  remote: string
+  behind: number
+  ahead: number
+  dirty: boolean
+  commits: string[]
+  mode: string
+  exe: string
+  checked_at: string
+  error: string | null
+}
+
+export interface UpdateStatus {
+  last: string | null
+  log_tail: string
+  running: boolean
 }
 
 export interface UpdateInfo {
@@ -330,6 +367,7 @@ export type RoomEvent =
   | { type: 'relations'; relations: Relation[] }
   | { type: 'memories'; memories: AgentMemory[] }
   | { type: 'attachments'; attachments: Attachment[] }
+  | { type: 'message_deleted'; id: number }
   | { type: 'done' }
 
 export const AGENT_COLORS: Record<string, string> = {

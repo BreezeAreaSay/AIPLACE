@@ -172,6 +172,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         }
         None => None,
     };
+    let player = prompts::player_line(&app.llm_settings().await);
     let caster_in = prompts::CasterInput {
         trigger: trigger.as_str(),
         life_kind,
@@ -180,6 +181,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         calendar: calendar.as_deref(),
         news: &news,
         focus_files: focus_files.as_deref(),
+        player: player.as_deref(),
         agents: &fresh,
         recent: &messages,
         recent_speakers: &recent_speakers,

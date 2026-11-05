@@ -1,6 +1,6 @@
 [package]
 name = "triad-canvas-backend"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "Triad Canvas — autonomous multi-agent cyberpsychology room (Axum backend, dual-target: local / Telegram Mini Apps)"
 
@@ -26,6 +26,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 pdf-extract = "0.7"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 form_urlencoded = "1"
 clap = { version = "4", features = ["derive"] }
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }

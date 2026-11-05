@@ -8,6 +8,7 @@ import { AgentProfile } from './components/AgentProfile'
 import { SettingsModal } from './components/SettingsModal'
 import { TypeEditor } from './components/TypeEditor'
 import { YardModal } from './components/YardModal'
+import { Onboarding } from './components/Onboarding'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -33,7 +34,20 @@ export default function App() {
   const [libraryQuery, setLibraryQuery] = useState<{ q: string; nonce: number } | null>(null)
   const [typeEditor, setTypeEditor] = useState<{ open: boolean; id: string | null }>({ open: false, id: null })
   const [yardOpen, setYardOpen] = useState(false)
+  const [wizard, setWizard] = useState<boolean | null>(null)
   const isDesktop = useMedia('(min-width: 900px)')
+
+  useEffect(() => {
+    if (!room.state || wizard !== null) return
+    let seen = false
+    try {
+      seen = localStorage.getItem('triad.onboarded') === '1'
+    } catch {
+      /* ignore */
+    }
+    const st = room.state
+    setWizard(!seen && st.settings_editable && st.mock_mode && st.messages.filter((m) => m.sender_id === 'user').length === 0)
+  }, [room.state, wizard])
 
   const unread = useMemo(() => {
     const st = room.state
@@ -203,6 +217,11 @@ export default function App() {
       features={s.features}
       world={s.world}
       onYard={() => setYardOpen(true)}
+      messageCount={s.message_count}
+      onLoadOlder={room.loadOlder}
+      onLoadAround={room.loadAround}
+      onEditMessage={(id, c) => void room.editMessage(id, c)}
+      onDeleteMessage={(id) => void room.deleteMessage(id)}
       onAttach={async (files) => {
         const r = await room.uploadFiles(files)
         const fresh = await api.state()
@@ -226,6 +245,11 @@ export default function App() {
           {s.update && (
             <button onClick={() => setSettingsOpen(true)} className="hidden rounded border border-acid/60 px-1.5 py-0.5 text-acid sm:inline" title="Доступна новая версия">
               ↑ v{s.update.latest}
+            </button>
+          )}
+          {s.source_update && s.source_update.behind > 0 && (
+            <button onClick={() => setSettingsOpen(true)} className="rounded border border-acid/60 px-1.5 py-0.5 text-acid hover:bg-acid/10" title={`Новые коммиты в origin/${s.source_update.branch}: обновиться из приложения`}>
+              ↑ +{s.source_update.behind}
             </button>
           )}
           {s.mock_mode && (
@@ -257,6 +281,27 @@ export default function App() {
         </div>
       </header>
 
+      {s.restore_pending && (
+        <div className="flex items-center gap-2 border-b border-acid/40 bg-acid/10 px-3 py-1 text-xs text-acid">
+          Подготовлено восстановление из бэкапа — перезапусти приложение, чтобы применить.
+          <button onClick={() => void api.restoreCancel().then(() => room.refresh())} className="ml-auto text-[10px] underline">
+            отменить
+          </button>
+        </div>
+      )}
+      {s.update_status.last && !s.update_status.running && (
+        <div className={`flex items-center gap-2 border-b px-3 py-1 text-xs ${s.update_status.last.startsWith('ok') ? 'border-acid/40 bg-acid/10 text-acid' : 'border-magenta/40 bg-magenta/10 text-magenta'}`}>
+          {s.update_status.last.startsWith('ok') ? `Обновлено: ${s.update_status.last.split(' ')[1] ?? ''} · v${s.version}` : `Обновление не удалось: ${s.update_status.last.replace(/^fail\s*/, '')} (лог в ~/.triad/update.log)`}
+          <button
+            onClick={() => {
+              void api.updateAck().then(() => room.refresh())
+            }}
+            className="ml-auto text-[10px] underline"
+          >
+            ок
+          </button>
+        </div>
+      )}
       {room.error && (
         <div className="flex items-center gap-2 border-b border-magenta/40 bg-magenta/10 px-3 py-1 text-xs text-magenta">
           <AlertTriangle size={14} /> {room.error}
@@ -303,7 +348,30 @@ export default function App() {
           onClose={() => setProfileId(null)}
         />
       )}
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={() => void room.refresh()} />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => void room.refresh()}
+        sourceUpdate={s.source_update}
+        restorePending={s.restore_pending}
+        onWizard={() => {
+          setSettingsOpen(false)
+          setWizard(true)
+        }}
+      />
+      <Onboarding
+        open={wizard === true}
+        agents={s.agents}
+        hasKey={!s.mock_mode}
+        model={s.model}
+        onClose={() => setWizard(false)}
+        onDone={() => {
+          setWizard(false)
+          void room.refresh()
+        }}
+        onCreateAgent={room.createAgent}
+        onPatchAgent={room.patchAgent}
+      />
       <YardModal open={yardOpen} agents={s.agents} roomModel={s.model} onClose={() => setYardOpen(false)} onCreate={room.createAgent} onPatch={room.patchAgent} />
       <TypeEditor
         open={typeEditor.open}

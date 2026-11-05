@@ -2,6 +2,7 @@
 //! this server. Everything the UI needs is behind `/api/*` on a loopback (or public) port.
 
 pub mod agent_runner;
+pub mod backup;
 pub mod catalog;
 pub mod cli;
 pub mod config;
@@ -24,6 +25,7 @@ pub mod pipeline;
 pub mod prompts;
 pub mod roles;
 pub mod rooms;
+pub mod selfupdate;
 pub mod state;
 pub mod telegram;
 pub mod tools;
@@ -73,6 +75,7 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
         rooms,
         bot_username: Arc::new(RwLock::new(None)),
         catalog: Arc::new(catalog::Catalog::default()),
+        source_update: Arc::new(RwLock::new(None)),
         room_id: rooms::LOCAL_ROOM.to_string(),
         db: local.db,
         events: local.events,
@@ -85,6 +88,23 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
     }
     if cfg.heartbeat_minutes > 0 {
         tokio::spawn(heartbeat::run(state.clone()));
+    }
+    if cfg.update_check && selfupdate::find_repo_dir().is_some() {
+        let slot = state.source_update.clone();
+        tokio::spawn(async move {
+            loop {
+                match selfupdate::check().await {
+                    Ok(u) => {
+                        if u.behind > 0 {
+                            tracing::info!(behind = u.behind, "source update available → ⚙ в UI или POST /api/update/run");
+                        }
+                        *slot.write().await = Some(u);
+                    }
+                    Err(e) => tracing::debug!(error = %e, "source update check failed"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            }
+        });
     }
     if cfg.update_check {
         let slot = state.update.clone();

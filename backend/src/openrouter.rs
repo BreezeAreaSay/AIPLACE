@@ -49,6 +49,7 @@ pub struct ChatOpts {
 
 pub struct LlmClient {
     http: reqwest::Client,
+    log: std::sync::Mutex<std::collections::VecDeque<CallLog>>,
     settings: Arc<RwLock<LlmSettings>>,
     app_url: String,
     /// Calls made today (UTC day in `day`), for the daily budget and the health endpoint.
@@ -62,6 +63,21 @@ pub struct Usage {
     pub calls_today: u64,
     pub daily_budget: u64,
 }
+
+/// One LLM call as the UI's journal sees it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallLog {
+    pub at: String,
+    pub kind: String,
+    pub model: String,
+    pub ms: u64,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub prompt_chars: usize,
+    pub completion_chars: usize,
+}
+
+const LOG_CAP: usize = 200;
 
 #[derive(Deserialize)]
 struct Completion {
@@ -84,7 +100,31 @@ impl LlmClient {
             .connect_timeout(Duration::from_secs(15))
             .build()
             .context("cannot build http client")?;
-        Ok(Self { http, settings, app_url, calls_today: AtomicU64::new(0), day: AtomicI64::new(today()), daily_budget })
+        Ok(Self { http, settings, app_url, calls_today: AtomicU64::new(0), day: AtomicI64::new(today()), daily_budget, log: std::sync::Mutex::new(std::collections::VecDeque::new()) })
+    }
+
+    fn record(&self, kind: &str, model: &str, started: std::time::Instant, prompt_chars: usize, result: &Result<String>) {
+        let entry = CallLog {
+            at: chrono::Utc::now().to_rfc3339(),
+            kind: kind.into(),
+            model: model.into(),
+            ms: started.elapsed().as_millis() as u64,
+            ok: result.is_ok(),
+            error: result.as_ref().err().map(|e| crate::mermaid::truncate_chars(&e.to_string(), 300)),
+            prompt_chars,
+            completion_chars: result.as_ref().map(|t| t.chars().count()).unwrap_or(0),
+        };
+        if let Ok(mut l) = self.log.lock() {
+            l.push_back(entry);
+            while l.len() > LOG_CAP {
+                l.pop_front();
+            }
+        }
+    }
+
+    /// Newest-first journal of recent calls.
+    pub fn journal(&self) -> Vec<CallLog> {
+        self.log.lock().map(|l| l.iter().rev().cloned().collect()).unwrap_or_default()
     }
 
     pub fn usage(&self) -> Usage {
@@ -120,14 +160,21 @@ impl LlmClient {
         }
         self.roll_day();
         self.calls_today.fetch_add(1, Ordering::Relaxed);
-        let text = match self.call_with_retry(&key, model, &msgs, opts, opts.json_mode).await {
-            Ok(t) => t,
-            Err(e) if opts.json_mode && e.to_string().contains("openrouter 4") && !e.to_string().contains("openrouter 429") => {
-                tracing::warn!(error = %e, "json_mode request rejected → retrying without response_format");
-                self.call_with_retry(&key, model, &msgs, opts, false).await?
+        let started = std::time::Instant::now();
+        let prompt_chars: usize = msgs.iter().map(|m| m.content.chars().count()).sum();
+        let result: Result<String> = async {
+            match self.call_with_retry(&key, model, &msgs, opts, opts.json_mode).await {
+                Ok(t) => Ok(t),
+                Err(e) if opts.json_mode && e.to_string().contains("openrouter 4") && !e.to_string().contains("openrouter 429") => {
+                    tracing::warn!(error = %e, "json_mode request rejected → retrying without response_format");
+                    self.call_with_retry(&key, model, &msgs, opts, false).await
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => return Err(e),
-        };
+        }
+        .await;
+        self.record(if opts.json_mode { "json" } else { "chat" }, model, started, prompt_chars, &result);
+        let text = result?;
         Ok(match &opts.prefill {
             Some(p) if !text.trim_start().starts_with(p.as_str()) => format!("{p}{text}"),
             _ => text,
@@ -199,7 +246,11 @@ impl LlmClient {
             .and_then(|c| c.message)
             .and_then(|m| m.content)
             .ok_or_else(|| anyhow!("openrouter: empty choices"))?;
-        Ok(content_to_text(content))
+        let text = content_to_text(content);
+        if text.trim().is_empty() {
+            bail!("openrouter: empty choices (null content)");
+        }
+        Ok(text)
     }
 }
 
@@ -228,6 +279,8 @@ impl LlmClient {
         }
         self.roll_day();
         self.calls_today.fetch_add(1, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let prompt_chars: usize = msgs.iter().map(|m| m.content.chars().count()).sum();
         let mut body = json!({
             "model": model,
             "messages": msgs,
@@ -264,8 +317,17 @@ impl LlmClient {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut full = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("stream read")?;
+        let mut done = false;
+        let mut finish: Option<String> = None;
+        let mut broke: Option<String> = None;
+        'outer: while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    broke = Some(e.to_string());
+                    break;
+                }
+            };
             buf.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(pos) = buf.find('\n') {
                 let line = buf[..pos].trim().to_string();
@@ -273,9 +335,17 @@ impl LlmClient {
                 let Some(data) = line.strip_prefix("data:") else { continue };
                 let data = data.trim();
                 if data == "[DONE]" {
-                    break;
+                    done = true;
+                    break 'outer;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+                if let Some(err) = v.get("error") {
+                    broke = Some(err.to_string());
+                    break 'outer;
+                }
+                if let Some(f) = v.pointer("/choices/0/finish_reason").and_then(|f| f.as_str()) {
+                    finish = Some(f.to_string());
+                }
                 if let Some(delta) = v.pointer("/choices/0/delta/content").and_then(|c| c.as_str()) {
                     if !delta.is_empty() {
                         full.push_str(delta);
@@ -283,6 +353,22 @@ impl LlmClient {
                     }
                 }
             }
+        }
+        // A stream that broke, never finished, or finished "stop" after a few characters is a
+        // dropped connection, not a line: get the line again without streaming (with retries).
+        let suspicious = broke.is_some() || (!done && finish.is_none()) || (full.trim().chars().count() < 12 && finish.as_deref() != Some("length"));
+        self.record("stream", model, started, prompt_chars, &if suspicious { Err(anyhow!("stream dropped after {} chars ({})", full.chars().count(), broke.clone().unwrap_or_else(|| "no [DONE]".into()))) } else { Ok(full.clone()) });
+        if suspicious {
+            tracing::warn!(chars = full.chars().count(), done, finish = ?finish, error = ?broke, "stream dropped → plain call");
+            let text = self.chat(model, messages, opts).await?;
+            // the UI saw a partial stream: send the remainder so the bubble ends on the real text
+            if text.starts_with(full.trim_end()) && !full.is_empty() {
+                on_delta(&text[full.trim_end().len()..]);
+            } else {
+                on_delta("\n");
+                on_delta(&text);
+            }
+            return Ok(text);
         }
         if full.trim().is_empty() {
             bail!("empty stream");
@@ -332,6 +418,19 @@ impl LlmClient {
         if let Some(p) = opts.frequency_penalty {
             body["frequency_penalty"] = json!(p);
         }
+        let started = std::time::Instant::now();
+        let prompt_chars: usize = history.iter().filter_map(|m| m.get("content").and_then(|c| c.as_str())).map(|c| c.chars().count()).sum();
+        let r = self.tools_step_inner(&key, &body).await;
+        let summary: Result<String> = match &r {
+            Ok(ToolTurn::Text(t)) => Ok(t.clone()),
+            Ok(ToolTurn::Calls { calls, .. }) => Ok(format!("tools: {}", calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(","))),
+            Err(e) => Err(anyhow!("{e}")),
+        };
+        self.record("tools", model, started, prompt_chars, &summary);
+        r
+    }
+
+    async fn tools_step_inner(&self, key: &str, body: &Value) -> Result<ToolTurn> {
         let mut last_err = None;
         for (i, wait) in [0u64, 3, 8].iter().enumerate() {
             if *wait > 0 {
@@ -340,10 +439,10 @@ impl LlmClient {
             let resp = self
                 .http
                 .post("https://openrouter.ai/api/v1/chat/completions")
-                .bearer_auth(&key)
+                .bearer_auth(key)
                 .header("HTTP-Referer", &self.app_url)
                 .header("X-Title", "Triad Canvas")
-                .json(&body)
+                .json(body)
                 .send()
                 .await;
             let resp = match resp {
@@ -400,6 +499,7 @@ fn content_to_text(v: Value) -> String {
             .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
             .collect::<Vec<_>>()
             .join(""),
+        Value::Null => String::new(),
         other => other.to_string(),
     }
 }

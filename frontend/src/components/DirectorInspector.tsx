@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { BookOpen, ChevronDown, ChevronRight } from 'lucide-react'
-import type { Agent, AgentMemory, DirectorLogEntry, Relation, RoomEventRecord } from '../types'
+import { useEffect, useState } from 'react'
+import { BookOpen, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
+import type { Agent, AgentMemory, CallLog, DirectorLogEntry, Relation, RoomEventRecord } from '../types'
+import { api } from '../api'
 import { AGENT_COLORS } from '../types'
 import { RelationsTriangle } from './RelationsTriangle'
 
@@ -11,6 +12,45 @@ interface Props {
   relations: Relation[]
   memories: AgentMemory[]
   events: RoomEventRecord[]
+}
+
+/** Last LLM calls: what model, how long, what failed — the thing you need on a free tier. */
+function LlmJournal() {
+  const [log, setLog] = useState<CallLog[]>([])
+  const [open, setOpen] = useState(false)
+  const load = () => void api.llmLog().then(setLog).catch(() => setLog([]))
+  useEffect(() => {
+    if (open) load()
+  }, [open])
+  const fails = log.filter((l) => !l.ok).length
+  return (
+    <section>
+      <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500 hover:text-zinc-300">
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />} журнал вызовов LLM
+        {log.length > 0 && <span className="ml-1 normal-case tracking-normal text-zinc-600">· {log.length}{fails ? ` · ошибок ${fails}` : ''}</span>}
+        {open && (
+          <span onClick={(e) => { e.stopPropagation(); load() }} className="ml-auto text-zinc-500 hover:text-acid" title="Обновить">
+            <RefreshCw size={11} />
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-1.5 max-h-72 overflow-y-auto rounded border border-line">
+          {log.length === 0 && <div className="px-2 py-2 font-mono text-[10px] text-zinc-600">пока ничего (журнал в памяти процесса)</div>}
+          {log.map((l, i) => (
+            <div key={i} className={`flex flex-wrap items-baseline gap-x-2 border-b border-line/50 px-2 py-1 font-mono text-[10px] ${l.ok ? 'text-zinc-400' : 'text-magenta'}`}>
+              <span className="text-zinc-600">{new Date(l.at).toLocaleTimeString('ru-RU')}</span>
+              <span className="text-zinc-300">{l.kind}</span>
+              <span className="truncate text-zinc-500" title={l.model}>{l.model.split('/').pop()}</span>
+              <span>{(l.ms / 1000).toFixed(1)}с</span>
+              <span className="text-zinc-600">{l.prompt_chars}→{l.completion_chars}</span>
+              {l.error && <span className="w-full truncate" title={l.error}>{l.error}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
 }
 
 function eventLine(e: RoomEventRecord, agents: Agent[]): string {
@@ -76,6 +116,7 @@ function fmt(n: number) {
 export function DirectorInspector({ entry, agents, directorModel, relations, memories, events }: Props) {
   const scene = (
     <>
+      <LlmJournal />
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">отношения</h4>

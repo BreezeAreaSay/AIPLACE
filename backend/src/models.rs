@@ -600,6 +600,14 @@ pub struct RoomState {
     pub usage: crate::openrouter::Usage,
     pub heartbeat_minutes: u64,
     pub attachments: Vec<Attachment>,
+    /// Git-based update availability (running from a clone).
+    pub source_update: Option<crate::selfupdate::SourceUpdate>,
+    /// Total lines in the room (the state carries only the newest page).
+    pub message_count: i64,
+    /// A staged restore waiting for a restart (RFC3339 of staging), if any.
+    pub restore_pending: Option<String>,
+    pub player_name: Option<String>,
+    pub update_status: crate::selfupdate::UpdateStatus,
     /// "За окном": weather + local time line shared with the Caster, or None when not configured.
     pub world: Option<String>,
     pub features: Features,
@@ -691,5 +699,6 @@ pub enum RoomEvent {
     Relations { relations: Vec<Relation> },
     Memories { memories: Vec<AgentMemory> },
     Attachments { attachments: Vec<Attachment> },
+    MessageDeleted { id: i64 },
     Done,
 }

@@ -89,8 +89,29 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
             <X size={16} />
           </button>
         </div>
-        <div className="flex min-h-0 flex-1">
-          <aside className="w-48 shrink-0 overflow-y-auto border-r border-line">
+        <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+          <div className="flex items-center gap-1 border-b border-line px-2 py-1.5 sm:hidden">
+            <select value={sel ?? ''} onChange={(e) => setSel(e.target.value || null)} className={`${inp} flex-1`}>
+              {types.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.icon} {x.name} · {counts[x.id] ?? 0}
+                </option>
+              ))}
+            </select>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newName.trim()) {
+                  onCreate(newName.trim())
+                  setNewName('')
+                }
+              }}
+              placeholder="новый…"
+              className={`${inp} w-24`}
+            />
+          </div>
+          <aside className="hidden w-48 shrink-0 overflow-y-auto border-r border-line sm:block">
             {types.map((x) => (
               <button key={x.id} onClick={() => setSel(x.id)} className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-zinc-900 ${sel === x.id ? 'bg-zinc-900 text-zinc-100' : 'text-zinc-400'}`}>
                 <span style={{ color: x.color }}>{x.icon}</span>
@@ -127,7 +148,7 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
           </aside>
           {t ? (
             <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
-              <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
+              <div className="grid grid-cols-1 items-center gap-x-3 gap-y-2 sm:grid-cols-[auto_1fr]">
                 <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">название</span>
                 <input value={name} onChange={(e) => mark(setName)(e.target.value)} className={inp} />
                 <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">иконка</span>
@@ -163,7 +184,7 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
                 </div>
                 <div className="space-y-1">
                   {props.map((p, i) => (
-                    <div key={i} className="grid grid-cols-[1fr_1fr_120px_auto] items-center gap-1 rounded border border-line/60 bg-panel/40 p-1">
+                    <div key={i} className="grid grid-cols-[1fr_auto] items-center gap-1 rounded border border-line/60 bg-panel/40 p-1 sm:grid-cols-[1fr_1fr_120px_auto]">
                       <input value={p.label} onChange={(e) => setProp(i, { label: e.target.value, key: p.key || slug(e.target.value) })} placeholder="Подпись" className={inp} />
                       <input value={p.key} onChange={(e) => setProp(i, { key: e.target.value })} placeholder="key" className={`${inp} font-mono`} />
                       <select value={p.kind} onChange={(e) => setProp(i, { kind: e.target.value })} className={inp}>
@@ -192,10 +213,10 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
                         </button>
                       </div>
                       {(p.kind === 'select' || p.kind === 'multiselect') && (
-                        <input value={(p.options ?? []).join(', ')} onChange={(e) => setProp(i, { options: e.target.value.split(',').map((s) => s.trim()) })} placeholder="варианты через запятую" className={`${inp} col-span-4`} />
+                        <input value={(p.options ?? []).join(', ')} onChange={(e) => setProp(i, { options: e.target.value.split(',').map((s) => s.trim()) })} placeholder="варианты через запятую" className={`${inp} col-span-2 sm:col-span-4`} />
                       )}
                       {p.kind === 'relation' && (
-                        <select value={p.to ?? ''} onChange={(e) => setProp(i, { to: e.target.value || undefined })} className={`${inp} col-span-4`}>
+                        <select value={p.to ?? ''} onChange={(e) => setProp(i, { to: e.target.value || undefined })} className={`${inp} col-span-2 sm:col-span-4`}>
                           <option value="">любой объект</option>
                           {types.map((x) => (
                             <option key={x.id} value={x.id}>
@@ -205,7 +226,7 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
                         </select>
                       )}
                       {p.kind === 'rating' && (
-                        <label className="col-span-4 flex items-center gap-2 font-mono text-[10px] text-zinc-500">
+                        <label className="col-span-2 flex items-center gap-2 font-mono text-[10px] text-zinc-500 sm:col-span-4">
                           максимум
                           <input type="number" min={2} max={10} value={p.max ?? 5} onChange={(e) => setProp(i, { max: Number(e.target.value) })} className={`${inp} w-16`} />
                         </label>

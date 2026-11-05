@@ -1,4 +1,4 @@
-import type { Agent, Attachment, GraphNode, Message, ObjectType, RolePreset, RoomEvent, RoomState, SettingsPatch, SettingsView } from './types'
+import type { Agent, Attachment, CallLog, GraphNode, Message, ObjectType, RolePreset, RoomEvent, RoomState, SettingsPatch, SettingsView, SourceUpdate, UpdateStatus } from './types'
 import { initData } from './telegram'
 
 // Single switch between local dev (proxy) and a remote VPS behind Telegram Mini Apps.
@@ -117,6 +117,19 @@ export const api = {
   stt: (blob: Blob) => upload<{ text: string }>('/api/stt', [new File([blob], 'voice.webm', { type: blob.type || 'audio/webm' })]),
   pollFeeds: () => request<{ created: number }>('/api/feeds/poll', { method: 'POST', body: '{}' }),
   roles: () => request<RolePreset[]>('/api/roles'),
+  olderMessages: (before: number, limit = 60) => request<Message[]>(`/api/messages?before=${before}&limit=${limit}`),
+  messagesAround: (id: number, limit = 40) => request<Message[]>(`/api/messages?around=${id}&limit=${limit}`),
+  searchMessages: (q: string) => request<Message[]>(`/api/messages/search?q=${encodeURIComponent(q)}`),
+  editMessage: (id: number, content: string) => request<Message>(`/api/messages/${id}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
+  deleteMessage: (id: number) => request<void>(`/api/messages/${id}`, { method: 'DELETE' }),
+  llmLog: () => request<CallLog[]>('/api/llm/log'),
+  backupUrl: () => `${API_BASE}/api/backup.zip`,
+  restore: (file: File) => upload<{ staged: boolean; manifest: Record<string, unknown>; message: string }>('/api/restore', [file]),
+  restoreCancel: () => request<void>('/api/restore', { method: 'DELETE' }),
+  updateCheck: () => request<SourceUpdate>('/api/update/check', { method: 'POST', body: '{}' }),
+  updateRun: () => request<{ ok: boolean; log: string; message: string }>('/api/update/run', { method: 'POST', body: '{}' }),
+  updateStatus: () => request<UpdateStatus>('/api/update/status'),
+  updateAck: () => request<void>('/api/update/status', { method: 'DELETE' }),
   createAgent: (body: { role?: string; name?: string; archetype?: string; system_core?: string; color?: string; glyph?: string; model?: string; voice?: string; agenda?: string }) =>
     request<Agent[]>('/api/agents', { method: 'POST', body: JSON.stringify(body) }),
   patchAgent: (id: string, body: { name?: string; archetype?: string; system_core?: string; color?: string; glyph?: string; model?: string; voice?: string; agenda?: string; active?: boolean; revive?: boolean }) =>

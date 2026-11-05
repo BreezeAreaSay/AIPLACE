@@ -597,6 +597,57 @@ pub async fn recent_messages(pool: &Db, limit: usize) -> Result<Vec<Message>> {
     Ok(rows)
 }
 
+/// Page backwards: messages with id < before, newest first → returned oldest first.
+pub async fn messages_before(pool: &Db, before: i64, limit: usize) -> Result<Vec<Message>> {
+    let mut rows = sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?")
+        .bind(before)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Messages around an id (for jumping to a search hit).
+pub async fn messages_around(pool: &Db, id: i64, span: usize) -> Result<Vec<Message>> {
+    Ok(sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id BETWEEN ? AND ? ORDER BY id")
+        .bind(id - span as i64)
+        .bind(id + span as i64)
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn search_messages(pool: &Db, q: &str, limit: usize) -> Result<Vec<Message>> {
+    let pat = format!("%{}%", q.trim().to_lowercase());
+    let mut rows = sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE lower(content) LIKE ? OR lower(COALESCE(ego_thought,'')) LIKE ? ORDER BY id DESC LIMIT ?")
+        .bind(&pat)
+        .bind(&pat)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+pub async fn message_count(pool: &Db) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(pool).await?)
+}
+
+pub async fn get_message(pool: &Db, id: i64) -> Result<Option<Message>> {
+    Ok(sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = ?").bind(id).fetch_optional(pool).await?)
+}
+
+pub async fn update_message_content(pool: &Db, id: i64, content: &str) -> Result<()> {
+    sqlx::query("UPDATE messages SET content = ? WHERE id = ?").bind(content).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn delete_message(pool: &Db, id: i64) -> Result<bool> {
+    sqlx::query("DELETE FROM mentions WHERE message_id = ?").bind(id).execute(pool).await?;
+    let r = sqlx::query("DELETE FROM messages WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(r.rows_affected() > 0)
+}
+
 pub async fn set_message_actions(pool: &Db, id: i64, actions: &[crate::models::ActionRecord]) -> Result<()> {
     sqlx::query("UPDATE messages SET actions = ? WHERE id = ?")
         .bind(serde_json::to_string(actions)?)
