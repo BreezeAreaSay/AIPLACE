@@ -565,3 +565,261 @@ pub fn memory_user(agent: &Agent, previous: &str, new_messages: &[Message], agen
         agent.name
     )
 }
+
+// ───────────────────────────── Sub-agent pipeline (small prompts, small JSON) ─────────────────────────────
+
+pub const READER_MARK: &str = "[STAGE-READER]";
+pub const CASTER_MARK: &str = "[STAGE-CASTER]";
+pub const CARTOGRAPHER_MARK: &str = "[STAGE-CARTOGRAPHER]";
+pub const PSYCHOLOGIST_MARK: &str = "[STAGE-PSYCHOLOGIST]";
+
+fn short_agents(agents: &[Agent]) -> String {
+    agents
+        .iter()
+        .map(|a| {
+            format!(
+                "- {} ({}): {}{}",
+                a.id,
+                a.name.split(' ').next().unwrap_or(&a.name),
+                if a.is_alive() { "жив" } else { "МЁРТВ" },
+                if a.inner_state.is_empty() { String::new() } else { format!("; сейчас: {}", a.inner_state) }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn reader_system() -> String {
+    format!(
+        "{READER_MARK} Ты — Читатель комнаты. Твоя единственная работа: понять последнюю реплику игрока и вернуть маленький JSON. Персонажи: physicist (физик: любит цифры, системы, парадоксы), lit_teacher (литератор: любит драму, рефлексию, признания), graffiti (граффитист: любит дерзость, визуальные идеи, быстрые действия).\n\
+Правила: promises — ТОЛЬКО если игрок сам обещает сам что-то сделать (просьбы к персонажам и вопросы — не обещания); deadline — абсолютный ISO-8601 UTC от текущего времени или null; contract_reports — если игрок отчитывается по открытому слову (done | failed), мутный отчёт — не включай. feeds: насколько реплика кормит профиль каждого, от -2 (нытьё/пустота) до 2 (прямое попадание).\n\
+Отвечай ТОЛЬКО JSON: {{\"topic\": \"2-5 слов\", \"player_intent\": \"одна фраза\", \"question_to_agents\": true/false, \"feeds\": {{\"physicist\": 0, \"lit_teacher\": 0, \"graffiti\": 0}}, \"promises\": [{{\"title\": \"…\", \"deadline\": \"2026-11-07T20:00:00Z\"}}], \"contract_reports\": [{{\"id\": 3, \"status\": \"done\"}}], \"node_refs\": [\"id_узла\"]}}"
+    )
+}
+
+pub fn reader_user(now: &str, last_user: &str, recent: &[Message], agents: &[Agent], contracts: &[Contract], nodes: &[GraphNode]) -> String {
+    let board = nodes.iter().rev().take(15).map(|n| format!("{} «{}»", n.id, n.label)).collect::<Vec<_>>().join("; ");
+    format!(
+        "СЕЙЧАС (UTC): {now}\nОТКРЫТЫЕ СЛОВА ИГРОКА:\n{}\nУЗЛЫ ДОСКИ: {}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}\n\nРЕПЛИКА ИГРОКА: «{last_user}»",
+        contracts_summary(contracts, agents),
+        if board.is_empty() { "(пусто)".to_string() } else { board },
+        transcript(recent, agents, false)
+    )
+}
+
+pub fn caster_system() -> String {
+    format!(
+        "{CASTER_MARK} Ты — Постановщик сцены. Твоя работа: решить, кто говорит в этом раунде, кому и как, и дать каждому говорящему одну конкретную скрытую цель. Верни маленький JSON.\n\
+Правила живого диалога: 1–3 бита; реплики цепляются за конкретные слова; на прямой вопрос игрока кто-то ОТВЕЧАЕТ по существу (уклоняться можно одному, не всем); разные формы — одно слово, перебивка, уступка, молчание, развёрнуто; тот, кто говорил два раунда подряд, молчит, если к нему не обратились; второй бит реагирует на первый, адресат второго бита — обычно первый говорящий. У персонажей есть свои желания — на вопрос «чего вы хотите» они хотят конкретного.\n\
+move — один из: ответ | атака | уступка | перебивка | согласие | уточнение | признание | союз | игнор_игрока | молчание | желание | предложение | насмешка | защита.\n\
+Отвечай ТОЛЬКО JSON: {{\"room_mood\": \"2-3 слова\", \"note\": \"что ставишь и почему, одна фраза\", \"scene\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"move\": \"…\", \"intent\": \"что именно делает, со ссылкой на фразу\", \"delivery\": \"длина, темп, тон\"}}], \"agendas\": {{\"id\": \"скрытая цель говорящего на этот ход\"}}}}"
+    )
+}
+
+pub struct CasterInput<'a> {
+    pub trigger: &'a str,
+    pub agents: &'a [Agent],
+    pub recent: &'a [Message],
+    pub recent_speakers: &'a [String],
+    pub reader: &'a serde_json::Value,
+    pub relations: &'a [Relation],
+    pub events: &'a [RoomEventRecord],
+    pub focus: Option<(&'a GraphNode, &'a str)>,
+    pub memories: &'a [AgentMemory],
+}
+
+pub fn caster_user(i: &CasterInput) -> String {
+    let trigger = match i.trigger {
+        "tick" => "АВТОНОМНЫЙ ТИК: игрок молчит, персонажи цепляются друг за друга, развивают доску и свои желания.".to_string(),
+        "event" => "СОБЫТИЕ: игрок закрыл или нарушил слово — поручитель реагирует первым.".to_string(),
+        "node" => {
+            let (n, mode) = i.focus.expect("focus");
+            format!("ИГРОК ТКНУЛ В УЗЕЛ «{}» ({}): режим {}. Сцена вокруг этого узла.", n.label, n.id, match mode { "develop" => "развить", "dispute" => "оспорить", _ => "обсудить" })
+        }
+        _ => "НОВАЯ РЕПЛИКА ИГРОКА.".to_string(),
+    };
+    let diaries = i
+        .memories
+        .iter()
+        .map(|m| format!("- {}: {}", m.agent_id, crate::mermaid::truncate_chars(&m.summary, 240)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{trigger}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ: {}\nГОВОРИЛИ В ПОСЛЕДНИХ РАУНДАХ (свежие первыми): {}\nПЕРСОНАЖИ:\n{}\nОТНОШЕНИЯ:\n{}\nСОБЫТИЯ:\n{}\nИЗ ДНЕВНИКОВ:\n{}\nПОСЛЕДНИЕ РЕПЛИКИ:\n{}",
+        i.reader,
+        if i.recent_speakers.is_empty() { "никто".to_string() } else { i.recent_speakers.join(", ") },
+        short_agents(i.agents),
+        relations_summary(i.relations, i.agents),
+        events_summary(i.events, i.agents),
+        if diaries.is_empty() { "(пусто)".to_string() } else { diaries },
+        transcript(i.recent, i.agents, false)
+    )
+}
+
+pub fn cartographer_system() -> String {
+    format!(
+        "{CARTOGRAPHER_MARK} Ты — Картограф доски. Твоя работа: вытащить из последних реплик сухой остаток в узлы и связи. Верни маленький JSON.\n\
+Правила: 0–3 новых узла (id латиницей snake_case, label 2–6 слов, body 1–3 предложения сути в markdown, type: concept | task | conflict | insight, author — чья это мысль: physicist | lit_teacher | graffiti | user); 0–4 связи между новыми или существующими id; не дублируй существующие узлы — ссылайся на их id; node_updates — уточнить существующий узел (новое body или label). Если ничего ценного не прозвучало — пустые списки.\n\
+Отвечай ТОЛЬКО JSON: {{\"nodes\": [{{\"id\": \"…\", \"label\": \"…\", \"body\": \"…\", \"type\": \"concept\", \"author\": \"user\"}}], \"edges\": [{{\"from\": \"id\", \"to\": \"id\", \"label\": \"глагол\", \"author\": \"id\"}}], \"node_updates\": [{{\"id\": \"…\", \"body\": \"…\"}}]}}"
+    )
+}
+
+pub fn cartographer_user(round: &[Message], agents: &[Agent], nodes: &[GraphNode], edges: &[GraphEdge], focus: Option<&GraphNode>) -> String {
+    format!(
+        "СУЩЕСТВУЮЩАЯ ДОСКА:\n{}\n{}\nРЕПЛИКИ ЭТОГО РАУНДА:\n{}",
+        graph_summary(nodes, edges),
+        focus.map(|n| format!("ФОКУС-УЗЕЛ: {} «{}» — изменения в первую очередь вокруг него.", n.id, n.label)).unwrap_or_default(),
+        transcript(round, agents, false)
+    )
+}
+
+pub fn psychologist_system() -> String {
+    format!(
+        "{PSYCHOLOGIST_MARK} Ты — Психолог комнаты. После раунда ты обновляешь внутреннее состояние трёх персонажей. Верни маленький JSON.\n\
+inner_states: ОДНА строка в характере каждого живого персонажа о его состоянии сейчас (усталость, азарт, обида, голод по своей пище) — без цифр и без слов «HP»/«дофамин».\n\
+agendas: новая конкретная скрытая цель КАЖДОМУ живому на следующий раунд — отличная от прошлой, не повторяющая провалившуюся тактику; может быть про его собственное желание в комнате.\n\
+stat_deltas: по подсказке feeds Читателя и тому, как прошёл раунд: dopamine ±0..15, hp ±0..8, respect_user ±0..10 (нули, если ничего не изменилось).\n\
+relation_deltas: 0–3 пары, ±3..±15 с причиной (поддержал → плюс, высмеял → минус, сговор против игрока → плюс друг к другу).\n\
+Отвечай ТОЛЬКО JSON: {{\"inner_states\": {{\"id\": \"…\"}}, \"agendas\": {{\"id\": \"…\"}}, \"stat_deltas\": {{\"id\": {{\"hp\": 0, \"dopamine\": 0, \"respect_user\": 0, \"reason\": \"…\"}}}}, \"relation_deltas\": [{{\"a\": \"id\", \"b\": \"id\", \"delta\": 0, \"label\": \"…\"}}]}}"
+    )
+}
+
+pub fn psychologist_user(round: &[Message], agents: &[Agent], relations: &[Relation], reader: &serde_json::Value, events: &[RoomEventRecord]) -> String {
+    let goals = agents
+        .iter()
+        .filter(|a| a.is_alive())
+        .map(|a| format!("- {}: прошлая цель «{}»; уважение к игроку {}", a.id, a.current_agenda, a.respect_user))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "ПЕРСОНАЖИ:\n{}\n{}\nОТНОШЕНИЯ:\n{}\nЧТО ПОНЯЛ ЧИТАТЕЛЬ (feeds и пр.): {}\nСОБЫТИЯ: \n{}\nРЕПЛИКИ ЭТОГО РАУНДА:\n{}",
+        short_agents(agents),
+        goals,
+        relations_summary(relations, agents),
+        reader,
+        events_summary(events, agents),
+        transcript(round, agents, true)
+    )
+}
+
+// ───────────────────────────── Agent pipeline: think → speak → note ─────────────────────────────
+
+fn beat_text(ctx: &AgentContext, all: &[Agent]) -> String {
+    match ctx.beat {
+        Some(b) => {
+            let to = match b.addressee.as_deref() {
+                Some("user") | None => "игроку".to_string(),
+                Some("room") => "всей комнате".to_string(),
+                Some(id) => sender_name(id, all),
+            };
+            format!(
+                "кому: {to}; ход: {}; намерение: {}; подача: {}",
+                b.r#move.as_deref().unwrap_or("ответ"),
+                b.intent.as_deref().unwrap_or("отреагировать на последнюю реплику"),
+                b.delivery.as_deref().unwrap_or("как чувствуешь")
+            )
+        }
+        None => "кому: игроку; ход: ответ; подача: как чувствуешь".to_string(),
+    }
+}
+
+fn short_state(a: &Agent) -> String {
+    if !a.inner_state.trim().is_empty() {
+        return a.inner_state.clone();
+    }
+    match (a.hp, a.dopamine) {
+        (hp, _) if hp <= 20 => "на грани, сил почти нет, резок".into(),
+        (_, d) if d <= 20 => "голоден до своей пищи, всё раздражает".into(),
+        (_, d) if d >= 80 => "на подъёме, лезет в разговор первым".into(),
+        _ => "в рабочем состоянии".into(),
+    }
+}
+
+pub fn think_system(ctx: &AgentContext) -> String {
+    let a = ctx.agent;
+    format!(
+        "{core}\n\nСейчас ты только ДУМАЕШЬ, не говоришь. Напиши честную внутреннюю мысль от первого лица (1–3 предложения): что ты на самом деле думаешь о последней реплике и собеседнике и что сделаешь. Затем отдельной последней строкой: ЦЕПЛЯЮСЬ ЗА: «точная фраза собеседника из стенограммы, за которую ты зацепишься» (3–8 слов). Не упоминай HP, дофамин, статы, повестку. Не повторяй свои прошлые мысли.\nТвоё состояние: {state}. Скрытая цель на этот ход: «{agenda}». Твой ход в сцене — {beat}.",
+        core = a.system_core,
+        state = short_state(a),
+        agenda = a.current_agenda,
+        beat = beat_text(ctx, &std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect::<Vec<_>>())
+    )
+}
+
+pub fn think_user(ctx: &AgentContext, all: &[Agent]) -> String {
+    let recent: Vec<Message> = ctx.messages.iter().rev().take(8).rev().cloned().collect();
+    let scene = if ctx.scene_so_far.is_empty() {
+        String::new()
+    } else {
+        format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
+    };
+    let memory = ctx.memory.filter(|m| !m.is_empty()).map(|m| format!("\nИЗ ТВОЕГО ДНЕВНИКА: {}", crate::mermaid::truncate_chars(m, 500))).unwrap_or_default();
+    let focus = ctx.focus.map(|(n, _)| format!("\nРЕЧЬ ИДЁТ ОБ УЗЛЕ ДОСКИ «{}»: {}", n.label, crate::mermaid::truncate_chars(&n.body, 300))).unwrap_or_default();
+    format!("СТЕНОГРАММА:\n{}{scene}{memory}{focus}\n\nТвоя мысль, {}:", transcript(&recent, all, false), ctx.agent.name)
+}
+
+/// Split the think-stage output into (thought, hook phrase).
+pub fn split_thought(raw: &str) -> (String, String) {
+    let text = raw.trim().trim_start_matches(EGO_PREFILL).trim_end_matches("</ego_thought>").trim();
+    let mut thought = Vec::new();
+    let mut hook = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let up = l.to_uppercase();
+        if up.starts_with("ЦЕПЛЯЮСЬ ЗА") {
+            hook = l.split_once(':').map(|(_, v)| v).unwrap_or("").trim().trim_matches(|c| c == '«' || c == '»' || c == '"').to_string();
+        } else if !l.is_empty() {
+            thought.push(l);
+        }
+    }
+    (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120))
+}
+
+pub fn speak_system(ctx: &AgentContext) -> String {
+    let a = ctx.agent;
+    let all: Vec<Agent> = std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect();
+    let others = ctx.others.iter().map(|o| format!("{} — {}", o.name, if o.is_alive() { relations_for(&o.id, ctx.relations, &all).split(';').next().unwrap_or("").to_string() } else { "мёртв".into() })).collect::<Vec<_>>().join("; ");
+    let dying = if ctx.dying { "\nЭТО ТВОЯ ПОСЛЕДНЯЯ РЕПЛИКА: ты умираешь прямо сейчас — предсмертные слова в характере." } else { "" };
+    format!(
+        "{core}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная (одно слово, перебивка, абзац — как требует подача), не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\nОтвечай ТОЛЬКО репликой, без имени и без пояснений, на русском.",
+        core = a.system_core,
+        forbidden = FORBIDDEN_PHRASES,
+        state = short_state(a),
+        beat = beat_text(ctx, &all),
+    )
+}
+
+pub fn speak_user(ctx: &AgentContext, all: &[Agent], thought: &str, hook: &str) -> String {
+    let recent: Vec<Message> = ctx.messages.iter().rev().take(6).rev().cloned().collect();
+    let own = if ctx.own_recent.is_empty() {
+        String::new()
+    } else {
+        format!("\nТЫ УЖЕ ГОВОРИЛ (не повторяй формулировки и приёмы):\n{}", ctx.own_recent.iter().take(3).map(|l| format!("— {}", crate::mermaid::truncate_chars(l, 160))).collect::<Vec<_>>().join("\n"))
+    };
+    let scene = if ctx.scene_so_far.is_empty() {
+        String::new()
+    } else {
+        format!("\nУЖЕ СКАЗАНО В ЭТОМ РАУНДЕ:\n{}", ctx.scene_so_far.iter().map(|(w, t)| format!("[{w}]: {t}")).collect::<Vec<_>>().join("\n"))
+    };
+    format!(
+        "СТЕНОГРАММА:\n{}{scene}{own}\n\nТВОЯ МЫСЛЬ: {}\nЦЕПЛЯЕШЬСЯ ЗА: «{}»\n\nТвоя реплика:",
+        transcript(&recent, all, false),
+        if thought.is_empty() { "(без мысли — говори с ходу)" } else { thought },
+        if hook.is_empty() { "последняя реплика" } else { hook }
+    )
+}
+
+pub fn note_system(ctx: &AgentContext) -> String {
+    let (n, notes) = ctx.focus.expect("note stage needs focus");
+    format!(
+        "{core}\n\nТы оставляешь ПОМЕТКУ на узле доски «{}» (тело: {}). Уже есть пометки:\n{}\nНапиши одну-две строки в своём голосе: твоё отношение, что добавить, где слабое место. Без вступлений. Если добавить нечего — ответь одним словом: нет.",
+        n.label,
+        if n.body.trim().is_empty() { "пусто".to_string() } else { crate::mermaid::truncate_chars(&n.body, 300) },
+        if notes.is_empty() { "(нет)".to_string() } else { notes.iter().map(|x| format!("[{}] {}", x.author, x.text)).collect::<Vec<_>>().join("\n") },
+        core = ctx.agent.system_core
+    )
+}
+
+pub fn note_user(_ctx: &AgentContext, speech: &str) -> String {
+    format!("Ты только что сказал в комнате: «{}»\n\nТвоя пометка на узле:", crate::mermaid::truncate_chars(speech, 400))
+}

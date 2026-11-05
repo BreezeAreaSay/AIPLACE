@@ -17,7 +17,21 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
         .find(|m| m.role == "user")
         .map(|m| m.content.as_str())
         .unwrap_or("");
-    if system.contains("META-DIRECTOR") {
+    if system.contains("[STAGE-READER]") {
+        stage_reader(user)
+    } else if system.contains("[STAGE-CASTER]") {
+        stage_caster(user)
+    } else if system.contains("[STAGE-CARTOGRAPHER]") {
+        stage_cartographer(user)
+    } else if system.contains("[STAGE-PSYCHOLOGIST]") {
+        stage_psychologist()
+    } else if system.contains("Сейчас ты только ДУМАЕШЬ") {
+        format!("{}\nЦЕПЛЯЮСЬ ЗА: «{}»", "[MOCK мысль] Опять слова вместо дела. Поймаю его на последней фразе.", crate::mermaid::truncate_chars(&topic(user), 30))
+    } else if system.contains("Ты оставляешь ПОМЕТКУ") {
+        "[MOCK пометка] Спорно, но живо — оставлю здесь свой след.".to_string()
+    } else if system.contains("Отвечай ТОЛЬКО репликой") {
+        agent(system)
+    } else if system.contains("META-DIRECTOR") {
         director(user)
     } else if system.contains("SCHEMA-SYNTH") {
         schema(user)
@@ -132,6 +146,53 @@ fn director(user_prompt: &str) -> String {
             {"a": "physicist", "b": "lit_teacher", "delta": rng.gen_range(-8..=8), "label": "[MOCK] очередная пикировка"},
             {"a": "graffiti", "b": sp, "delta": rng.gen_range(-6..=6), "label": "[MOCK] подкол"}
         ]
+    })
+    .to_string()
+}
+
+fn stage_reader(user_prompt: &str) -> String {
+    let t = regex::Regex::new(r"РЕПЛИКА ИГРОКА: «(.+)»").ok().and_then(|r| r.captures(user_prompt).map(|c| c[1].to_string())).unwrap_or_default();
+    let promise = regex::Regex::new(r"(?i)обеща|даю слово|сделаю|напишу").map(|r| r.is_match(&t)).unwrap_or(false);
+    let deadline = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    json!({
+        "topic": crate::mermaid::truncate_chars(&t, 30),
+        "player_intent": "[MOCK] хочет внимания",
+        "question_to_agents": t.contains('?'),
+        "feeds": {"physicist": if t.chars().any(|c| c.is_ascii_digit()) {2} else {0}, "lit_teacher": 1, "graffiti": 0},
+        "promises": if promise { json!([{"title": crate::mermaid::truncate_chars(&t, 60), "deadline": deadline}]) } else { json!([]) },
+        "contract_reports": [],
+        "node_refs": []
+    })
+    .to_string()
+}
+
+fn stage_caster(user_prompt: &str) -> String {
+    let mut rng = rand::thread_rng();
+    let mut alive: Vec<String> = regex::Regex::new(r"(?m)^- (\w+) \(").ok().map(|r| r.captures_iter(user_prompt).map(|c| c[1].to_string()).collect()).unwrap_or_default();
+    if alive.is_empty() {
+        alive = vec!["physicist".into(), "lit_teacher".into(), "graffiti".into()];
+    }
+    alive.shuffle(&mut rng);
+    let n = rng.gen_range(1..=2.min(alive.len()));
+    let moves = ["ответ", "уступка", "перебивка", "желание", "насмешка"];
+    let scene: Vec<serde_json::Value> = alive.iter().take(n).enumerate().map(|(i, sp)| json!({"speaker": sp, "addressee": if i == 0 {"user".to_string()} else {alive[0].clone()}, "move": moves.choose(&mut rng).copied().unwrap_or("ответ"), "intent": "[MOCK] зацепиться за последнюю фразу", "delivery": if i == 0 {"развёрнуто"} else {"коротко"}})).collect();
+    let agendas: serde_json::Map<String, serde_json::Value> = alive.iter().take(n).map(|sp| (sp.clone(), json!(format!("[MOCK] цель для {sp}: вытянуть из игрока конкретику")))).collect();
+    json!({"room_mood": "[MOCK] взвинченное", "note": "[MOCK] Постановщик без ключа ставит сцену по ротации", "scene": scene, "agendas": agendas}).to_string()
+}
+
+fn stage_cartographer(user_prompt: &str) -> String {
+    let t = topic(user_prompt);
+    let id = crate::mermaid::safe_id(&t);
+    json!({"nodes": [{"id": id, "label": crate::mermaid::truncate_chars(&t, 40), "body": "[MOCK] тело узла из раунда", "type": "concept", "author": "user"}], "edges": [], "node_updates": []}).to_string()
+}
+
+fn stage_psychologist() -> String {
+    let mut rng = rand::thread_rng();
+    json!({
+        "inner_states": {"physicist": "[MOCK] Раздражён шумом, но учуял задачу.", "lit_teacher": "[MOCK] Томится, ждёт честного слова.", "graffiti": "[MOCK] Руки чешутся — стена пустая."},
+        "agendas": {"physicist": "[MOCK] потребовать одно число", "lit_teacher": "[MOCK] вытянуть признание", "graffiti": "[MOCK] предложить дерзкий ход"},
+        "stat_deltas": {"physicist": {"hp": 0, "dopamine": rng.gen_range(-5..=8), "respect_user": rng.gen_range(-2..=3)}, "lit_teacher": {"hp": 0, "dopamine": rng.gen_range(-5..=8), "respect_user": 1}, "graffiti": {"hp": -1, "dopamine": rng.gen_range(-5..=8), "respect_user": 0}},
+        "relation_deltas": [{"a": "physicist", "b": "lit_teacher", "delta": rng.gen_range(-6..=6), "label": "[MOCK] пикировка"}]
     })
     .to_string()
 }

@@ -60,24 +60,7 @@ pub async fn run_director(app: &AppState, trigger: &Trigger) -> Result<DirectorL
         (Some(n), Trigger::Node { mode, .. }) => Some((n, focus_notes.as_slice(), mode.as_str())),
         _ => None,
     };
-    // Who spoke in the last two rounds (most recent first), for rotation.
-    let recent_speakers: Vec<String> = {
-        let mut seen = Vec::new();
-        let mut rounds = 0;
-        for m in messages.iter().rev() {
-            if m.sender_id == crate::models::USER_ID {
-                rounds += 1;
-                if rounds >= 2 {
-                    break;
-                }
-                continue;
-            }
-            if agents.iter().any(|a| a.id == m.sender_id) && !seen.contains(&m.sender_id) {
-                seen.push(m.sender_id.clone());
-            }
-        }
-        seen
-    };
+    let recent_speakers = recent_speakers(&messages, &agents);
 
     let ctx = DirectorContext {
         trigger: trigger.as_str(),
@@ -197,6 +180,25 @@ async fn apply_relations(app: &AppState, out: &DirectorOutput, agents: &[Agent])
     Ok(())
 }
 
+/// Who spoke in the last two rounds (most recent first), for rotation.
+pub fn recent_speakers(messages: &[crate::models::Message], agents: &[Agent]) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut rounds = 0;
+    for m in messages.iter().rev() {
+        if m.sender_id == crate::models::USER_ID {
+            rounds += 1;
+            if rounds >= 2 {
+                break;
+            }
+            continue;
+        }
+        if agents.iter().any(|a| a.id == m.sender_id) && !seen.contains(&m.sender_id) {
+            seen.push(m.sender_id.clone());
+        }
+    }
+    seen
+}
+
 /// Safety net: keep the room alive even with no model. Agendas are left untouched (we never
 /// hardcode goals) — only a minimal scene is staged, honouring rotation.
 fn fallback_plan(agents: &[Agent], trigger: &Trigger, recent: &[String]) -> DirectorOutput {
@@ -228,7 +230,7 @@ fn fallback_plan(agents: &[Agent], trigger: &Trigger, recent: &[String]) -> Dire
     }
 }
 
-fn derive_speakers(scene: &[crate::models::Beat]) -> Vec<String> {
+pub fn derive_speakers(scene: &[crate::models::Beat]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for b in scene {
         if !out.contains(&b.speaker) {
@@ -240,7 +242,7 @@ fn derive_speakers(scene: &[crate::models::Beat]) -> Vec<String> {
 
 /// Validate the staged scene: known alive speakers, sane addressees, at most MAX_BEATS beats,
 /// and a soft rotation rule (someone who spoke two rounds running yields unless addressed).
-fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String]) {
+pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String]) {
     let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
     let mut scene: Vec<crate::models::Beat> = Vec::new();
     // Legacy outputs without `scene`: synthesize from next_speakers.
@@ -313,6 +315,25 @@ async fn apply_inner_states(app: &AppState, out: &DirectorOutput, agents: &[Agen
         }
         db::update_agent_inner_state(&app.db, id, &mermaid::truncate_chars(state, 200)).await?;
     }
+    Ok(())
+}
+
+pub async fn apply_agendas_pub(app: &AppState, out: &DirectorOutput, agents: &[Agent]) -> Result<()> {
+    apply_agendas(app, out, agents).await
+}
+
+/// Post-round bookkeeping shared by both modes: states, stats, graph, relations, events.
+pub async fn apply_after_round(app: &AppState, out: &DirectorOutput, agents: &[Agent], trigger: &Trigger) -> Result<()> {
+    apply_agendas(app, out, agents).await?;
+    apply_inner_states(app, out, agents).await?;
+    apply_stats(app, out, agents, trigger).await?;
+    apply_graph(app, out).await?;
+    apply_relations(app, out, agents).await?;
+    app.emit(RoomEvent::Agents { agents: db::list_agents(&app.db).await? });
+    let graph = Graph { nodes: db::list_nodes(&app.db).await?, edges: db::list_edges(&app.db).await? };
+    let mermaid = mermaid::build_graph(&graph.nodes, &graph.edges);
+    app.emit(RoomEvent::Graph { graph, mermaid });
+    app.emit(RoomEvent::Relations { relations: db::list_relations(&app.db).await? });
     Ok(())
 }
 

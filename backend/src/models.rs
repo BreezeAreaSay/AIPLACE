@@ -287,6 +287,9 @@ pub struct DirectorOutput {
     pub inner_states: HashMap<String, String>,
     #[serde(default)]
     pub node_updates: Vec<NodeUpdate>,
+    /// Pipeline stage timings (empty in single mode).
+    #[serde(default)]
+    pub stages: Vec<crate::pipeline::StageLog>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +421,8 @@ pub struct SettingsView {
     pub version: String,
     pub update: Option<crate::update::UpdateInfo>,
     pub ui_embedded: bool,
+    pub director_mode: String,
+    pub agent_mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

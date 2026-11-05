@@ -127,9 +127,14 @@ export function DirectorInspector({ entry, agents, directorModel, relations, mem
         <span className="rounded border border-line px-1.5 py-0.5 text-zinc-400">
           {entry.trigger === 'tick' ? '🎲 автономный тик' : '💬 реплика игрока'}
         </span>
-        <span className={`rounded border px-1.5 py-0.5 ${entry.source === 'llm' ? 'border-acid/40 text-acid' : 'border-magenta/40 text-magenta'}`}>
-          {entry.source === 'llm' ? `LLM · ${directorModel}` : 'fallback (модель не ответила)'}
+        <span className={`rounded border px-1.5 py-0.5 ${entry.source === 'fallback' ? 'border-magenta/40 text-magenta' : 'border-acid/40 text-acid'}`}>
+          {entry.source === 'fallback' ? 'fallback (модель не ответила)' : entry.source === 'pipeline' ? `субагенты · ${directorModel}` : `LLM · ${directorModel}`}
         </span>
+        {(o.stages ?? []).map((st) => (
+          <span key={st.stage} className={`rounded border px-1.5 py-0.5 ${st.ok ? 'border-line text-zinc-400' : 'border-magenta/40 text-magenta'}`} title={st.error ?? ''}>
+            {st.stage} {Math.round(st.ms / 100) / 10}s
+          </span>
+        ))}
         <span className="text-zinc-600">{time}</span>
       </div>
 

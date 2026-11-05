@@ -66,6 +66,10 @@ pub struct Config {
     pub update_check: bool,
     /// Rewrite each agent's diary after this many new messages.
     pub memory_every: usize,
+    /// `pipeline` (Reader → Caster → agents → Cartographer ∥ Psychologist) or `single` (one big Director call).
+    pub director_mode: String,
+    /// `pipeline` (think → speak → note) or `single` (one prefix-prefilled call per agent turn).
+    pub agent_mode: String,
     /// Telegram Mini App mode: validate initData, one room per Telegram user, /start bot.
     pub telegram_bot_token: Option<String>,
     pub telegram_admin_ids: Vec<i64>,
@@ -93,6 +97,8 @@ impl Config {
             allow_remote_settings: env_bool("ALLOW_REMOTE_SETTINGS"),
             update_check: !env_bool("TRIAD_NO_UPDATE_CHECK"),
             memory_every: env_or("MEMORY_EVERY", "8").parse().unwrap_or(8),
+            director_mode: env_or("DIRECTOR_MODE", "pipeline").to_lowercase(),
+            agent_mode: env_or("AGENT_MODE", "pipeline").to_lowercase(),
             telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
             telegram_admin_ids: env_or("TELEGRAM_ADMIN_IDS", "")
                 .split([',', ' ', ';'])

@@ -124,6 +124,7 @@ export interface DirectorOutput {
   scene: Beat[]
   inner_states: Record<string, string>
   node_updates: { id: string; label?: string | null; body?: string | null; type?: string | null }[]
+  stages: { stage: string; ok: boolean; ms: number; error?: string | null }[]
 }
 
 export interface DirectorLogEntry {
@@ -179,6 +180,8 @@ export interface SettingsView {
   version: string
   update: UpdateInfo | null
   ui_embedded: boolean
+  director_mode: string
+  agent_mode: string
 }
 
 export interface SettingsPatch {

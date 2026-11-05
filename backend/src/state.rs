@@ -22,6 +22,7 @@ pub struct AppState {
     pub update: Arc<RwLock<Option<UpdateInfo>>>,
     pub rooms: Arc<RoomManager>,
     pub bot_username: Arc<RwLock<Option<String>>>,
+    pub catalog: Arc<crate::catalog::Catalog>,
     // ── current room ──
     pub room_id: String,
     pub db: SqlitePool,

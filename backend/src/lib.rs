@@ -2,6 +2,7 @@
 //! this server. Everything the UI needs is behind `/api/*` on a loopback (or public) port.
 
 pub mod agent_runner;
+pub mod catalog;
 pub mod cli;
 pub mod config;
 pub mod contracts;
@@ -14,6 +15,7 @@ pub mod mermaid;
 pub mod mock_llm;
 pub mod models;
 pub mod openrouter;
+pub mod pipeline;
 pub mod prompts;
 pub mod rooms;
 pub mod state;
@@ -62,6 +64,7 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
         update: Arc::new(RwLock::new(None)),
         rooms,
         bot_username: Arc::new(RwLock::new(None)),
+        catalog: Arc::new(catalog::Catalog::default()),
         room_id: rooms::LOCAL_ROOM.to_string(),
         db: local.db,
         events: local.events,

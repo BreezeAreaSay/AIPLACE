@@ -1,23 +1,14 @@
 import { useEffect, useState } from 'react'
 import { ArrowUpCircle, KeyRound, Lock, X } from 'lucide-react'
-import { api } from '../api'
+import { api, API_BASE } from '../api'
 import type { SettingsView } from '../types'
+import { ModelPicker, type ModelInfo } from './ModelPicker'
 
 interface Props {
   open: boolean
   onClose: () => void
   onSaved: () => void
 }
-
-const MODEL_SUGGESTIONS = [
-  'deepseek/deepseek-chat',
-  'anthropic/claude-sonnet-4',
-  'anthropic/claude-3.5-sonnet',
-  'google/gemini-2.5-flash',
-  'google/gemini-2.5-pro',
-  'meta-llama/llama-3.3-70b-instruct',
-  'x-ai/grok-3-mini',
-]
 
 export function SettingsModal({ open, onClose, onSaved }: Props) {
   const [view, setView] = useState<SettingsView | null>(null)
@@ -27,6 +18,20 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [ok, setOk] = useState<string | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [catalog, setCatalog] = useState<'loading' | 'ready' | 'error'>('loading')
+
+  useEffect(() => {
+    if (!open || models.length) return
+    setCatalog('loading')
+    fetch(API_BASE + '/api/models')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((list: ModelInfo[]) => {
+        setModels(list)
+        setCatalog('ready')
+      })
+      .catch(() => setCatalog('error'))
+  }, [open, models.length])
 
   useEffect(() => {
     if (!open) return
@@ -121,31 +126,19 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
               </div>
             </label>
 
-            <label className="block">
-              <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Модель агентов (нужен assistant-prefill)</div>
-              <input
-                list="triad-models"
-                value={model}
-                disabled={!editable}
-                onChange={(e) => setModel(e.target.value)}
-                className="w-full rounded border border-line bg-panel px-3 py-2 font-mono text-xs text-zinc-100 focus:border-acid focus:outline-none disabled:opacity-50"
-              />
-            </label>
-            <label className="block">
-              <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Модель Режиссёра (быстрая, JSON)</div>
-              <input
-                list="triad-models"
-                value={director}
-                disabled={!editable}
-                onChange={(e) => setDirector(e.target.value)}
-                className="w-full rounded border border-line bg-panel px-3 py-2 font-mono text-xs text-zinc-100 focus:border-acid focus:outline-none disabled:opacity-50"
-              />
-            </label>
-            <datalist id="triad-models">
-              {MODEL_SUGGESTIONS.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
+            <div>
+              <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Модель персонажей</div>
+              <ModelPicker value={model} onChange={setModel} models={models} status={catalog} disabled={!editable} />
+              <div className="mt-1 text-[11px] text-zinc-500">Держит характер. Бесплатные (:free) работают, но с лимитами запросов — в режиме субагентов на раунд уходит 6–10 вызовов.</div>
+            </div>
+            <div>
+              <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Модель Режиссёра и субагентов</div>
+              <ModelPicker value={director} onChange={setDirector} models={models} status={catalog} disabled={!editable} preferJson />
+              <div className="mt-1 text-[11px] text-zinc-500">
+                Reader / Caster / Картограф / Психолог — маленькие JSON-задачи, подойдёт быстрая. Режимы: Режиссёр <code className="text-zinc-300">{view.director_mode}</code>, агенты{' '}
+                <code className="text-zinc-300">{view.agent_mode}</code> (DIRECTOR_MODE / AGENT_MODE в config.env).
+              </div>
+            </div>
 
             {error && <div className="rounded border border-magenta/50 bg-magenta/10 px-3 py-2 text-xs text-magenta">{error}</div>}
             {ok && <div className="rounded border border-acid/50 bg-acid/10 px-3 py-2 text-xs text-acid">{ok}</div>}

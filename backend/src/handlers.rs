@@ -87,6 +87,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reset", post(reset))
         .route("/api/events", get(events))
         .route("/api/settings", get(get_settings).post(post_settings))
+        .route("/api/models", get(list_models))
         .route("/api/contracts/:id/resolve", post(resolve_contract))
         .route("/api/nodes", post(create_node))
         .route("/api/nodes/:id", axum::routing::patch(patch_node).delete(delete_node))
@@ -162,7 +163,14 @@ async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
         version: crate::update::VERSION.into(),
         update: app.update.read().await.clone(),
         ui_embedded: crate::web::is_embedded(),
+        director_mode: app.cfg.director_mode.clone(),
+        agent_mode: app.cfg.agent_mode.clone(),
     }
+}
+
+async fn list_models(State(app): State<AppState>) -> AppResult<Json<Vec<crate::catalog::ModelInfo>>> {
+    let key = app.llm_settings().await.api_key;
+    Ok(Json(app.catalog.models(key.as_deref()).await?))
 }
 
 async fn get_settings(Room { app, editable, .. }: Room) -> Json<SettingsView> {
@@ -426,7 +434,16 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
         stage: "director".into(),
         detail: "Режиссёр читает комнату и раздаёт скрытые цели…".into(),
     });
-    let entry = director::run_director(app, &trigger).await?;
+    let pipeline = app.cfg.director_mode != "single";
+    let mut plan = if pipeline { Some(crate::pipeline::before_speech(app, &trigger).await?) } else { None };
+    let entry = match &plan {
+        Some(p) => {
+            let e = db::insert_director_log(&app.db, trigger.as_str(), "pipeline", &p.output).await?;
+            app.emit(RoomEvent::Director { entry: e.clone() });
+            e
+        }
+        None => director::run_director(app, &trigger).await?,
+    };
     let mood = entry.output.room_mood.clone();
     let agents = db::list_agents(&app.db).await?;
     let focus_node = match &trigger {
@@ -450,6 +467,14 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
             Ok(m) => scene_so_far.push((name, m.content)),
             Err(e) => tracing::warn!(agent = %beat.speaker, error = %e, "agent turn skipped"),
         }
+    }
+    if let Some(p) = plan.as_mut() {
+        app.emit(RoomEvent::Status { stage: "director".into(), detail: "Картограф и Психолог разбирают раунд…".into() });
+        if let Err(e) = crate::pipeline::after_speech(app, &trigger, p).await {
+            tracing::warn!(error = %e, "post-round pipeline failed");
+        }
+        let e = db::insert_director_log(&app.db, trigger.as_str(), "pipeline", &p.output).await?;
+        app.emit(RoomEvent::Director { entry: e });
     }
     // Anyone who died this round gets their last words.
     let agents = db::list_agents(&app.db).await?;

@@ -80,29 +80,29 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         scene_so_far: &plan.scene_so_far,
         focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
     };
-    let msgs = [
-        ChatMessage::system(prompts::agent_system(&ctx)),
-        ChatMessage::user(prompts::agent_user(&ctx, &agents)),
-    ];
-    let opts = ChatOpts {
-        temperature: 0.9,
-        max_tokens: 700,
-        json_mode: false,
-        prefill: Some(EGO_PREFILL.to_string()),
-        presence_penalty: Some(0.6),
-        frequency_penalty: Some(0.4),
-    };
-
     let model = app.llm_settings().await.model;
-    let (ego, speech) = match app.llm.chat(&model, &msgs, &opts).await {
-        Ok(raw) => parse_agent_reply(&raw),
-        Err(e) => {
-            tracing::warn!(agent = %agent_id, error = %e, "agent LLM call failed");
-            (
-                Some(format!("(связь с моделью оборвалась: {})", crate::mermaid::truncate_chars(&e.to_string(), 120))),
-                silence_line(&agent.id),
-            )
+    let (ego, speech) = if app.cfg.agent_mode == "single" {
+        let msgs = [
+            ChatMessage::system(prompts::agent_system(&ctx)),
+            ChatMessage::user(prompts::agent_user(&ctx, &agents)),
+        ];
+        let opts = ChatOpts {
+            temperature: 0.9,
+            max_tokens: 700,
+            json_mode: false,
+            prefill: Some(EGO_PREFILL.to_string()),
+            presence_penalty: Some(0.6),
+            frequency_penalty: Some(0.4),
+        };
+        match app.llm.chat(&model, &msgs, &opts).await {
+            Ok(raw) => parse_agent_reply(&raw),
+            Err(e) => {
+                tracing::warn!(agent = %agent_id, error = %e, "agent LLM call failed");
+                (Some(format!("(связь с моделью оборвалась: {})", crate::mermaid::truncate_chars(&e.to_string(), 120))), silence_line(&agent.id))
+            }
         }
+    } else {
+        think_then_speak(app, &model, &ctx, &agents).await
     };
     let speech = strip_name_prefix(&speech, &agent.name);
     let (speech, notes) = extract_notes(&speech);
@@ -132,6 +132,67 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
         app.emit(RoomEvent::Notes { notes: db::list_notes(&app.db, 400).await? });
     }
     Ok(msg)
+}
+
+/// Pipeline turn: (1) a short private thought + the phrase to latch onto, (2) the line itself,
+/// (3) when a node is in focus, a one-line note on it. Each call is small enough for weak models.
+async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent]) -> (Option<String>, String) {
+    let think_opts = ChatOpts { temperature: 0.8, max_tokens: 220, json_mode: false, prefill: None, presence_penalty: Some(0.3), frequency_penalty: Some(0.3) };
+    let speak_opts = ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: false, prefill: None, presence_penalty: Some(0.6), frequency_penalty: Some(0.5) };
+
+    let thought_raw = match app
+        .llm
+        .chat(model, &[ChatMessage::system(prompts::think_system(ctx)), ChatMessage::user(prompts::think_user(ctx, agents))], &think_opts)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent.id, error = %e, "think stage failed");
+            String::new()
+        }
+    };
+    let (ego, hook) = prompts::split_thought(&thought_raw);
+
+    let speech = match app
+        .llm
+        .chat(model, &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, &ego, &hook))], &speak_opts)
+        .await
+    {
+        Ok(t) => t.trim().trim_matches('"').to_string(),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent.id, error = %e, "speak stage failed");
+            silence_line(&ctx.agent.id)
+        }
+    };
+    let speech = strip_labels(&speech);
+
+    let mut speech = speech;
+    if let Some((node, _)) = ctx.focus {
+        let note_opts = ChatOpts { temperature: 0.7, max_tokens: 120, json_mode: false, prefill: None, presence_penalty: None, frequency_penalty: None };
+        if let Ok(n) = app
+            .llm
+            .chat(model, &[ChatMessage::system(prompts::note_system(ctx)), ChatMessage::user(prompts::note_user(ctx, &speech))], &note_opts)
+            .await
+        {
+            let n = n.trim().trim_matches('"').trim();
+            if !n.is_empty() && !n.eq_ignore_ascii_case("нет") {
+                speech.push_str(&format!("\n<note node=\"{}\">{}</note>", node.id, crate::mermaid::truncate_chars(n, 400)));
+            }
+        }
+    }
+    (if ego.is_empty() { None } else { Some(ego) }, speech)
+}
+
+fn strip_labels(s: &str) -> String {
+    // Some models still emit the two-layer format: keep only the public part.
+    let s = match s.find("</ego_thought>") {
+        Some(i) => &s[i + "</ego_thought>".len()..],
+        None => s,
+    };
+    let s = s.trim_start_matches(EGO_PREFILL);
+    static LABELS: OnceLock<Regex> = OnceLock::new();
+    let re = LABELS.get_or_init(|| Regex::new(r"(?im)^\s*(\*\*)?\s*(реплика|речь|публичная речь|ответ)\s*:?\s*(\*\*)?\s*:?\s*").expect("regex"));
+    re.replace_all(s, "").trim().to_string()
 }
 
 /// Pull `<note node="id">text</note>` annotations out of the speech.
