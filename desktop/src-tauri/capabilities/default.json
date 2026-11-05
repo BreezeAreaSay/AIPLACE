@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window: core window/app permissions only (the UI talks to the embedded server over loopback HTTP).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

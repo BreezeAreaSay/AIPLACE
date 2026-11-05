@@ -85,6 +85,7 @@ export const api = {
   reset: () => request<RoomState>('/api/reset', { method: 'POST' }),
   resolveContract: (id: number, status: 'done' | 'failed' | 'cancelled', note?: string) =>
     request<RoomState>(`/api/contracts/${id}/resolve`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+  seen: (messageId: number) => request<void>('/api/seen', { method: 'POST', body: JSON.stringify({ message_id: messageId }) }),
   settings: () => request<SettingsView>('/api/settings'),
   saveSettings: (patch: SettingsPatch) => request<SettingsView>('/api/settings', { method: 'POST', body: JSON.stringify(patch) }),
 }

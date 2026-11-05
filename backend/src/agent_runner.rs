@@ -155,9 +155,17 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
     };
     let (ego, hook) = prompts::split_thought(&thought_raw);
 
+    app.emit(RoomEvent::StreamStart { agent: ctx.agent.id.clone() });
+    let agent_id = ctx.agent.id.clone();
+    let emitter = app.clone();
     let speech = match app
         .llm
-        .chat(model, &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, &ego, &hook))], &speak_opts)
+        .chat_stream(
+            model,
+            &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, &ego, &hook))],
+            &speak_opts,
+            |d| emitter.emit(RoomEvent::Delta { agent: agent_id.clone(), text: d.to_string() }),
+        )
         .await
     {
         Ok(t) => t.trim().trim_matches('"').to_string(),

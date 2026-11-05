@@ -15,6 +15,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
 use triad_canvas_backend::{config, Config, LlmSettings};
 
 struct Backend {
@@ -70,6 +71,54 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Follow the embedded server's event stream; when the window is hidden and an inhabitant
+/// speaks (heartbeat or a round the player left running), show a native notification.
+fn watch_events(app: AppHandle, url: String) {
+    tauri::async_runtime::spawn(async move {
+        use futures::StreamExt;
+        loop {
+            let client = reqwest::Client::new();
+            let Ok(resp) = client.get(format!("{url}api/events")).send().await else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            };
+            let mut stream = resp.bytes_stream();
+            let mut buf = String::new();
+            while let Some(Ok(chunk)) = stream.next().await {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim().to_string();
+                    buf.drain(..=pos);
+                    let Some(data) = line.strip_prefix("data:") else { continue };
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else { continue };
+                    if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+                        continue;
+                    }
+                    let sender = v.pointer("/message/sender_id").and_then(|s| s.as_str()).unwrap_or("");
+                    if sender == "user" || sender == "system" {
+                        continue;
+                    }
+                    let visible = app.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(true);
+                    let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+                    if visible && focused {
+                        continue;
+                    }
+                    let content = v.pointer("/message/content").and_then(|c| c.as_str()).unwrap_or("");
+                    let who = match sender {
+                        "physicist" => "Аркадий Борисович",
+                        "lit_teacher" => "Софья Генриховна",
+                        "graffiti" => "Кэп",
+                        other => other,
+                    };
+                    let body: String = content.chars().take(180).collect();
+                    let _ = app.notification().builder().title(who).body(body).show();
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+}
+
 fn post_tick(app: &AppHandle) {
     let url = app.state::<Backend>().url.clone();
     tauri::async_runtime::spawn(async move {
@@ -91,6 +140,7 @@ fn main() {
     let rx = start_server();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let started = Instant::now();
             let addr = loop {
@@ -110,6 +160,7 @@ fn main() {
             if let Some(w) = app.get_webview_window("main") {
                 w.navigate(url::Url::parse(&url)?)?;
             }
+            watch_events(app.handle().clone(), url.clone());
 
             // Tray: the room keeps living when the window is closed.
             let open = MenuItem::with_id(app, "open", "Открыть комнату", true, None::<&str>)?;

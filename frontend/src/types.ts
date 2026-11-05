@@ -199,6 +199,9 @@ export interface RoomState {
   events: RoomEventRecord[]
   now: string
   room_id: string
+  last_seen_message_id: number
+  usage: { calls_today: number; daily_budget: number }
+  heartbeat_minutes: number
 }
 
 export interface UpdateInfo {
@@ -236,6 +239,8 @@ export type RoomEvent =
   | { type: 'graph'; graph: Graph; mermaid: string }
   | { type: 'notes'; notes: NodeNote[] }
   | { type: 'types'; types: ObjectType[] }
+  | { type: 'stream_start'; agent: string }
+  | { type: 'delta'; agent: string; text: string }
   | { type: 'schema'; schema: SchemaDoc }
   | { type: 'contracts'; contracts: Contract[] }
   | { type: 'relations'; relations: Relation[] }

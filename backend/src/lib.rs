@@ -10,6 +10,8 @@ pub mod db;
 pub mod director;
 pub mod error;
 pub mod handlers;
+pub mod heartbeat;
+pub mod intake;
 pub mod memory;
 pub mod mermaid;
 pub mod mock_llm;
@@ -61,7 +63,7 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
     let state = AppState {
         cfg: cfg.clone(),
         settings: settings.clone(),
-        llm: Arc::new(openrouter::LlmClient::new(settings.clone(), cfg.app_url.clone())?),
+        llm: Arc::new(openrouter::LlmClient::new(settings.clone(), cfg.app_url.clone(), cfg.daily_call_budget)?),
         update: Arc::new(RwLock::new(None)),
         rooms,
         bot_username: Arc::new(RwLock::new(None)),
@@ -74,6 +76,9 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
 
     if cfg.telegram_bot_token.is_some() && cfg.telegram_polling {
         tokio::spawn(telegram::run_bot(cfg.clone(), state.bot_username.clone()));
+    }
+    if cfg.heartbeat_minutes > 0 {
+        tokio::spawn(heartbeat::run(state.clone()));
     }
     if cfg.update_check {
         let slot = state.update.clone();

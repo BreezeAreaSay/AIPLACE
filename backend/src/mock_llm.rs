@@ -171,6 +171,11 @@ fn stage_reader(user_prompt: &str) -> String {
 
 fn stage_caster(user_prompt: &str) -> String {
     let mut rng = rand::thread_rng();
+    if user_prompt.contains("ИГРОК ДАВНО МОЛЧИТ") {
+        let sp = ["physicist", "lit_teacher", "graffiti"][rng.gen_range(0..3)];
+        let own = user_prompt.contains("СВОЕГО проекта");
+        return json!({"room_mood": "[MOCK] тихо", "note": "[MOCK] пульс: комната действует сама", "scene": [{"speaker": sp, "addressee": if own {"room"} else {"user"}, "move": if own {"желание"} else {"уточнение"}, "intent": "[MOCK] написать первым", "delivery": "коротко"}], "agendas": {sp: "[MOCK] напомнить о себе"}}).to_string();
+    }
     let mut alive: Vec<String> = regex::Regex::new(r"(?m)^- (\w+) \(").ok().map(|r| r.captures_iter(user_prompt).map(|c| c[1].to_string()).collect()).unwrap_or_default();
     if alive.is_empty() {
         alive = vec!["physicist".into(), "lit_teacher".into(), "graffiti".into()];

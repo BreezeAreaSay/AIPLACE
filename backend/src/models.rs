@@ -470,6 +470,10 @@ pub struct RoomState {
     pub now: String,
     pub room_id: String,
     pub tg_user: Option<crate::telegram::TgUser>,
+    /// Everything after this id is "while you were away".
+    pub last_seen_message_id: i64,
+    pub usage: crate::openrouter::Usage,
+    pub heartbeat_minutes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -511,6 +515,8 @@ pub enum RoomEvent {
     Graph { graph: Graph, mermaid: String },
     Types { types: Vec<ObjectType> },
     Notes { notes: Vec<NodeNote> },
+    StreamStart { agent: String },
+    Delta { agent: String, text: String },
     Schema { schema: SchemaDoc },
     Contracts { contracts: Vec<Contract> },
     Relations { relations: Vec<Relation> },

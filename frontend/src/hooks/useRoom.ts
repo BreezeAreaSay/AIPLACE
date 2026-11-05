@@ -17,7 +17,9 @@ export function useRoom() {
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
   const [gate, setGate] = useState<{ code: string; message: string; bot: string | null } | null>(null)
+  const [streaming, setStreaming] = useState<{ agent: string; text: string } | null>(null)
   const inflight = useRef(false)
+  const seenSent = useRef(0)
 
   const refresh = useCallback(async () => {
     try {
@@ -54,7 +56,14 @@ export function useRoom() {
           setBusy(null)
           break
         case 'message':
+          setStreaming(null)
           setState((s) => (s ? { ...s, messages: mergeMessages(s.messages, [ev.message]) } : s))
+          break
+        case 'stream_start':
+          setStreaming({ agent: ev.agent, text: '' })
+          break
+        case 'delta':
+          setStreaming((st) => (st && st.agent === ev.agent ? { ...st, text: st.text + ev.text } : { agent: ev.agent, text: ev.text }))
           break
         case 'director':
           setState((s) => (s ? { ...s, last_director: ev.entry } : s))
@@ -118,12 +127,22 @@ export function useRoom() {
     }
   }, [])
 
+  /** Tell the server the player has seen everything up to the newest message (debounced). */
+  const markSeen = useCallback((messageId: number) => {
+    if (messageId <= seenSent.current) return
+    seenSent.current = messageId
+    void api.seen(messageId).catch(() => undefined)
+    setState((s) => (s ? { ...s, last_seen_message_id: Math.max(s.last_seen_message_id, messageId) } : s))
+  }, [])
+
   return {
     state,
     busy,
     error,
     gate,
     live,
+    streaming,
+    markSeen,
     refresh,
     send: (text: string, nodeId?: string | null) => run('Отправляю в комнату…', () => api.chat(text, nodeId)),
     createNode: (label: string, opts?: { body?: string; type?: string; type_id?: string; props?: Record<string, unknown>; x?: number; y?: number }) =>

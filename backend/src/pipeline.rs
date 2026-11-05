@@ -146,8 +146,22 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         _ => None,
     };
     let recent_speakers = crate::director::recent_speakers(&messages, &agents);
+    let life_kind = match trigger {
+        Trigger::Life(k) => Some(k.as_str()),
+        _ => None,
+    };
+    let mut own_projects: Vec<(String, String, String)> = Vec::new();
+    if matches!(trigger, Trigger::Life(_) | Trigger::Tick) {
+        for a in fresh.iter().filter(|a| a.is_alive()) {
+            for n in db::objects_by_owner(&app.db, &a.id).await?.into_iter().filter(|n| n.type_id == "project").take(1) {
+                own_projects.push((a.id.clone(), n.label.clone(), n.body.clone()));
+            }
+        }
+    }
     let caster_in = prompts::CasterInput {
         trigger: trigger.as_str(),
+        life_kind,
+        own_projects: &own_projects,
         agents: &fresh,
         recent: &messages,
         recent_speakers: &recent_speakers,

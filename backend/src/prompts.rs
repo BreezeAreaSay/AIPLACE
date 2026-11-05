@@ -257,6 +257,7 @@ pub fn director_user(ctx: &DirectorContext) -> String {
     let trigger = match ctx.trigger {
         "tick" => "АВТОНОМНЫЙ ТИК: игрок молчит. Агенты живут своей жизнью — спорят между собой, вспоминают сказанное, развивают или ломают узлы доски, говорят о своих желаниях. Биты должны цепляться ДРУГ ЗА ДРУГА, а не за игрока.".to_string(),
         "event" => "СОБЫТИЕ В КОМНАТЕ (см. ленту событий): игрок закрыл или нарушил слово. Поручитель реагирует первым, остальные — по характеру.".to_string(),
+        "life" => "ИГРОК ДАВНО МОЛЧИТ. Комната живёт сама: кто-то пишет игроку первым о его делах, или двое говорят между собой, или кто-то рассказывает о своём проекте. Коротко, по-живому.".to_string(),
         "node" => {
             let (n, notes, mode) = ctx.focus.expect("node trigger has focus");
             let mode_text = match mode {
@@ -621,6 +622,10 @@ move — один из: ответ | атака | уступка | переби�
 
 pub struct CasterInput<'a> {
     pub trigger: &'a str,
+    /// For `life` triggers: write_first | argue | own_project.
+    pub life_kind: Option<&'a str>,
+    /// Inhabitants' own projects (id → title/body), for own_project beats.
+    pub own_projects: &'a [(String, String, String)],
     pub agents: &'a [Agent],
     pub recent: &'a [Message],
     pub recent_speakers: &'a [String],
@@ -638,6 +643,14 @@ pub fn caster_user(i: &CasterInput) -> String {
         "node" => {
             let (n, mode) = i.focus.expect("focus");
             format!("ИГРОК ТКНУЛ В УЗЕЛ «{}» ({}): режим {}. Сцена вокруг этого узла.", n.label, n.id, match mode { "develop" => "развить", "dispute" => "оспорить", _ => "обсудить" })
+        }
+        "life" => {
+            let projects = i.own_projects.iter().map(|(owner, title, body)| format!("  {owner}: «{title}» — {}", crate::mermaid::truncate_chars(body, 120))).collect::<Vec<_>>().join("\n");
+            match i.life_kind.unwrap_or("write_first") {
+                "argue" => "ИГРОК ДАВНО МОЛЧИТ. Двое персонажей заводят разговор МЕЖДУ СОБОЙ (2 бита, адресаты — друг другу): о чём-то из доски, о прошлом споре, о своём. Не про игрока в третьем лице каждый раз — у них есть свои темы.".to_string(),
+                "own_project" => format!("ИГРОК ДАВНО МОЛЧИТ. Один персонаж рассказывает комнате (addressee room) о продвижении СВОЕГО проекта — конкретная маленькая новость, деталь, затык или радость. 1 бит, можно второй — короткая реакция соседа.\nИХ ПРОЕКТЫ:\n{projects}"),
+                _ => "ИГРОК ДАВНО МОЛЧИТ. Один персонаж пишет ему ПЕРВЫМ (1 бит, addressee user): спросить про конкретное дело из библиотеки или открытое слово, продолжить незакрытую тему, поделиться мыслью, которая пришла. Коротко, как в мессенджере, без пафоса. Второй бит не нужен.".to_string(),
+            }
         }
         _ => "НОВАЯ РЕПЛИКА ИГРОКА.".to_string(),
     };

@@ -29,6 +29,15 @@ export default function App() {
   const [profileId, setProfileId] = useState<string | null>(null)
   const isDesktop = useMedia('(min-width: 900px)')
 
+  const unread = useMemo(() => {
+    const st = room.state
+    if (!st) return 0
+    return st.messages.filter((m) => m.id > st.last_seen_message_id && m.sender_id !== 'user' && m.sender_id !== 'system').length
+  }, [room.state])
+  useEffect(() => {
+    document.title = unread > 0 ? `(${unread}) Triad Canvas` : 'Triad Canvas'
+  }, [unread])
+
   const speaking = useMemo(() => {
     const d = room.busy?.detail ?? ''
     if (room.busy?.stage !== 'agent') return null
@@ -162,8 +171,12 @@ export default function App() {
       onNodeClick={selectNode}
       onOpenAgent={setProfileId}
       mood={mood}
+      lastSeen={s.last_seen_message_id}
+      streaming={room.streaming}
+      onSeen={room.markSeen}
     />
   )
+
 
   return (
     <div className="scanlines relative flex flex-col bg-void" style={{ height: 'var(--app-height, 100%)' }}>
@@ -172,6 +185,8 @@ export default function App() {
         <span className="font-mono text-xs font-bold tracking-[0.25em] text-zinc-100">TRIAD CANVAS</span>
         <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
           {liveCount} объектов · {s.types.length} типов{s.room_id !== 'local' ? ` · ${s.room_id}` : ''}
+          {s.usage.daily_budget > 0 && ` · вызовов сегодня ${s.usage.calls_today}/${s.usage.daily_budget}`}
+          {s.heartbeat_minutes > 0 && ` · пульс каждые ${s.heartbeat_minutes} мин тишины`}
         </span>
         <div className="ml-auto flex items-center gap-1.5 font-mono text-[10px]">
           {s.update && (

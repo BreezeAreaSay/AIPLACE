@@ -97,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/types", get(list_types).post(create_type))
         .route("/api/nodes/:id/backlinks", get(node_backlinks))
         .route("/api/search", get(search))
+        .route("/api/seen", post(mark_seen))
         .route("/api/edges/:id", delete(delete_edge))
         .route("/api/export.md", get(export_markdown))
         .with_state(state)
@@ -110,6 +111,7 @@ async fn health(State(app): State<AppState>) -> Json<serde_json::Value> {
         "mock_mode": s.mock_mode(),
         "model": s.model,
         "director_model": s.director_model,
+        "usage": app.llm.usage(),
         "telegram": {
             "enabled": app.cfg.telegram_bot_token.is_some(),
             "bot_username": app.bot_username.read().await.clone(),
@@ -145,7 +147,25 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
         now: contracts::now_rfc3339(),
         room_id: app.room_id.clone(),
         tg_user: user.cloned(),
+        last_seen_message_id: db::meta_get(&app.db, "last_seen").await?.and_then(|v| v.parse().ok()).unwrap_or(0),
+        usage: app.llm.usage(),
+        heartbeat_minutes: app.cfg.heartbeat_minutes,
     })
+}
+
+#[derive(serde::Deserialize)]
+pub struct SeenRequest {
+    pub message_id: i64,
+}
+
+/// The client saw everything up to `message_id`; also resets the away-backoff of the heartbeat.
+async fn mark_seen(Room { app, .. }: Room, Json(req): Json<SeenRequest>) -> AppResult<StatusCode> {
+    let prev: i64 = db::meta_get(&app.db, "last_seen").await?.and_then(|v| v.parse().ok()).unwrap_or(0);
+    if req.message_id > prev {
+        db::meta_set(&app.db, "last_seen", &req.message_id.to_string()).await?;
+    }
+    crate::heartbeat::player_is_back(&app).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_state(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> {
@@ -228,10 +248,29 @@ async fn chat(Room { app, editable, user }: Room, Json(req): Json<ChatRequest>) 
         _ => None,
     };
     let msg = db::insert_message_full(&app.db, USER_ID, None, text, None, None, node_id.as_deref()).await?;
-    app.emit(RoomEvent::Message { message: msg });
+    app.emit(RoomEvent::Message { message: msg.clone() });
+    crate::heartbeat::player_is_back(&app).await?;
+    // Links in the line become bookmarks before anyone speaks, so the room discusses content.
+    let urls = crate::intake::find_urls(text);
+    let mut digest: Vec<String> = Vec::new();
+    for url in urls {
+        app.emit(RoomEvent::Status { stage: "intake".into(), detail: format!("Читаю {}…", mermaid::truncate_chars(&url, 60)) });
+        match crate::intake::ingest_url(&app, &url).await {
+            Ok(i) => {
+                db::add_mention(&app.db, msg.id, &i.object_id).await?;
+                digest.push(format!("- [Закладка] «{}» ({url}): {}", i.title, mermaid::truncate_chars(&i.summary, 900)));
+            }
+            Err(e) => tracing::warn!(error = %e, %url, "intake failed"),
+        }
+    }
+    if !digest.is_empty() {
+        emit_graph(&app).await?;
+        app.emit(RoomEvent::Message { message: db::with_mentions(&app.db, vec![msg.clone()]).await?.remove(0) });
+    }
+    let attachments = if digest.is_empty() { None } else { Some(digest.join("\n")) };
     match node_id {
-        Some(id) => run_round(&app, Trigger::Node { id, mode: "discuss".into() }).await?,
-        None => run_round(&app, Trigger::UserMessage).await?,
+        Some(id) => run_round_with(&app, Trigger::Node { id, mode: "discuss".into() }, attachments).await?,
+        None => run_round_with(&app, Trigger::UserMessage, attachments).await?,
     }
     Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }
@@ -247,9 +286,15 @@ async fn tick(Room { app, editable, user }: Room) -> AppResult<Json<RoomState>> 
 }
 
 /// Director → (1–2) agents, sequentially, so the second can answer the first.
-async fn run_round(app: &AppState, trigger: Trigger) -> anyhow::Result<()> {
+pub async fn run_round(app: &AppState, trigger: Trigger) -> anyhow::Result<()> {
     let alive_before = alive_ids(app).await?;
-    run_round_from(app, trigger, alive_before).await
+    run_round_from(app, trigger, alive_before, None).await
+}
+
+/// Like `run_round`, with extra context (e.g. digests of links the player just pasted).
+pub async fn run_round_with(app: &AppState, trigger: Trigger, attachments: Option<String>) -> anyhow::Result<()> {
+    let alive_before = alive_ids(app).await?;
+    run_round_from(app, trigger, alive_before, attachments).await
 }
 
 // ───────────────────────────── Canvas: nodes, edges, notes ─────────────────────────────
@@ -474,7 +519,7 @@ async fn alive_ids(app: &AppState) -> anyhow::Result<Vec<String>> {
 
 /// `alive_before` lets a caller that already changed the room (e.g. resolved a contract)
 /// still give last words to whoever died from it.
-async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<String>) -> anyhow::Result<()> {
+async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<String>, attachments: Option<String>) -> anyhow::Result<()> {
     // Deadlines bite before anyone speaks, so the Director sees the failure as an event.
     contracts::expire_overdue(app).await?;
 
@@ -484,6 +529,12 @@ async fn run_round_from(app: &AppState, trigger: Trigger, alive_before: Vec<Stri
     });
     let pipeline = app.cfg.director_mode != "single";
     let mut plan = if pipeline { Some(crate::pipeline::before_speech(app, &trigger).await?) } else { None };
+    if let (Some(p), Some(a)) = (plan.as_mut(), attachments.as_ref()) {
+        p.library = Some(match p.library.take() {
+            Some(l) => format!("{a}\n{l}"),
+            None => a.clone(),
+        });
+    }
     let entry = match &plan {
         Some(p) => {
             let e = db::insert_director_log(&app.db, trigger.as_str(), "pipeline", &p.output).await?;
@@ -556,7 +607,7 @@ async fn resolve_contract(
     };
     if c.status == status && status != "cancelled" {
         // Let the room react in character (guarantor first); the dead get their last words.
-        run_round_from(&app, Trigger::Event, alive_before).await?;
+        run_round_from(&app, Trigger::Event, alive_before, None).await?;
     }
     Ok(Json(build_state(&app, editable, user.as_ref()).await?))
 }

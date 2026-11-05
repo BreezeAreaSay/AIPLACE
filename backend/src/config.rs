@@ -70,6 +70,14 @@ pub struct Config {
     pub director_mode: String,
     /// `pipeline` (think → speak → note) or `single` (one prefix-prefilled call per agent turn).
     pub agent_mode: String,
+    /// Minutes of player silence before the room acts on its own (0 = off).
+    pub heartbeat_minutes: u64,
+    /// Local hours when the room keeps quiet, e.g. "23-08".
+    pub quiet_hours: String,
+    /// Max LLM calls per UTC day across rooms (0 = unlimited).
+    pub daily_call_budget: u64,
+    /// Let the heartbeat run even in mock mode (for testing).
+    pub heartbeat_in_mock: bool,
     /// Telegram Mini App mode: validate initData, one room per Telegram user, /start bot.
     pub telegram_bot_token: Option<String>,
     pub telegram_admin_ids: Vec<i64>,
@@ -99,6 +107,10 @@ impl Config {
             memory_every: env_or("MEMORY_EVERY", "8").parse().unwrap_or(8),
             director_mode: env_or("DIRECTOR_MODE", "pipeline").to_lowercase(),
             agent_mode: env_or("AGENT_MODE", "pipeline").to_lowercase(),
+            heartbeat_minutes: env_or("HEARTBEAT_MINUTES", "40").parse().unwrap_or(40),
+            quiet_hours: env_or("QUIET_HOURS", "23-08"),
+            daily_call_budget: env_or("DAILY_CALL_BUDGET", "400").parse().unwrap_or(400),
+            heartbeat_in_mock: env_bool("HEARTBEAT_IN_MOCK"),
             telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
             telegram_admin_ids: env_or("TELEGRAM_ADMIN_IDS", "")
                 .split([',', ' ', ';'])

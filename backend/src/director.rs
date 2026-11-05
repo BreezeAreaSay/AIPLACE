@@ -21,6 +21,8 @@ pub enum Trigger {
     Event,
     /// The player clicked a canvas node: discuss | develop | dispute.
     Node { id: String, mode: String },
+    /// Heartbeat: the room acts while the player is away.
+    Life(crate::heartbeat::LifeKind),
 }
 
 impl Trigger {
@@ -30,6 +32,7 @@ impl Trigger {
             Trigger::Tick => "tick",
             Trigger::Event => "event",
             Trigger::Node { .. } => "node",
+            Trigger::Life(_) => "life",
         }
     }
 }
@@ -365,7 +368,7 @@ async fn apply_stats(app: &AppState, out: &DirectorOutput, agents: &[Agent], tri
         let mut hp = a.hp + clamp(d.hp.round() as i64, -12, 12);
         let mut dopamine = a.dopamine + clamp(d.dopamine.round() as i64, -20, 20);
         let respect = clamp(a.respect_user + clamp(d.respect_user.round() as i64, -15, 15), -100, 100);
-        if matches!(trigger, Trigger::Tick) {
+        if matches!(trigger, Trigger::Tick | Trigger::Life(_)) {
             // Entropy: time alone without being fed costs something.
             hp -= app.cfg.tick_entropy_hp;
             dopamine -= app.cfg.tick_entropy_dopamine;

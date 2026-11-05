@@ -114,6 +114,10 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             created_by TEXT NOT NULL DEFAULT 'system',
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS room_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS mentions (
             message_id INTEGER NOT NULL,
             object_id  TEXT NOT NULL,
@@ -314,7 +318,58 @@ pub async fn seed_if_empty(pool: &Db) -> Result<()> {
     )
     .await?;
     insert_event(pool, "room_opened", &serde_json::json!({})).await?;
+    seed_own_projects(pool).await?;
     Ok(())
+}
+
+/// Each inhabitant has a life of their own: a personal project in the library that the
+/// heartbeat advances. Lives in the same typed graph as the player's things.
+pub async fn seed_own_projects(pool: &Db) -> Result<()> {
+    let seeds = [
+        ("physicist", "oscillograf_s1_94", "Осциллограф С1-94", "Восстанавливаю советский осциллограф С1-94 с барахолки: заменить электролиты, найти лампу 6Н1П, откалибровать развёртку. Делаю медленно и правильно."),
+        ("lit_teacher", "perechityvanie_kotlovana", "Перечитывание «Котлована»", "Перечитываю Платонова с карандашом. Записываю, где язык ломается от боли, и злюсь на тех, кто называет это «сложным стилем»."),
+        ("graffiti", "kusok_za_garazhami", "Кусок на стене за гаражами", "Готовлю большой кусок на стене за гаражами: эскиз, цвета, маршрут отхода. Надо успеть до холодов и до того, как стену закрасят."),
+    ];
+    for (owner, id, title, body) in seeds {
+        if node_exists(pool, id).await? {
+            continue;
+        }
+        upsert_object(pool, id, title, "project", owner, Some(body), Some(&serde_json::json!({ "status": "в работе" })), None, None).await?;
+    }
+    Ok(())
+}
+
+// ───────────────────────────── Room meta ─────────────────────────────
+
+pub async fn meta_get(pool: &Db, key: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT value FROM room_meta WHERE key = ?").bind(key).fetch_optional(pool).await?)
+}
+
+pub async fn meta_set(pool: &Db, key: &str, value: &str) -> Result<()> {
+    sqlx::query("INSERT INTO room_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Timestamp of the player's last line (for the heartbeat) — RFC3339-ish text from SQLite.
+pub async fn last_user_activity(pool: &Db) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT created_at FROM messages WHERE sender_id = 'user' ORDER BY id DESC LIMIT 1")
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn last_message_time(pool: &Db) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT created_at FROM messages ORDER BY id DESC LIMIT 1").fetch_optional(pool).await?)
+}
+
+pub async fn objects_by_owner(pool: &Db, owner: &str) -> Result<Vec<GraphNode>> {
+    Ok(sqlx::query_as::<_, GraphNode>("SELECT * FROM graph_nodes WHERE created_by = ? AND archived = 0 ORDER BY updated_at DESC")
+        .bind(owner)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Wipe everything and re-seed (`POST /api/reset`).

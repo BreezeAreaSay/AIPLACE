@@ -28,6 +28,11 @@ impl RoomManager {
         Self { cfg, rooms: Mutex::new(HashMap::new()) }
     }
 
+    /// Ids of rooms opened in this process (the heartbeat only breathes into rooms someone used).
+    pub async fn open_ids(&self) -> Vec<String> {
+        self.rooms.lock().await.keys().cloned().collect()
+    }
+
     pub async fn get(&self, id: &str) -> Result<RoomHandle> {
         if id.is_empty() || id.len() > 40 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             bail!("invalid room id");
