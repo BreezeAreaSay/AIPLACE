@@ -205,6 +205,18 @@ export function MessageBubble({ message, agents, nodes, types = [], showEgo, onN
     </div>
   )
 
+  if (isSystem && message.move === 'итог') {
+    // The round's artifact: the case note the yard keeps for this problem, with its objects as chips.
+    return (
+      <div className="my-1.5 max-w-[92%] rounded border border-acid/40 bg-acid/5 px-3 py-2">
+        <div className="text-[12px] leading-snug text-zinc-200">{message.content}</div>
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {node && chip(node, true)}
+          {mentioned.map((n) => chip(n))}
+        </div>
+      </div>
+    )
+  }
   if (isSystem) {
     return (
       <div className="mx-auto my-1 max-w-[92%] rounded border border-dashed border-line px-3 py-1.5 text-center text-[11px] font-mono text-zinc-500">

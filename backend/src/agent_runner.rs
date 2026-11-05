@@ -29,6 +29,8 @@ pub struct TurnPlan<'a> {
     /// Private conversation (agent id) instead of the yard.
     pub channel: Option<String>,
     pub reply_to: Option<i64>,
+    /// Work-mode brief (the player brought a real problem): changes how the agent thinks and speaks.
+    pub work: Option<&'a str>,
 }
 
 /// Output of the think stage.
@@ -160,17 +162,18 @@ impl TurnData {
             types: &self.types,
             relevant: &self.relevant,
             private: plan.channel.is_some(),
+            work: plan.work,
         }
     }
 }
 
 /// Think stage only — run for all beats in parallel before anyone speaks.
-pub async fn pre_think(app: &AppState, agent_id: &str, beat: &crate::models::Beat, room_mood: Option<&str>, focus_node: Option<&str>, library: Option<&str>) -> Option<Thought> {
+pub async fn pre_think(app: &AppState, agent_id: &str, beat: &crate::models::Beat, room_mood: Option<&str>, focus_node: Option<&str>, library: Option<&str>, work: Option<&str>) -> Option<Thought> {
     if app.cfg.agent_mode == "single" {
         return None;
     }
     let data = load_turn(app, agent_id, focus_node, false, None).await.ok()?;
-    let plan = TurnPlan { beat: Some(beat), scene_so_far: vec![], room_mood, focus_node, library, pre: None, pre_records: vec![], channel: None, reply_to: None };
+    let plan = TurnPlan { beat: Some(beat), scene_so_far: vec![], room_mood, focus_node, library, pre: None, pre_records: vec![], channel: None, reply_to: None, work };
     let ctx = data.ctx(&plan, false);
     Some(think(app, &data.model, &ctx, &data.agents).await)
 }
@@ -208,8 +211,29 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, mut plan: TurnPlan<'_>,
         think_then_speak(app, &model, &ctx, &agents, pre).await
     };
     let speech = strip_name_prefix(&speech, &agent.name);
-    let (speech, acts) = extract_acts(&speech);
-    let (speech, notes) = extract_notes(&speech);
+    let (mut speech, mut acts) = extract_acts(&speech);
+    let (speech0, mut notes) = extract_notes(&speech);
+    speech = speech0;
+    // An empty line on a speaking beat is a model hiccup, not a choice: one plain retry, then the
+    // turn is dropped rather than posting «молчит» into a working conversation.
+    let silence_beat = plan.beat.and_then(|b| b.r#move.as_deref()).map(|m| m.contains("молчан")).unwrap_or(false);
+    if speech.trim().is_empty() && !silence_beat && app.cfg.agent_mode != "single" {
+        let retry_opts = ChatOpts { temperature: 0.8, max_tokens: 450, json_mode: false, prefill: None, presence_penalty: Some(0.4), frequency_penalty: Some(0.4) };
+        let msgs = [ChatMessage::system(prompts::speak_system(&ctx)), ChatMessage::user(prompts::speak_user(&ctx, &agents, ego.as_deref().unwrap_or(""), "", None))];
+        if let Ok(raw) = app.llm.chat(&model, &msgs, &retry_opts).await {
+            let again = strip_name_prefix(raw.trim().trim_matches('"'), &agent.name);
+            let (s1, a1) = extract_acts(&again);
+            let (s2, n1) = extract_notes(&s1);
+            if !s2.trim().is_empty() {
+                speech = s2;
+                acts.extend(a1);
+                notes.extend(n1);
+            }
+        }
+        if speech.trim().is_empty() {
+            anyhow::bail!("{} не нашёл слов — ход пропущен", agent.name);
+        }
+    }
     let speech = if speech.trim().is_empty() { "*молчит*".to_string() } else { speech };
     let addressee = plan.beat.and_then(|b| b.addressee.clone());
     let mv = plan.beat.and_then(|b| b.r#move.clone());

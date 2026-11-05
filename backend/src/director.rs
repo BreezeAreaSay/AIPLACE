@@ -107,7 +107,7 @@ pub async fn run_director(app: &AppState, trigger: &Trigger) -> Result<DirectorL
         }
     };
 
-    normalize_scene(&mut output, &agents, &recent_speakers);
+    normalize_scene(&mut output, &agents, &recent_speakers, false);
     apply_agendas(app, &output, &agents).await?;
     apply_inner_states(app, &output, &agents).await?;
     apply_stats(app, &output, &agents, trigger).await?;
@@ -298,10 +298,34 @@ pub fn stakes_text(st: &[(String, i32, Vec<&'static str>)], agents: &[Agent]) ->
         .join("\n")
 }
 
-pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String]) {
+/// Models answer in English or invent moves; the UI and the agents expect the Russian set.
+pub fn normalize_move(m: &str) -> String {
+    let l = m.trim().to_lowercase();
+    let r = match l.as_str() {
+        "answer" | "reply" | "response" => "ответ",
+        "attack" | "challenge" => "атака",
+        "concession" | "concede" | "yield" => "уступка",
+        "interruption" | "interrupt" | "interject" => "перебивка",
+        "agreement" | "agree" | "support" => "согласие",
+        "clarification" | "clarify" | "question" => "уточнение",
+        "confession" | "admission" | "admit" => "признание",
+        "alliance" | "ally" => "союз",
+        "ignore" | "ignore_player" | "dismiss" => "игнор_игрока",
+        "silence" | "silent" | "pause" => "молчание",
+        "desire" | "wish" | "want" => "желание",
+        "proposal" | "suggestion" | "suggest" | "offer" | "propose" => "предложение",
+        "objection" | "object" | "counter" | "disagree" | "disagreement" | "возражает" => "возражение",
+        "mockery" | "mock" | "tease" | "taunt" => "насмешка",
+        "defense" | "defence" | "defend" => "защита",
+        other => other,
+    };
+    mermaid::truncate_chars(r, 30)
+}
+
+pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String], work: bool) {
     let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
     // Big yards: two full beats, the rest of the room joins as a chorus of one-liners.
-    let max_beats = if alive.len() > 3 { 2 } else { MAX_BEATS };
+    let max_beats = if alive.len() > 3 || work { 2 } else { MAX_BEATS };
     let mut scene: Vec<crate::models::Beat> = Vec::new();
     // Legacy outputs without `scene`: synthesize from next_speakers.
     if out.scene.is_empty() {
@@ -327,7 +351,12 @@ pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[Str
             }
         });
         if let Some(m) = &b.r#move {
-            b.r#move = Some(mermaid::truncate_chars(m.trim(), 30));
+            let mut mv = normalize_move(m);
+            // A working round has no room for theatre: nobody stays silent or mocks the problem.
+            if work && !matches!(mv.as_str(), "ответ" | "предложение" | "возражение" | "уточнение" | "согласие" | "признание" | "уступка") {
+                mv = "ответ".into();
+            }
+            b.r#move = Some(mv);
         }
         cleaned.push(b);
         if cleaned.len() == max_beats {
@@ -522,7 +551,7 @@ pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)]
         .collect::<Vec<_>>()
         .join("\n");
     let scene = round.iter().map(|(w, t)| format!("[{w}]: {}", mermaid::truncate_chars(t, 400))).collect::<Vec<_>>().join("\n");
-    let system = format!("{} Ты — хор двора. Основные реплики уже сказаны; теперь остальные, кто стоял рядом, вставляют по короткой фразе — или молчат. Верни ТОЛЬКО JSON: {{\"lines\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"text\": \"до 14 слов\"}}], \"reactions\": [{{\"speaker\": \"id\", \"emoji\": \"один эмодзи\", \"on\": \"user|id основного говорящего\"}}]}}.\nreactions — 0–3 молчаливые реакции эмодзи на реплику игрока или основного говорящего (как в мессенджере): тот, кто не вставил слово, может отреагировать; не ставь реакцию сам себе.\nПравила: 0–3 вставки, каждая — в характере и манере речи этого персонажа, цепляется за КОНКРЕТНОЕ слово из реплик (подкол, согласие, междометие, уточняющий вопрос, ремарка в *звёздочках*); не повторяй сказанное; выше ставка — больше шанс вставить; у кого ставка отрицательная — молчит; если вставлять нечего — пустой список. Без имён в начале фраз. По-русски.", CHORUS_MARK);
+    let system = format!("{} Ты — хор двора. Основные реплики уже сказаны; теперь остальные, кто стоял рядом, вставляют по короткой фразе — или молчат. Верни ТОЛЬКО JSON: {{\"lines\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"text\": \"до 14 слов\"}}], \"reactions\": [{{\"speaker\": \"id\", \"emoji\": \"один эмодзи\", \"on\": \"user|id основного говорящего\"}}]}}.\nreactions — 0–3 молчаливые реакции эмодзи на реплику игрока или основного говорящего (как в мессенджере): тот, кто не вставил слово, может отреагировать; не ставь реакцию сам себе.\nПравила: 0–2 вставки, каждая — в характере и манере речи этого персонажа и ОБЯЗАТЕЛЬНО добавляет что-то: конкретное наблюдение, факт, приём, точное согласие или несогласие с названным словом, короткую ремарку в *звёздочках*. Запрещены пустые вопросы («а в чём его вина?», «и что же?»), смена темы («давайте о другом»), повтор сказанного и междометия ради присутствия. Сомневаешься — молчи: пустой список лучше шума. Выше ставка — больше шанс вставить; у кого ставка отрицательная — молчит. Без имён в начале фраз. По-русски.", CHORUS_MARK);
     let user = format!("РЕПЛИКА ИГРОКА: «{}»\nОСНОВНЫЕ РЕПЛИКИ РАУНДА:\n{}\nКТО СТОИТ РЯДОМ:\n{}", mermaid::truncate_chars(player_line, 500), scene, cast);
     let model = app.llm_settings().await.director_model;
     let opts = crate::openrouter::ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: true, prefill: None, presence_penalty: Some(0.4), frequency_penalty: Some(0.4) };
@@ -533,6 +562,11 @@ pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)]
         let sp = mermaid::normalize_author(l.get("speaker").and_then(|x| x.as_str()).unwrap_or(""));
         let text = l.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
         if text.is_empty() || !bystanders.iter().any(|a| a.id == sp) || out.iter().any(|(s, _, _): &(String, String, String)| s == &sp) {
+            continue;
+        }
+        // A five-word question with nothing in it is the classic weak-model filler: drop it.
+        let words = text.split_whitespace().count();
+        if (text.ends_with('?') && words <= 6) || text.to_lowercase().contains("поменяем тему") || text.to_lowercase().contains("сменим тему") {
             continue;
         }
         let to = match l.get("addressee").and_then(|x| x.as_str()).map(mermaid::normalize_author).as_deref() {

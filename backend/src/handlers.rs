@@ -1285,7 +1285,7 @@ async fn dm_send(Room { app, .. }: Room, Path(agent): Path<String>, Json(req): J
     app.emit(RoomEvent::Message { message: msg.clone() });
     let _turn = app.turn_lock.lock().await;
     app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} отвечает лично…", a.name) });
-    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: None, library: None, pre: None, pre_records: vec![], channel: Some(agent.clone()), reply_to: Some(msg.id) };
+    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: None, library: None, pre: None, pre_records: vec![], channel: Some(agent.clone()), reply_to: Some(msg.id), work: None };
     let reply = agent_runner::run_agent(&app, &agent, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
     app.emit(RoomEvent::Done);
     Ok(Json(vec![msg, reply]))
@@ -1318,7 +1318,7 @@ async fn ask_inline(Room { app, .. }: Room, Path(id): Path<String>, Json(req): J
     let _turn = app.turn_lock.lock().await;
     let msg = db::insert_message_in(&app.db, &channel, USER_ID, None, &format!("(в заметке «{}») {q}", node.label), Some(&agent.id), None, Some(&id), None).await?;
     app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} отвечает в заметке…", agent.name) });
-    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: Some(&id), library: None, pre: None, pre_records: vec![], channel: Some(channel), reply_to: Some(msg.id) };
+    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: Some(&id), library: None, pre: None, pre_records: vec![], channel: Some(channel), reply_to: Some(msg.id), work: None };
     let reply = agent_runner::run_agent(&app, &agent.id, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
     app.emit(RoomEvent::Done);
     Ok(Json(json!({ "agent": agent.id, "answer": reply.content })))
@@ -1677,13 +1677,14 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
     };
     let mut scene_so_far: Vec<(String, String)> = Vec::new();
     let library_text: Option<String> = plan.as_ref().and_then(|p| p.library.clone());
+    let work_text: Option<String> = plan.as_ref().and_then(|p| p.work.clone());
     let mut pre_records: Vec<crate::models::ActionRecord> = plan.as_mut().map(|p| std::mem::take(&mut p.pre_records)).unwrap_or_default();
     // Everyone thinks at once; then they speak in order, each hearing the previous lines.
     let thoughts: Vec<Option<agent_runner::Thought>> = if entry.output.scene.len() > 1 && app.cfg.agent_mode != "single" {
         for b in &entry.output.scene {
             app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} думает…", prompts::sender_name(&b.speaker, &agents)) });
         }
-        futures::future::join_all(entry.output.scene.iter().map(|b| agent_runner::pre_think(app, &b.speaker, b, mood.as_deref(), focus_node.as_deref(), library_text.as_deref()))).await
+        futures::future::join_all(entry.output.scene.iter().map(|b| agent_runner::pre_think(app, &b.speaker, b, mood.as_deref(), focus_node.as_deref(), library_text.as_deref(), work_text.as_deref()))).await
     } else {
         entry.output.scene.iter().map(|_| None).collect()
     };
@@ -1703,6 +1704,7 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
             pre_records: std::mem::take(&mut pre_records),
             channel: None,
             reply_to: None,
+            work: work_text.as_deref(),
         };
         match agent_runner::run_agent(app, &beat.speaker, plan_turn).await {
             Ok(m) => scene_so_far.push((name, m.content)),
@@ -1728,7 +1730,9 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
                         }
                     }
                 }
-                for (sp, to, text) in out.lines {
+                // In a working round the bystanders may react, but not interject: substance only.
+                let lines = if work_text.is_some() { vec![] } else { out.lines };
+                for (sp, to, text) in lines {
                     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
                     let reply_to = if to != "user" && to != "room" { recent.iter().rev().find(|m| m.sender_id == to).map(|m| m.id) } else { None };
                     let msg = db::insert_message_in(&app.db, "", &sp, None, &text, Some(&to), Some("вставка"), focus_node.as_deref(), reply_to).await?;

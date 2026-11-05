@@ -203,7 +203,7 @@ pub async fn run_rule(app: &AppState, rule: &GraphNode, force: bool, llm_ok: boo
             let sys_id = sys.id;
             app.emit(RoomEvent::Message { message: sys });
             app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} отвечает по правилу…", a.name) });
-            let plan = crate::agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: focus.as_deref(), library: None, pre: None, pre_records: vec![], channel: None, reply_to: Some(sys_id) };
+            let plan = crate::agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: focus.as_deref(), library: None, pre: None, pre_records: vec![], channel: None, reply_to: Some(sys_id), work: None };
             let reply = crate::agent_runner::run_agent(app, &a.id, plan).await?;
             app.emit(RoomEvent::Done);
             format!("{}: {}", a.name, crate::mermaid::truncate_chars(&reply.content, 80))

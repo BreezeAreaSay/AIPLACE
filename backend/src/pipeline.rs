@@ -60,6 +60,8 @@ pub struct RoundPlan {
     pub library: Option<String>,
     /// Actions the pipeline performed on the player's explicit request (shown on the first line).
     pub pre_records: Vec<crate::models::ActionRecord>,
+    /// Work-mode brief when the player brought a real problem (problem, facts, unknowns).
+    pub work: Option<String>,
 }
 
 /// Reader → contracts → Caster. Returns the plan with a staged scene.
@@ -141,6 +143,11 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         }
     }
     let fulfilled_text: Option<String> = if fulfilled.is_empty() { None } else { Some(fulfilled.join("\n")) };
+    // Work mode: the player brought a problem, not small talk — the round becomes a joint analysis.
+    let work_text: Option<String> = if matches!(trigger, Trigger::UserMessage | Trigger::Node { .. }) { prompts::work_text(&reader) } else { None };
+    if work_text.is_some() {
+        stages.push(StageLog { stage: "work".into(), ok: true, ms: 0, error: None });
+    }
     // Memory question → deterministic library lookup, handed to the speakers as a digest.
     let mut library: Option<String> = None;
     if let Some(q) = reader.get("memory_query").filter(|q| !q.is_null()) {
@@ -243,6 +250,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         stakes: &stakes_text,
         big_yard,
         fulfilled: fulfilled_text.as_deref(),
+        work: work_text.as_deref(),
         agents: &fresh,
         recent: &messages,
         recent_speakers: &recent_speakers,
@@ -272,7 +280,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
     }
     output.new_contracts = new_contracts;
     output.contract_updates = contract_updates;
-    crate::director::normalize_scene(&mut output, &fresh, &recent_speakers);
+    crate::director::normalize_scene(&mut output, &fresh, &recent_speakers, work_text.is_some());
     // A freshly appointed guarantor opens the scene.
     for c in &created {
         if let Some(g) = &c.guarantor_id {
@@ -294,7 +302,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         db::mark_events_narrated(&app.db, last.id).await?;
     }
     output.stages = stages.clone();
-    Ok(RoundPlan { output, reader, stages, first_round_message_id, library, pre_records })
+    Ok(RoundPlan { output, reader, stages, first_round_message_id, library, pre_records, work: work_text })
 }
 
 /// Cartographer ∥ Psychologist on the lines spoken this round; applies everything and
@@ -333,14 +341,14 @@ pub async fn after_speech(app: &AppState, trigger: &Trigger, plan: &mut RoundPla
     let mut log_a = Vec::new();
     let mut log_b = Vec::new();
     let (arch, psych) = tokio::join!(
-        call_json(app, "archivist", prompts::archivist_system(), prompts::archivist_user(&round, &agents, &types, &candidates, focus.as_ref()), 1200, &mut log_a),
+        call_json(app, "archivist", prompts::archivist_system(plan.work.is_some()), prompts::archivist_user(&round, &agents, &types, &candidates, focus.as_ref(), plan.work.as_deref()), 1500, &mut log_a),
         call_json(app, "psychologist", prompts::psychologist_system(), prompts::psychologist_user(&round, &agents, &relations, &plan.reader, &events), 900, &mut log_b),
     );
     plan.stages.extend(log_a);
     plan.stages.extend(log_b);
 
-    if let Some(v) = arch {
-        apply_archivist(app, &v, &round, &types).await?;
+    if let Some(v) = &arch {
+        apply_archivist(app, v, &round, &types).await?;
         // Mirror into the legacy DirectorOutput shape for the inspector.
         plan.output.graph_mutations = GraphMutations {
             nodes: v.get("objects").and_then(|o| o.as_array()).map(|arr| arr.iter().filter_map(|o| Some(crate::models::NewNode {
@@ -358,6 +366,11 @@ pub async fn after_speech(app: &AppState, trigger: &Trigger, plan: &mut RoundPla
             })).collect()).unwrap_or_default(),
         };
         plan.output.node_updates = Vec::<NodeUpdate>::new();
+    }
+    if plan.work.is_some() {
+        if let Err(e) = ensure_work_artifact(app, plan, &round, &agents, arch.as_ref()).await {
+            tracing::warn!(error = %e, "work artifact failed");
+        }
     }
     if let Some(v) = psych {
         plan.output.inner_states = v.get("inner_states").cloned().and_then(|x| serde_json::from_value(x).ok()).unwrap_or_default();
@@ -384,6 +397,120 @@ pub async fn after_speech(app: &AppState, trigger: &Trigger, plan: &mut RoundPla
     rest.graph_mutations = GraphMutations::default();
     rest.node_updates.clear();
     crate::director::apply_after_round(app, &rest, &agents, trigger).await?;
+    Ok(())
+}
+
+/// Work mode always leaves a trace: a «разбор» note (facts / who said what / next step / open
+/// questions) that grows with every round, the entities the Reader spotted, and a system line in
+/// the chat with chips — whatever the Archivist did or failed to do.
+async fn ensure_work_artifact(app: &AppState, plan: &RoundPlan, round: &[crate::models::Message], agents: &[crate::models::Agent], arch: Option<&Value>) -> Result<()> {
+    let Some(w) = plan.reader.get("work") else { return Ok(()) };
+    let problem = w.get("problem").and_then(|p| p.as_str()).map(str::trim).unwrap_or("");
+    if problem.is_empty() {
+        return Ok(());
+    }
+    let list = |key: &str| -> Vec<String> { w.get(key).and_then(|f| f.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| mermaid::truncate_chars(x.trim(), 200)).filter(|x| !x.is_empty()).take(6).collect()).unwrap_or_default() };
+    let facts = list("facts");
+    let unknowns = list("unknowns");
+    let nodes = db::list_nodes(&app.db).await?;
+    // Which note is the case: an explicit continuation, a razbor_* the Archivist just made, or a fresh slug.
+    let mut continues = w.get("continues").and_then(|c| c.as_str()).map(mermaid::safe_id).filter(|c| !c.is_empty() && nodes.iter().any(|n| &n.id == c && n.archived == 0));
+    // No explicit continuation: a case opened in the last 45 minutes is almost certainly the same one.
+    if continues.is_none() {
+        let cutoff = chrono::Utc::now() - chrono::Duration::minutes(45);
+        continues = db::recent_messages(&app.db, 60)
+            .await?
+            .iter()
+            .rev()
+            .find(|m| m.sender_id == "system" && m.r#move.as_deref() == Some("итог"))
+            .filter(|m| chrono::DateTime::parse_from_rfc3339(&m.created_at).map(|t| t.with_timezone(&chrono::Utc) > cutoff).unwrap_or(false))
+            .and_then(|m| m.node_id.clone())
+            .filter(|id| nodes.iter().any(|n| &n.id == id && n.archived == 0));
+    }
+    let arch_objects: Vec<&Value> = arch.and_then(|v| v.get("objects")).and_then(|o| o.as_array()).map(|a| a.iter().collect()).unwrap_or_default();
+    let arch_case = arch_objects.iter().filter_map(|o| o.get("id").and_then(|i| i.as_str())).map(mermaid::safe_id).find(|i| i.starts_with("razbor_"));
+    let id = continues.or(arch_case).unwrap_or_else(|| format!("razbor_{}", mermaid::safe_id(&mermaid::truncate_chars(problem, 48))));
+    let existing = db::get_node(&app.db, &id).await?;
+    let said: Vec<String> = round
+        .iter()
+        .filter(|m| m.sender_id != crate::models::USER_ID && m.sender_id != "system" && !m.content.trim().is_empty() && !m.content.starts_with('*'))
+        .map(|m| format!("- **{}:** {}", prompts::sender_name(&m.sender_id, agents), mermaid::truncate_chars(m.content.trim().lines().next().unwrap_or(""), 320)))
+        .collect();
+    let tasks: Vec<String> = arch_objects.iter().filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("task")).filter_map(|o| o.get("title").and_then(|t| t.as_str())).map(|t| format!("- [ ] [[{}]]", mermaid::sanitize_label(t))).take(3).collect();
+    let stamp = chrono::Local::now().format("%d.%m %H:%M").to_string();
+    let label = existing.as_ref().map(|n| n.label.clone()).unwrap_or_else(|| mermaid::sanitize_label(&mermaid::truncate_chars(problem, 60)));
+    let body = match &existing {
+        Some(n) if !n.body.trim().is_empty() => {
+            let mut b = n.body.trim_end().to_string();
+            let new_facts: Vec<&String> = facts.iter().filter(|f| !n.body.contains(f.as_str())).collect();
+            b.push_str(&format!("\n\n## Раунд {stamp}\n"));
+            if !new_facts.is_empty() {
+                b.push_str(&format!("Новое от игрока:\n{}\n", new_facts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")));
+            }
+            if !said.is_empty() {
+                b.push_str(&format!("{}\n", said.join("\n")));
+            }
+            let new_tasks: Vec<&String> = tasks.iter().filter(|t| !n.body.contains(t.as_str())).collect();
+            if !new_tasks.is_empty() {
+                b.push_str(&format!("Следующий шаг:\n{}\n", new_tasks.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("\n")));
+            }
+            let new_unknowns: Vec<&String> = unknowns.iter().filter(|u| !n.body.contains(u.as_str())).collect();
+            if !new_unknowns.is_empty() {
+                b.push_str(&format!("Открыто:\n{}\n", new_unknowns.iter().map(|u| format!("- {u}")).collect::<Vec<_>>().join("\n")));
+            }
+            b
+        }
+        _ => format!(
+            "## Факты\n{}\n\n## Разбор ({stamp})\n{}\n\n## Следующий шаг\n{}\n\n## Открытые вопросы\n{}\n",
+            if facts.is_empty() { "- (игрок пока не дал конкретики)".to_string() } else { facts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n") },
+            if said.is_empty() { "- (двор ещё не высказался)".to_string() } else { said.join("\n") },
+            if tasks.is_empty() { "- [ ] решить, с чего начать".to_string() } else { tasks.join("\n") },
+            if unknowns.is_empty() { "- —".to_string() } else { unknowns.iter().map(|u| format!("- {u}")).collect::<Vec<_>>().join("\n") },
+        ),
+    };
+    let props = json!({ "tags": ["разбор"], "summary": mermaid::truncate_chars(problem, 200) });
+    db::upsert_object(&app.db, &id, &label, "note", "archivist", Some(&body), Some(&props), None, None).await?;
+    // Entities the Reader spotted (a person by role, a project…), unless something like it exists.
+    let mut mentioned: Vec<String> = vec![id.clone()];
+    for e in w.get("entities").and_then(|x| x.as_array()).map(|a| a.iter().take(4).collect::<Vec<_>>()).unwrap_or_default() {
+        let (Some(ty), Some(title)) = (e.get("type").and_then(|t| t.as_str()), e.get("title").and_then(|t| t.as_str())) else { continue };
+        let title = mermaid::sanitize_label(title);
+        if title == "…" || title.chars().count() < 3 || !["human", "project", "task", "idea", "goal", "place", "event", "note"].contains(&ty) {
+            continue;
+        }
+        let eid = mermaid::safe_id(&title);
+        let same = nodes.iter().find(|n| n.id == eid || n.label.to_lowercase() == title.to_lowercase()).map(|n| n.id.clone());
+        let eid = match same {
+            Some(s) => s,
+            None => {
+                db::upsert_object(&app.db, &eid, &title, ty, "archivist", None, e.get("props"), None, None).await?;
+                eid
+            }
+        };
+        if eid != id {
+            db::insert_relation(&app.db, &eid, &id, "about", "из разбора", "archivist", 0.8).await?;
+            mentioned.push(eid);
+        }
+    }
+    for t in arch_objects.iter().filter_map(|o| o.get("id").and_then(|i| i.as_str())).map(mermaid::safe_id).filter(|i| i != &id).take(4) {
+        if db::node_exists(&app.db, &t).await? && !mentioned.contains(&t) {
+            mentioned.push(t);
+        }
+    }
+    db::place_unpositioned_nodes(&app.db).await?;
+    if let Some(m) = round.iter().find(|m| m.sender_id == crate::models::USER_ID) {
+        db::add_mention(&app.db, m.id, &id).await?;
+    }
+    let what = if existing.is_some() { "дополнен" } else { "заведён" };
+    let next = tasks.first().map(|t| format!(" · следующий шаг: {}", t.trim_start_matches("- [ ] ").trim_matches(|c| c == '[' || c == ']'))).unwrap_or_default();
+    let text = format!("📎 Разбор «{label}» {what}: фактов {}, открытых вопросов {}{next}. Растёт с каждым раундом — открой и правь.", facts.len(), unknowns.len());
+    let msg = db::insert_message_in(&app.db, "", "system", None, &text, Some(crate::models::USER_ID), Some("итог"), Some(&id), None).await?;
+    for oid in &mentioned {
+        db::add_mention(&app.db, msg.id, oid).await?;
+    }
+    let msg = db::with_mentions(&app.db, vec![msg]).await?.remove(0);
+    app.emit(crate::models::RoomEvent::Message { message: msg });
+    crate::handlers::emit_graph_pub(app).await?;
     Ok(())
 }
 

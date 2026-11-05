@@ -198,7 +198,15 @@ fn stage_reader(user_prompt: &str) -> String {
             }
             v
     };
+    let work = t.chars().count() >= 60 && regex::Regex::new(r"(?i)сотрудник|проблем|ситуац|как мне|компани|проект|клиент|задач|не знаю что|помоги разобрать").map(|r| r.is_match(&t)).unwrap_or(false);
+    let facts: Vec<String> = t.split(['.', ',', '\n']).map(|s| s.trim().to_string()).filter(|s| s.chars().count() >= 12).take(3).collect();
+    let mut entities = vec![];
+    if regex::Regex::new(r"(?i)сотрудник").map(|r| r.is_match(&t)).unwrap_or(false) {
+        entities.push(json!({"type": "human", "title": "Сотрудник-фрилансер", "props": {"role": "фрилансер"}}));
+    }
     json!({
+        "mode": if work { "work" } else { "talk" },
+        "work": if work { json!({"problem": format!("[MOCK] разобрать: {}", crate::mermaid::truncate_chars(&t, 60)), "facts": facts, "unknowns": ["[MOCK] как ставятся задачи", "[MOCK] есть ли регулярный созвон"], "entities": entities, "continues": null}) } else { json!(null) },
         "topic": crate::mermaid::truncate_chars(&t, 30),
         "player_intent": "[MOCK] хочет внимания",
         "question_to_agents": t.contains('?'),
@@ -237,6 +245,14 @@ fn stage_archivist(user_prompt: &str) -> String {
         .map(|r| r.captures_iter(user_prompt).map(|c| (c[1].parse().unwrap_or(0), c[3].to_string())).collect())
         .unwrap_or_default();
     let user_line = lines.iter().find(|(_, t)| !t.starts_with('<')).map(|(_, t)| t.clone()).unwrap_or_default();
+    if user_prompt.contains("РАБОЧИЙ РЕЖИМ") {
+        // Work mode: a concrete next step as a task, the person by role; the case note is the pipeline's job.
+        let mentions: Vec<serde_json::Value> = lines.iter().map(|(mid, _)| json!({"message_id": mid, "objects": ["razobrat_zadachi_s_sotrudnikom"]})).collect();
+        return json!({"objects": [
+            {"id": "razobrat_zadachi_s_sotrudnikom", "title": "Разобрать задачи с сотрудником", "type": "task", "props": {"status": "не начата", "priority": "высокий"}, "body": "[MOCK] следующий шаг из разбора", "author": "user"},
+            {"id": "sotrudnik_frilanser", "title": "Сотрудник-фрилансер", "type": "human", "props": {"role": "фрилансер"}, "body": "[MOCK] работает так себе, задачи теряются", "author": "user"}
+        ], "relations": [{"from": "razobrat_zadachi_s_sotrudnikom", "to": "sotrudnik_frilanser", "kind": "assigned_to", "label": "про него"}], "mentions": mentions, "new_types": []}).to_string();
+    }
     let title = crate::mermaid::truncate_chars(&user_line, 40);
     let id = crate::mermaid::safe_id(&title);
     let is_task = regex::Regex::new(r"(?i)обеща|сделаю|напишу|надо").map(|r| r.is_match(&user_line)).unwrap_or(false);
