@@ -383,7 +383,7 @@ export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePen
                 {su && (
                   <span className="ml-auto normal-case tracking-normal text-zinc-600">
                     {su.branch} · {su.head}
-                    {su.dirty ? ' · есть локальные правки' : ''}
+                    {su.dirty ? ' · локальные правки (уйдут в stash)' : ''}
                   </span>
                 )}
               </div>
@@ -402,10 +402,14 @@ export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePen
                         ))}
                       </ul>
                     </div>
-                  ) : (
-                    <div className="text-zinc-500">
-                      Ты на последней версии{su.error ? ` (проверка не удалась: ${su.error})` : ''}. Проверено {new Date(su.checked_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.
+                  ) : su.error ? (
+                    <div className="rounded border border-magenta/40 bg-magenta/5 px-3 py-2">
+                      <div className="text-magenta">Проверить не удалось, поэтому неизвестно, есть ли новое.</div>
+                      <div className="mt-1 break-all font-mono text-[10px] text-zinc-500">{su.error}</div>
+                      {su.hint && <div className="mt-1 text-zinc-300">{su.hint}</div>}
                     </div>
+                  ) : (
+                    <div className="text-zinc-500">Ты на последней версии. Проверено {new Date(su.checked_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.</div>
                   )}
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -436,9 +440,9 @@ export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePen
                             setSuBusy('idle')
                           })
                       }}
-                      disabled={suBusy !== 'idle' || !editable || su.dirty}
+                      disabled={suBusy !== 'idle' || !editable}
                       className="flex items-center gap-1 rounded bg-acid px-3 py-1.5 font-mono text-xs font-bold text-void hover:shadow-glow disabled:opacity-40"
-                      title={su.dirty ? 'Сначала убери локальные правки (git stash)' : 'git pull → сборка → перезапуск'}
+                      title={su.dirty ? 'Локальные правки (обычно lock-файлы после сборки) будут отложены в git stash и возвращены после обновления' : 'git pull → сборка → перезапуск'}
                     >
                       <ArrowUpCircle size={12} /> {su.behind > 0 ? 'обновить и перезапустить' : 'пересобрать и перезапустить'}
                     </button>

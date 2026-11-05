@@ -346,6 +346,7 @@ export interface SourceUpdate {
   exe: string
   checked_at: string
   error: string | null
+  hint: string | null
 }
 
 export interface UpdateStatus {

@@ -29,6 +29,8 @@ pub struct SourceUpdate {
     pub exe: String,
     pub checked_at: String,
     pub error: Option<String>,
+    /// What to do about `error`, when we recognise it.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +100,22 @@ pub async fn check() -> Result<SourceUpdate> {
     let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.unwrap_or_else(|_| "main".into());
     let branch = if branch == "HEAD" { "main".to_string() } else { branch };
     let fetch_err = git(&repo, &["fetch", "--quiet", "origin", &branch]).await.err().map(|e| e.to_string());
+    let hint = fetch_err.as_deref().and_then(|e| {
+        let low = e.to_lowercase();
+        if low.contains("permission denied") || low.contains("отказано в доступе") {
+            Some(if cfg!(windows) {
+                format!("Папка клона недоступна для записи (так бывает после переноса из system32 — права унаследованы от системной папки). В PowerShell от администратора: takeown /F \"{0}\" /R /D Y ; icacls \"{0}\" /reset /T /C /Q — затем «проверить» снова.", repo.display())
+            } else {
+                format!("Папка клона недоступна для записи: sudo chown -R $USER \"{}\"", repo.display())
+            })
+        } else if low.contains("could not resolve host") || low.contains("unable to access") || low.contains("timed out") {
+            Some("Нет связи с GitHub — проверь сеть или прокси.".into())
+        } else if low.contains("dubious ownership") || low.contains("safe.directory") {
+            Some(format!("git считает папку чужой: git config --global --add safe.directory \"{}\"", repo.display()))
+        } else {
+            None
+        }
+    });
     let head = git(&repo, &["rev-parse", "--short=9", "HEAD"]).await.unwrap_or_default();
     let remote_ref = format!("origin/{branch}");
     let remote = git(&repo, &["rev-parse", "--short=9", &remote_ref]).await.unwrap_or_default();
@@ -124,6 +142,7 @@ pub async fn check() -> Result<SourceUpdate> {
         exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
         checked_at: chrono::Utc::now().to_rfc3339(),
         error: fetch_err,
+        hint,
     })
 }
 
@@ -139,8 +158,17 @@ try {
   Step "жду, пока закроется приложение (pid $ProcId)"
   while (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }
   Set-Location $Repo
+  $Dirty = (git status --porcelain --untracked-files=no)
+  if ($Dirty) {
+    Step "откладываю локальные правки (lock-файлы и т.п.) в git stash"
+    git stash push -m ("triad-update " + (Get-Date -Format s)) | Out-Null
+  }
   Step "git pull"
-  git pull --ff-only; if ($LASTEXITCODE -ne 0) { throw "git pull не прошёл (локальные правки? выполни git stash)" }
+  git pull --ff-only; if ($LASTEXITCODE -ne 0) { throw "git pull не прошёл: " + (git status --short | Out-String) }
+  if ($Dirty) {
+    Step "возвращаю локальные правки"
+    git stash pop; if ($LASTEXITCODE -ne 0) { Write-Host "⚠ правки остались в git stash (конфликт с обновлением) — это не страшно, сборка продолжается"; git checkout -- . 2>$null }
+  }
   Step "frontend: npm install + build"
   Set-Location (Join-Path $Repo "frontend")
   npm install --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw "npm install (frontend)" }
@@ -188,7 +216,10 @@ relaunch() { if [ "$MODE" = "desktop" ]; then nohup "$EXE" >/dev/null 2>&1 & els
 step "жду выхода pid $PID"
 while kill -0 "$PID" 2>/dev/null; do sleep 1; done
 cd "$REPO" || fail "нет папки $REPO"
-step "git pull"; git pull --ff-only || fail "git pull не прошёл (локальные правки?)"
+DIRTY=$(git status --porcelain --untracked-files=no)
+if [ -n "$DIRTY" ]; then step "откладываю локальные правки в git stash"; git stash push -m "triad-update $(date -Iseconds)" >/dev/null; fi
+step "git pull"; git pull --ff-only || fail "git pull не прошёл: $(git status --short | head -5)"
+if [ -n "$DIRTY" ]; then step "возвращаю локальные правки"; git stash pop || { echo "⚠ правки остались в stash"; git checkout -- . ; }; fi
 step "frontend"; cd "$REPO/frontend" && npm install --no-audit --no-fund && npm run build || fail "сборка фронтенда"
 if [ "$MODE" = "desktop" ]; then
   step "desktop"; cd "$REPO/desktop" && npm install --no-audit --no-fund && npx tauri build --no-bundle || fail "сборка десктопа"
