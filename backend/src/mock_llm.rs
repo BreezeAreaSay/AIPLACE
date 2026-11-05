@@ -17,7 +17,11 @@ pub fn respond(messages: &[ChatMessage], _opts: &ChatOpts) -> String {
         .find(|m| m.role == "user")
         .map(|m| m.content.as_str())
         .unwrap_or("");
-    if system.contains("[STAGE-GARDENER]") {
+    if system.contains("[STAGE-CHORUS]") {
+        let ids: Vec<String> = regex::Regex::new(r"\(id (\w+)\)").ok().map(|r| r.captures_iter(user).map(|c| c[1].to_string()).collect()).unwrap_or_default();
+        let lines: Vec<serde_json::Value> = ids.iter().take(2).enumerate().map(|(i, id)| json!({ "speaker": id, "addressee": if i == 0 { "user" } else { ids[0].as_str() }, "text": if i == 0 { "[MOCK] *хмыкает* Ну-ну, посмотрим." } else { "[MOCK] Опять ты за своё." } })).collect();
+        json!({ "lines": lines }).to_string()
+    } else if system.contains("[STAGE-GARDENER]") {
         stage_gardener(user)
     } else if system.contains("[STAGE-CHRONICLE]") {
         json!({ "title": "тихий день с одним файлом", "text": "Игрок принёс файл, двор его прочитал и разложил по полкам. Главная тема дня — [[Осциллограф С1-94]]: Аркадий настаивает на цифрах, остальные — на смысле.\n\n- слово про лампу остаётся открытым\n- в библиотеке стало на два объекта больше", "mood": 3, "tomorrow": "спросить игрока, купил ли он лампу" }).to_string()
@@ -175,6 +179,17 @@ fn stage_reader(user_prompt: &str) -> String {
     let t = regex::Regex::new(r"РЕПЛИКА ИГРОКА: «(.+)»").ok().and_then(|r| r.captures(user_prompt).map(|c| c[1].to_string())).unwrap_or_default();
     let promise = regex::Regex::new(r"(?i)обеща|даю слово|сделаю|напишу").map(|r| r.is_match(&t)).unwrap_or(false);
     let deadline = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let requests: Vec<serde_json::Value> = {
+            let mut v = vec![];
+            if regex::Regex::new(r"(?i)википеди").map(|r| r.is_match(&t)).unwrap_or(false) { v.push(json!({"kind": "wiki", "query": crate::mermaid::truncate_chars(&t, 40)})); }
+            else if regex::Regex::new(r"(?i)найди|погугли|поищи|в интернете|можете ли искать").map(|r| r.is_match(&t)).unwrap_or(false) { v.push(json!({"kind": "search", "query": crate::mermaid::truncate_chars(&t, 40)})); }
+            if regex::Regex::new(r"(?i)погод").map(|r| r.is_match(&t)).unwrap_or(false) { v.push(json!({"kind": "weather"})); }
+            if let Some(c) = regex::Regex::new(r#"(?i)(?:заведи|создай|запиши)\s+(?:контакт|задачу|место|заметку|идею)?\s*[«"]?([^»"]{3,60})"#).ok().and_then(|r| r.captures(&t).map(|c| c[1].to_string())) {
+                let ty = if t.contains("контакт") || t.contains("человек") { "human" } else if t.contains("место") { "place" } else if t.contains("задач") { "task" } else if t.contains("иде") { "idea" } else { "note" };
+                v.push(json!({"kind": "create", "type": ty, "title": c.trim()}));
+            }
+            v
+    };
     json!({
         "topic": crate::mermaid::truncate_chars(&t, 30),
         "player_intent": "[MOCK] хочет внимания",
@@ -183,7 +198,8 @@ fn stage_reader(user_prompt: &str) -> String {
         "promises": if promise { json!([{"title": crate::mermaid::truncate_chars(&t, 60), "deadline": deadline}]) } else { json!([]) },
         "contract_reports": [],
         "node_refs": [],
-        "memory_query": if regex::Regex::new(r"(?i)что я|что у меня|напомни|какие у меня").map(|r| r.is_match(&t)).unwrap_or(false) { json!({"text": t, "type": null}) } else { json!(null) }
+        "memory_query": if regex::Regex::new(r"(?i)что я|что у меня|напомни|какие у меня").map(|r| r.is_match(&t)).unwrap_or(false) { json!({"text": t, "type": null}) } else { json!(null) },
+        "requests": requests
     })
     .to_string()
 }

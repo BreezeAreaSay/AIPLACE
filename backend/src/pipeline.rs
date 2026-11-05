@@ -58,6 +58,8 @@ pub struct RoundPlan {
     pub first_round_message_id: i64,
     /// Library digest answering the player's memory question, if any.
     pub library: Option<String>,
+    /// Actions the pipeline performed on the player's explicit request (shown on the first line).
+    pub pre_records: Vec<crate::models::ActionRecord>,
 }
 
 /// Reader → contracts → Caster. Returns the plan with a staged scene.
@@ -83,10 +85,56 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
     let mut reader = json!({ "topic": mermaid::truncate_chars(&last_user, 40), "feeds": {}, "promises": [], "contract_reports": [], "node_refs": [] });
     if matches!(trigger, Trigger::UserMessage | Trigger::Node { .. }) && !last_user.is_empty() {
         let recent: Vec<_> = messages.iter().rev().take(6).rev().cloned().collect();
-        if let Some(v) = call_json(app, "reader", prompts::reader_system(), prompts::reader_user(&now, &last_user, &recent, &agents, &open, &nodes), 500, &mut stages).await {
+        if let Some(v) = call_json(app, "reader", prompts::reader_system(&agents), prompts::reader_user(&now, &last_user, &recent, &agents, &open, &nodes), 600, &mut stages).await {
             reader = v;
         }
     }
+    // ── Explicit requests: do them now, deterministically, so nobody has to "promise to look it up" ──
+    let mut pre_records: Vec<crate::models::ActionRecord> = vec![];
+    let mut fulfilled: Vec<String> = vec![];
+    if matches!(trigger, Trigger::UserMessage | Trigger::Node { .. }) {
+        let reqs: Vec<Value> = reader.get("requests").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let settings = app.llm_settings().await;
+        let actor = agents.iter().filter(|a| a.is_alive()).map(|a| a.id.clone()).next().unwrap_or_else(|| "system".into());
+        for r in reqs.iter().take(3) {
+            let kind = r.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            let query = r.get("query").and_then(|q| q.as_str()).unwrap_or("").trim().to_string();
+            let (tool, args, label) = match kind {
+                "search" if settings.search_provider().is_some() && !query.is_empty() => ("web_search", json!({ "query": query, "limit": 5 }), format!("поиск в сети «{query}»")),
+                "wiki" if !query.is_empty() => ("lookup", json!({ "kind": "wiki", "query": query }), format!("Википедия «{query}»")),
+                "lookup_book" if !query.is_empty() => ("lookup", json!({ "kind": "book", "query": query }), format!("книга «{query}»")),
+                "lookup_movie" if !query.is_empty() => ("lookup", json!({ "kind": "movie", "query": query }), format!("фильм «{query}»")),
+                "weather" if settings.get("WEATHER_CITY").is_some() => ("weather_now", json!({}), "погода".to_string()),
+                "create" => {
+                    let title = r.get("title").and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty()).unwrap_or(&query).trim().to_string();
+                    if title.is_empty() {
+                        continue;
+                    }
+                    let ty = r.get("type").and_then(|t| t.as_str()).unwrap_or("note");
+                    ("library_create", json!({ "type": ty, "title": title }), format!("завести «{title}»"))
+                }
+                _ => continue,
+            };
+            app.emit(crate::models::RoomEvent::Status { stage: "director".into(), detail: format!("по просьбе игрока: {label}…") });
+            match crate::tools::call(app, &actor, tool, &args).await {
+                Ok((res, rec)) => {
+                    let digest = match tool {
+                        "web_search" => res.get("results").map(|h| h.as_array().map(|a| a.iter().take(5).map(|x| format!("- {} — {} ({})", x["title"].as_str().unwrap_or(""), x["snippet"].as_str().unwrap_or(""), x["url"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")).unwrap_or_default()).unwrap_or_default(),
+                        "lookup" => res.get("error").and_then(|e| e.as_str()).map(|e| format!("не нашлось: {e}")).unwrap_or_else(|| format!("{} ({}): {}{}", res["title"].as_str().unwrap_or(""), res["source"].as_str().unwrap_or(""), res["body"].as_str().unwrap_or(""), res["url"].as_str().map(|u| format!(" {u}")).unwrap_or_default())),
+                        "weather_now" => res.get("line").and_then(|l| l.as_str()).map(str::to_string).or_else(|| res.get("error").and_then(|e| e.as_str()).map(str::to_string)).unwrap_or_default(),
+                        _ => res.get("error").and_then(|e| e.as_str()).map(|e| format!("не удалось: {e}")).unwrap_or_else(|| format!("создан объект {} (id {})", args["title"].as_str().unwrap_or(""), res["id"].as_str().unwrap_or(""))),
+                    };
+                    fulfilled.push(format!("• {label}: {}", mermaid::truncate_chars(&digest, 900)));
+                    pre_records.extend(rec);
+                }
+                Err(e) => fulfilled.push(format!("• {label}: не удалось ({e})")),
+            }
+        }
+        if !fulfilled.is_empty() {
+            stages.push(StageLog { stage: "requests".into(), ok: true, ms: 0, error: None });
+        }
+    }
+    let fulfilled_text: Option<String> = if fulfilled.is_empty() { None } else { Some(fulfilled.join("\n")) };
     // Memory question → deterministic library lookup, handed to the speakers as a digest.
     let mut library: Option<String> = None;
     if let Some(q) = reader.get("memory_query").filter(|q| !q.is_null()) {
@@ -173,6 +221,10 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         None => None,
     };
     let player = prompts::player_line(&app.llm_settings().await);
+    let own_objects: Vec<(String, String)> = nodes.iter().filter(|n| n.created_by != crate::models::USER_ID && n.created_by != "archivist" && n.created_by != "system").map(|n| (n.created_by.clone(), n.label.clone())).collect();
+    let stakes_v = crate::director::stakes(&fresh, &last_user, &messages, &recent_speakers, &own_objects);
+    let stakes_text = if matches!(trigger, Trigger::UserMessage | Trigger::Node { .. }) { crate::director::stakes_text(&stakes_v, &fresh) } else { String::new() };
+    let big_yard = fresh.iter().filter(|a| a.is_alive()).count() > 3;
     let caster_in = prompts::CasterInput {
         trigger: trigger.as_str(),
         life_kind,
@@ -182,6 +234,9 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         news: &news,
         focus_files: focus_files.as_deref(),
         player: player.as_deref(),
+        stakes: &stakes_text,
+        big_yard,
+        fulfilled: fulfilled_text.as_deref(),
         agents: &fresh,
         recent: &messages,
         recent_speakers: &recent_speakers,
@@ -192,6 +247,13 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         memories: &memories,
     };
     let caster = call_json(app, "caster", prompts::caster_system(), prompts::caster_user(&caster_in), 900, &mut stages).await;
+    if let Some(f) = &fulfilled_text {
+        let block = format!("ВЫПОЛНЕНО ПО ПРОСЬБЕ ИГРОКА (это факты, скажи о них по существу; не говори «могу поискать»):\n{f}");
+        library = Some(match library.take() {
+            Some(l) => format!("{block}\n{l}"),
+            None => block,
+        });
+    }
 
     let mut output = DirectorOutput::default();
     if let Some(v) = &caster {
@@ -226,7 +288,7 @@ pub async fn before_speech(app: &AppState, trigger: &Trigger) -> Result<RoundPla
         db::mark_events_narrated(&app.db, last.id).await?;
     }
     output.stages = stages.clone();
-    Ok(RoundPlan { output, reader, stages, first_round_message_id, library })
+    Ok(RoundPlan { output, reader, stages, first_round_message_id, library, pre_records })
 }
 
 /// Cartographer ∥ Psychologist on the lines spoken this round; applies everything and

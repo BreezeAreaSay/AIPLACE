@@ -1434,7 +1434,18 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
         _ => None,
     };
     let mut scene_so_far: Vec<(String, String)> = Vec::new();
-    for beat in &entry.output.scene {
+    let library_text: Option<String> = plan.as_ref().and_then(|p| p.library.clone());
+    let mut pre_records: Vec<crate::models::ActionRecord> = plan.as_mut().map(|p| std::mem::take(&mut p.pre_records)).unwrap_or_default();
+    // Everyone thinks at once; then they speak in order, each hearing the previous lines.
+    let thoughts: Vec<Option<agent_runner::Thought>> = if entry.output.scene.len() > 1 && app.cfg.agent_mode != "single" {
+        for b in &entry.output.scene {
+            app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} думает…", prompts::sender_name(&b.speaker, &agents)) });
+        }
+        futures::future::join_all(entry.output.scene.iter().map(|b| agent_runner::pre_think(app, &b.speaker, b, mood.as_deref(), focus_node.as_deref(), library_text.as_deref()))).await
+    } else {
+        entry.output.scene.iter().map(|_| None).collect()
+    };
+    for (i, beat) in entry.output.scene.iter().enumerate() {
         let name = prompts::sender_name(&beat.speaker, &agents);
         app.emit(RoomEvent::Status {
             stage: "agent".into(),
@@ -1445,11 +1456,33 @@ async fn run_round_inner(app: &AppState, trigger: Trigger, alive_before: Vec<Str
             scene_so_far: scene_so_far.clone(),
             room_mood: mood.as_deref(),
             focus_node: focus_node.as_deref(),
-            library: plan.as_ref().and_then(|p| p.library.as_deref()),
+            library: library_text.as_deref(),
+            pre: thoughts.get(i).cloned().flatten(),
+            pre_records: std::mem::take(&mut pre_records),
         };
         match agent_runner::run_agent(app, &beat.speaker, plan_turn).await {
             Ok(m) => scene_so_far.push((name, m.content)),
             Err(e) => tracing::warn!(agent = %beat.speaker, error = %e, "agent turn skipped"),
+        }
+    }
+    // Big yard: the bystanders chime in (one cheap call, several short lines).
+    let alive_now: Vec<_> = agents.iter().filter(|a| a.is_alive()).collect();
+    if alive_now.len() > 3 && !scene_so_far.is_empty() && matches!(trigger, Trigger::UserMessage | Trigger::Node { .. } | Trigger::Tick) && app.llm.budget_left() {
+        let main: Vec<String> = entry.output.scene.iter().map(|b| b.speaker.clone()).collect();
+        let last_user = db::recent_messages(&app.db, 30).await?.iter().rev().find(|m| m.sender_id == USER_ID).map(|m| m.content.clone()).unwrap_or_default();
+        let recent_sp = director::recent_speakers(&db::recent_messages(&app.db, 40).await?, &agents);
+        let st = director::stakes(&agents, &last_user, &db::recent_messages(&app.db, 12).await?, &recent_sp, &[]);
+        app.emit(RoomEvent::Status { stage: "agent".into(), detail: "остальные вставляют по слову…".into() });
+        match director::chorus(app, &agents, &scene_so_far, &last_user, &main, &st).await {
+            Ok(lines) => {
+                for (sp, to, text) in lines {
+                    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                    let msg = db::insert_message_full(&app.db, &sp, None, &text, Some(&to), Some("вставка"), focus_node.as_deref()).await?;
+                    app.emit(RoomEvent::Message { message: msg.clone() });
+                    scene_so_far.push((prompts::sender_name(&sp, &agents), text));
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "chorus skipped"),
         }
     }
     if let Some(p) = plan.as_mut() {

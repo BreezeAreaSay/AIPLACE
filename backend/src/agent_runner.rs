@@ -21,6 +21,19 @@ pub struct TurnPlan<'a> {
     pub room_mood: Option<&'a str>,
     pub focus_node: Option<&'a str>,
     pub library: Option<&'a str>,
+    /// A thought prepared in parallel before the beats started (skips the think stage).
+    pub pre: Option<Thought>,
+    /// Actions the pipeline already performed on the player's explicit request; shown as
+    /// chips on this line.
+    pub pre_records: Vec<crate::models::ActionRecord>,
+}
+
+/// Output of the think stage.
+#[derive(Debug, Clone, Default)]
+pub struct Thought {
+    pub ego: String,
+    pub hook: String,
+    pub found: Option<String>,
 }
 
 pub async fn run_agent(app: &AppState, agent_id: &str, plan: TurnPlan<'_>) -> Result<Message> {
@@ -32,7 +45,30 @@ pub async fn run_last_words(app: &AppState, agent_id: &str) -> Result<Message> {
     run_agent_inner(app, agent_id, TurnPlan { room_mood: Some("траур и злорадство"), ..Default::default() }, true).await
 }
 
-async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dying: bool) -> Result<Message> {
+/// Everything a turn needs, loaded once (owned, so the think stage can run before the beats).
+struct TurnData {
+    agents: Vec<crate::models::Agent>,
+    agent: crate::models::Agent,
+    others: Vec<crate::models::Agent>,
+    messages: Vec<Message>,
+    nodes: Vec<crate::models::GraphNode>,
+    own_recent: Vec<String>,
+    contracts: Vec<crate::models::Contract>,
+    relations: Vec<crate::models::Relation>,
+    memory: Option<crate::models::AgentMemory>,
+    events: Vec<crate::models::RoomEventRecord>,
+    focus_node: Option<crate::models::GraphNode>,
+    focus_notes: Vec<crate::models::NodeNote>,
+    focus_files: Option<String>,
+    world: Option<String>,
+    can_search: bool,
+    player: Option<String>,
+    types: Vec<crate::models::ObjectType>,
+    relevant: Vec<crate::models::GraphNode>,
+    model: String,
+}
+
+async fn load_turn(app: &AppState, agent_id: &str, focus: Option<&str>, dying: bool) -> Result<TurnData> {
     let agents = db::list_agents(&app.db).await?;
     let agent = agents
         .iter()
@@ -56,7 +92,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
     let relations = db::list_relations(&app.db).await?;
     let memory = db::get_memory(&app.db, agent_id).await?;
     let events = db::recent_events(&app.db, 4).await?;
-    let focus_node = match plan.focus_node {
+    let focus_node = match focus {
         Some(id) => db::get_node(&app.db, id).await?,
         None => None,
     };
@@ -89,31 +125,58 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
             relevant.insert(0, n.clone());
         }
     }
-
-    let ctx = AgentContext {
-        agent: &agent,
-        others: &others,
-        messages: &messages,
-        nodes: &nodes,
-        own_recent: &own_recent,
-        room_mood: plan.room_mood,
-        contracts: &contracts,
-        relations: &relations,
-        memory: memory.as_ref().map(|m| m.summary.as_str()),
-        events: &events,
-        dying,
-        beat: plan.beat,
-        scene_so_far: &plan.scene_so_far,
-        focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
-        library: plan.library,
-        focus_files: focus_files.as_deref(),
-        world: world.as_deref(),
-        can_search,
-        player: player.as_deref(),
-        types: &types,
-        relevant: &relevant,
-    };
     let model = if agent.model.trim().is_empty() { settings.model.clone() } else { agent.model.trim().to_string() };
+    Ok(TurnData { agents, agent, others, messages, nodes, own_recent, contracts, relations, memory, events, focus_node, focus_notes, focus_files, world, can_search, player, types, relevant, model })
+}
+
+impl TurnData {
+    fn ctx<'a>(&'a self, plan: &'a TurnPlan<'a>, dying: bool) -> AgentContext<'a> {
+        AgentContext {
+            agent: &self.agent,
+            others: &self.others,
+            messages: &self.messages,
+            nodes: &self.nodes,
+            own_recent: &self.own_recent,
+            room_mood: plan.room_mood,
+            contracts: &self.contracts,
+            relations: &self.relations,
+            memory: self.memory.as_ref().map(|m| m.summary.as_str()),
+            events: &self.events,
+            dying,
+            beat: plan.beat,
+            scene_so_far: &plan.scene_so_far,
+            focus: self.focus_node.as_ref().map(|n| (n, self.focus_notes.as_slice())),
+            library: plan.library,
+            focus_files: self.focus_files.as_deref(),
+            world: self.world.as_deref(),
+            can_search: self.can_search,
+            player: self.player.as_deref(),
+            types: &self.types,
+            relevant: &self.relevant,
+        }
+    }
+}
+
+/// Think stage only — run for all beats in parallel before anyone speaks.
+pub async fn pre_think(app: &AppState, agent_id: &str, beat: &crate::models::Beat, room_mood: Option<&str>, focus_node: Option<&str>, library: Option<&str>) -> Option<Thought> {
+    if app.cfg.agent_mode == "single" {
+        return None;
+    }
+    let data = load_turn(app, agent_id, focus_node, false).await.ok()?;
+    let plan = TurnPlan { beat: Some(beat), scene_so_far: vec![], room_mood, focus_node, library, pre: None, pre_records: vec![] };
+    let ctx = data.ctx(&plan, false);
+    Some(think(app, &data.model, &ctx, &data.agents).await)
+}
+
+async fn run_agent_inner(app: &AppState, agent_id: &str, mut plan: TurnPlan<'_>, dying: bool) -> Result<Message> {
+    let data = load_turn(app, agent_id, plan.focus_node, dying).await?;
+    let agent = data.agent.clone();
+    let agents = data.agents.clone();
+    let types = data.types.clone();
+    let model = data.model.clone();
+    let pre = plan.pre.take();
+    let pre_records = std::mem::take(&mut plan.pre_records);
+    let ctx = data.ctx(&plan, dying);
     let (ego, speech) = if app.cfg.agent_mode == "single" {
         let msgs = [
             ChatMessage::system(prompts::agent_system(&ctx)),
@@ -135,7 +198,7 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
             }
         }
     } else {
-        think_then_speak(app, &model, &ctx, &agents).await
+        think_then_speak(app, &model, &ctx, &agents, pre).await
     };
     let speech = strip_name_prefix(&speech, &agent.name);
     let (speech, acts) = extract_acts(&speech);
@@ -154,8 +217,9 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
     )
     .await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
-    // Library actions the agent took with this line.
-    let records = apply_acts(app, agent_id, &acts, &types).await;
+    // Library actions the agent took with this line (plus what the pipeline did on the player's request).
+    let mut records = pre_records;
+    records.extend(apply_acts(app, agent_id, &acts, &types).await);
     let msg = if records.is_empty() {
         msg
     } else {
@@ -186,10 +250,9 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dyi
 
 /// Pipeline turn: (1) a short private thought + the phrase to latch onto, (2) the line itself,
 /// (3) when a node is in focus, a one-line note on it. Each call is small enough for weak models.
-async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent]) -> (Option<String>, String) {
+/// Stage 1: a short private thought, the phrase to latch onto, and any lookups it asked for.
+async fn think(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent]) -> Thought {
     let think_opts = ChatOpts { temperature: 0.8, max_tokens: 220, json_mode: false, prefill: None, presence_penalty: Some(0.3), frequency_penalty: Some(0.3) };
-    let speak_opts = ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: false, prefill: None, presence_penalty: Some(0.6), frequency_penalty: Some(0.5) };
-
     let thought_raw = match app
         .llm
         .chat(model, &[ChatMessage::system(prompts::think_system(ctx)), ChatMessage::user(prompts::think_user(ctx, agents))], &think_opts)
@@ -216,8 +279,17 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
             Err(e) => tracing::warn!(error = %e, "web search failed"),
         }
     }
-    let found: Option<String> = if found_parts.is_empty() { None } else { Some(found_parts.join("\n")) };
+    Thought { ego, hook, found: if found_parts.is_empty() { None } else { Some(found_parts.join("\n")) } }
+}
 
+/// Pipeline turn: (1) thought (unless prepared in parallel), (2) the line itself (streamed, or
+/// through native tools), (3) when a node is in focus, a one-line note on it.
+async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent], pre: Option<Thought>) -> (Option<String>, String) {
+    let speak_opts = ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: false, prefill: None, presence_penalty: Some(0.6), frequency_penalty: Some(0.5) };
+    let Thought { ego, hook, found } = match pre {
+        Some(t) => t,
+        None => think(app, model, ctx, agents).await,
+    };
     // Native tool calling when the model supports it (or forced): the agent *uses* the system.
     let native = match app.cfg.agent_tools.as_str() {
         "native" => true,

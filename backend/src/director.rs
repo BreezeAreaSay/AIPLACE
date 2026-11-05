@@ -195,6 +195,10 @@ pub fn recent_speakers(messages: &[crate::models::Message], agents: &[Agent]) ->
             }
             continue;
         }
+        // chorus one-liners and care notes don't count as "had the floor"
+        if matches!(m.r#move.as_deref(), Some("вставка") | Some("забота") | Some("хроника")) {
+            continue;
+        }
         if agents.iter().any(|a| a.id == m.sender_id) && !seen.contains(&m.sender_id) {
             seen.push(m.sender_id.clone());
         }
@@ -245,8 +249,59 @@ pub fn derive_speakers(scene: &[crate::models::Beat]) -> Vec<String> {
 
 /// Validate the staged scene: known alive speakers, sane addressees, at most MAX_BEATS beats,
 /// and a soft rotation rule (someone who spoke two rounds running yields unless addressed).
+/// How much each inhabitant has at stake in the player's line (deterministic, cheap).
+/// Returns (id, score, reasons) sorted by score desc.
+pub fn stakes(agents: &[Agent], last_user: &str, messages: &[crate::models::Message], recent: &[String], own_objects: &[(String, String)]) -> Vec<(String, i32, Vec<&'static str>)> {
+    let text = last_user.to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3).collect();
+    let last_agent = messages.iter().rev().find(|m| m.sender_id != crate::models::USER_ID && m.sender_id != "system").map(|m| m.sender_id.clone());
+    let mut out: Vec<(String, i32, Vec<&'static str>)> = agents
+        .iter()
+        .filter(|a| a.is_alive())
+        .map(|a| {
+            let mut score = 0;
+            let mut why = vec![];
+            let name_parts: Vec<String> = a.name.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3).map(str::to_string).collect();
+            if name_parts.iter().any(|n| words.iter().any(|w| w.starts_with(&n[..n.len().min(4)]) && n.starts_with(&w[..w.len().min(4)]))) {
+                score += 4;
+                why.push("назван по имени");
+            }
+            let interests: Vec<String> = crate::roles::find(&a.role).map(|p| p.interests.iter().map(|s| s.to_string()).collect()).unwrap_or_else(|| a.archetype.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 5).map(|w| w.chars().take(6).collect()).collect());
+            let hits = interests.iter().filter(|i| text.contains(i.as_str())).count();
+            if hits > 0 {
+                score += (hits as i32).min(3);
+                why.push("его тема");
+            }
+            if own_objects.iter().any(|(owner, label)| owner == &a.id && label.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).any(|w| text.contains(w))) {
+                score += 2;
+                why.push("про его объект");
+            }
+            if last_agent.as_deref() == Some(a.id.as_str()) {
+                score += 1;
+                why.push("игрок отвечает ему");
+            }
+            if recent.first() == Some(&a.id) && recent.iter().filter(|r| *r == &a.id).count() >= 1 && recent.len() >= 2 {
+                score -= 2;
+                why.push("уже много говорил");
+            }
+            (a.id.clone(), score, why)
+        })
+        .collect();
+    out.sort_by_key(|x| std::cmp::Reverse(x.1));
+    out
+}
+
+pub fn stakes_text(st: &[(String, i32, Vec<&'static str>)], agents: &[Agent]) -> String {
+    st.iter()
+        .map(|(id, score, why)| format!("  {} ({}): {:+}{}", agents.iter().find(|a| &a.id == id).map(|a| a.name.split(' ').next().unwrap_or(&a.name).to_string()).unwrap_or_else(|| id.clone()), id, score, if why.is_empty() { String::new() } else { format!(" — {}", why.join(", ")) }))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String]) {
     let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
+    // Big yards: two full beats, the rest of the room joins as a chorus of one-liners.
+    let max_beats = if alive.len() > 3 { 2 } else { MAX_BEATS };
     let mut scene: Vec<crate::models::Beat> = Vec::new();
     // Legacy outputs without `scene`: synthesize from next_speakers.
     if out.scene.is_empty() {
@@ -275,7 +330,7 @@ pub fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[Str
             b.r#move = Some(mermaid::truncate_chars(m.trim(), 30));
         }
         cleaned.push(b);
-        if cleaned.len() == MAX_BEATS {
+        if cleaned.len() == max_beats {
             break;
         }
     }
@@ -444,3 +499,45 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
     db::place_unpositioned_nodes(&app.db).await?;
     Ok(())
 }
+
+/// After the main beats in a big yard: the bystanders' short reactions, one cheap JSON call.
+/// Returns (speaker, addressee, text) lines, posted by the caller.
+pub async fn chorus(app: &AppState, agents: &[Agent], round: &[(String, String)], player_line: &str, main_speakers: &[String], stakes: &[(String, i32, Vec<&'static str>)]) -> Result<Vec<(String, String, String)>> {
+    let bystanders: Vec<&Agent> = agents.iter().filter(|a| a.is_alive() && !main_speakers.contains(&a.id)).collect();
+    if bystanders.is_empty() {
+        return Ok(vec![]);
+    }
+    let cast = bystanders
+        .iter()
+        .map(|a| {
+            let st = stakes.iter().find(|(id, _, _)| id == &a.id).map(|(_, s, _)| *s).unwrap_or(0);
+            format!("- {} (id {}): {} | манера: {} | ставка {:+}", a.name, a.id, a.archetype, mermaid::truncate_chars(&a.system_core.chars().skip(a.system_core.find("Говор").unwrap_or(0)).collect::<String>(), 220), st)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let scene = round.iter().map(|(w, t)| format!("[{w}]: {}", mermaid::truncate_chars(t, 400))).collect::<Vec<_>>().join("\n");
+    let system = format!("{} Ты — хор двора. Основные реплики уже сказаны; теперь остальные, кто стоял рядом, вставляют по короткой фразе — или молчат. Верни ТОЛЬКО JSON: {{\"lines\": [{{\"speaker\": \"id\", \"addressee\": \"user|room|id\", \"text\": \"до 14 слов\"}}]}}.\nПравила: 0–3 вставки, каждая — в характере и манере речи этого персонажа, цепляется за КОНКРЕТНОЕ слово из реплик (подкол, согласие, междометие, уточняющий вопрос, ремарка в *звёздочках*); не повторяй сказанное; выше ставка — больше шанс вставить; у кого ставка отрицательная — молчит; если вставлять нечего — пустой список. Без имён в начале фраз. По-русски.", CHORUS_MARK);
+    let user = format!("РЕПЛИКА ИГРОКА: «{}»\nОСНОВНЫЕ РЕПЛИКИ РАУНДА:\n{}\nКТО СТОИТ РЯДОМ:\n{}", mermaid::truncate_chars(player_line, 500), scene, cast);
+    let model = app.llm_settings().await.director_model;
+    let opts = crate::openrouter::ChatOpts { temperature: 0.9, max_tokens: 400, json_mode: true, prefill: None, presence_penalty: Some(0.4), frequency_penalty: Some(0.4) };
+    let raw = app.llm.chat(&model, &[crate::openrouter::ChatMessage::system(system), crate::openrouter::ChatMessage::user(user)], &opts).await?;
+    let v = crate::openrouter::extract_json(&raw)?;
+    let mut out = vec![];
+    for l in v.get("lines").and_then(|l| l.as_array()).map(|a| a.iter().take(3).collect::<Vec<_>>()).unwrap_or_default() {
+        let sp = mermaid::normalize_author(l.get("speaker").and_then(|x| x.as_str()).unwrap_or(""));
+        let text = l.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if text.is_empty() || !bystanders.iter().any(|a| a.id == sp) || out.iter().any(|(s, _, _): &(String, String, String)| s == &sp) {
+            continue;
+        }
+        let to = match l.get("addressee").and_then(|x| x.as_str()).map(mermaid::normalize_author).as_deref() {
+            Some("user") | None => "user".to_string(),
+            Some(x) if x == sp => "room".to_string(),
+            Some(x) if agents.iter().any(|a| a.id == x) => x.to_string(),
+            _ => "room".to_string(),
+        };
+        out.push((sp, to, mermaid::truncate_chars(text, 160)));
+    }
+    Ok(out)
+}
+
+pub const CHORUS_MARK: &str = "[STAGE-CHORUS]";
