@@ -356,6 +356,8 @@ export default function App() {
         onSaved={() => void room.refresh()}
         sourceUpdate={s.source_update}
         restorePending={s.restore_pending}
+        repoDir={s.repo_dir}
+        exePath={s.exe_path}
         onWizard={() => {
           setSettingsOpen(false)
           setWizard(true)

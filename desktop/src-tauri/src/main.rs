@@ -37,6 +37,7 @@ fn start_server() -> mpsc::Receiver<anyhow::Result<SocketAddr>> {
             rt.block_on(async move {
                 // Desktop never exposes the server: loopback only, keep the user's PORT if free.
                 std::env::set_var("HOST", "127.0.0.1");
+                std::env::set_var("TRIAD_DESKTOP", "1");
                 let cfg = match Config::from_env() {
                     Ok(c) => c,
                     Err(e) => {

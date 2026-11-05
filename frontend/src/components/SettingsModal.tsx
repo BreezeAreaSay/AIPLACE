@@ -11,9 +11,12 @@ interface Props {
   sourceUpdate: SourceUpdate | null
   restorePending: string | null
   onWizard: () => void
+  repoDir: string | null
+  exePath: string
 }
 
 const GROUPS: { title: string; note: string; keys: string[] }[] = [
+  { title: 'Обновление', note: 'нужно только если exe лежит не внутри клона', keys: ['TRIAD_REPO'] },
   { title: 'Поиск в сети', note: 'ddg работает без ключа; Tavily/Brave точнее', keys: ['SEARCH_PROVIDER', 'SEARCH_API_KEY', 'SEARXNG_URL'] },
   { title: 'Погода и календарь', note: 'Open-Meteo без ключа; .ics — приватная ссылка твоего календаря', keys: ['WEATHER_CITY', 'CALENDAR_ICS_URL'] },
   { title: 'Справочники', note: 'книги — OpenLibrary без ключа, Википедия без ключа, фильмы — TMDB', keys: ['TMDB_API_KEY'] },
@@ -22,7 +25,7 @@ const GROUPS: { title: string; note: string; keys: string[] }[] = [
   { title: 'Ленты', note: 'объекты типа «Лента» опрашиваются сами', keys: ['FEEDS_EVERY_MIN'] },
 ]
 
-export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePending, onWizard }: Props) {
+export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePending, onWizard, repoDir, exePath }: Props) {
   const [restoreMsg, setRestoreMsg] = useState<string | null>(null)
   const [su, setSu] = useState<SourceUpdate | null>(sourceUpdate)
   const [suBusy, setSuBusy] = useState<'idle' | 'check' | 'run' | 'gone'>('idle')
@@ -394,7 +397,33 @@ export function SettingsModal({ open, onClose, onSaved, sourceUpdate, restorePen
                   </div>
                 </div>
               ) : (
-                <div className="text-[11px] text-zinc-600">Приложение запущено не из git-клона — обновляйся через релиз или задай TRIAD_REPO=путь к папке AIPLACE.</div>
+                <div className="space-y-2 text-[11px]">
+                  {repoDir ? (
+                    <div className="text-zinc-500">
+                      Клон найден: <code className="text-zinc-300">{repoDir}</code>. Проверяю origin… (при старте это занимает несколько секунд)
+                    </div>
+                  ) : (
+                    <div className="text-zinc-500">
+                      Приложение запущено из <code className="text-zinc-300">{exePath}</code>, папку клона рядом не нашёл. Укажи её в поле <code className="text-zinc-300">TRIAD_REPO</code> выше (папка AIPLACE, где лежат <code>.git</code>, <code>frontend</code> и <code>backend</code>), сохрани и нажми «проверить».
+                    </div>
+                  )}
+                  <button
+                    onClick={() => {
+                      setSuBusy('check')
+                      setSuErr(null)
+                      void api
+                        .updateCheck()
+                        .then(setSu)
+                        .catch((e) => setSuErr((e as Error).message))
+                        .finally(() => setSuBusy('idle'))
+                    }}
+                    disabled={suBusy !== 'idle'}
+                    className="flex items-center gap-1 rounded border border-line px-3 py-1.5 font-mono text-xs text-zinc-300 hover:border-acid hover:text-acid disabled:opacity-40"
+                  >
+                    <RefreshCw size={12} className={suBusy === 'check' ? 'animate-spin' : ''} /> проверить
+                  </button>
+                  {suErr && <div className="rounded border border-magenta/50 bg-magenta/10 px-3 py-2 text-xs text-magenta">{suErr}</div>}
+                </div>
               )}
             </div>
 

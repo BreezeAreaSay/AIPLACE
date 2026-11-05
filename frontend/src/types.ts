@@ -287,6 +287,9 @@ export interface RoomState {
   message_count: number
   restore_pending: string | null
   player_name: string | null
+  repo_dir: string | null
+  exe_path: string
+  run_mode: string
 }
 
 export interface CallLog {

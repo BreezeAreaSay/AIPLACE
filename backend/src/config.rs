@@ -140,6 +140,7 @@ impl Config {
 /// Integration settings the UI may edit (persisted next to the OpenRouter key).
 /// `(key, secret?, hint)` — secrets are masked in `/api/settings`.
 pub const INTEGRATION_KEYS: &[(&str, bool, &str)] = &[
+    ("TRIAD_REPO", false, "путь к папке клона AIPLACE (для обновления из приложения, если exe лежит не в ней)"),
     ("PLAYER_NAME", false, "как к тебе обращаться"),
     ("PLAYER_BIO", false, "пара строк о себе: чем занимаешься, что важно, чего хочешь от двора"),
     ("SEARCH_PROVIDER", false, "ddg | tavily | brave | searxng (ddg работает без ключа)"),

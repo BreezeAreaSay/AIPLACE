@@ -72,8 +72,11 @@ pub fn find_repo_dir() -> Option<PathBuf> {
 
 /// desktop (Tauri shell) or cli (`triad serve`).
 pub fn mode() -> &'static str {
+    if std::env::var_os("TRIAD_DESKTOP").is_some() {
+        return "desktop";
+    }
     let name = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase())).unwrap_or_default();
-    if name.contains("desktop") {
+    if name.contains("desktop") || name.contains("triad canvas") {
         "desktop"
     } else {
         "cli"
@@ -91,7 +94,7 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
 
 /// Fetch and compare with `origin/<branch>`.
 pub async fn check() -> Result<SourceUpdate> {
-    let repo = find_repo_dir().context("репозиторий не найден: приложение запущено не из клона (задай TRIAD_REPO=путь к папке AIPLACE)")?;
+    let repo = find_repo_dir().with_context(|| format!("репозиторий не найден: приложение запущено из {} — укажи в ⚙ поле TRIAD_REPO (путь к папке AIPLACE с .git, frontend и backend)", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()))?;
     let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.unwrap_or_else(|_| "main".into());
     let branch = if branch == "HEAD" { "main".to_string() } else { branch };
     let fetch_err = git(&repo, &["fetch", "--quiet", "origin", &branch]).await.err().map(|e| e.to_string());

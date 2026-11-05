@@ -90,10 +90,15 @@ pub async fn build_app(cfg: Config, settings: LlmSettings) -> anyhow::Result<(ax
     if cfg.heartbeat_minutes > 0 {
         tokio::spawn(heartbeat::run(state.clone()));
     }
-    if cfg.update_check && selfupdate::find_repo_dir().is_some() {
+    if cfg.update_check {
         let slot = state.source_update.clone();
         tokio::spawn(async move {
             loop {
+                if selfupdate::find_repo_dir().is_none() {
+                    // not running from a clone (yet) — TRIAD_REPO may be set later from the UI
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    continue;
+                }
                 match selfupdate::check().await {
                     Ok(u) => {
                         if u.behind > 0 {

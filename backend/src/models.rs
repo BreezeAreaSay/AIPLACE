@@ -607,6 +607,10 @@ pub struct RoomState {
     /// A staged restore waiting for a restart (RFC3339 of staging), if any.
     pub restore_pending: Option<String>,
     pub player_name: Option<String>,
+    /// Where the git clone is (None → not running from a clone and TRIAD_REPO unset).
+    pub repo_dir: Option<String>,
+    pub exe_path: String,
+    pub run_mode: String,
     pub update_status: crate::selfupdate::UpdateStatus,
     /// "За окном": weather + local time line shared with the Caster, or None when not configured.
     pub world: Option<String>,
