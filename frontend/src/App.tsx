@@ -12,6 +12,7 @@ import { Onboarding } from './components/Onboarding'
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette'
 import { RoomSwitcher } from './components/RoomSwitcher'
 import { DmPanel } from './components/DmPanel'
+import { LiveProvider } from './live/LiveContext'
 
 function useMedia(query: string) {
   const [m, setM] = useState(() => window.matchMedia(query).matches)
@@ -64,6 +65,7 @@ export default function App() {
   const [menu, setMenu] = useState(false)
   const [dm, setDm] = useState<string | null>(null)
   const [dmUnread, setDmUnread] = useState<Record<string, number>>({})
+  const [toast, setToast] = useState<string | null>(null)
   const isDesktop = useMedia('(min-width: 900px)')
   const dragging = useRef(false)
 
@@ -399,8 +401,38 @@ export default function App() {
 
   const iconBtn = 'rounded border border-line p-1 text-zinc-400 hover:border-acid hover:text-acid'
 
+  const live = {
+    nodes: s.graph.nodes,
+    edges: s.graph.edges,
+    types: s.types,
+    attachments: s.attachments,
+    agents: s.agents,
+    actions: {
+      openNode: (id: string) => selectNode(id),
+      patchNode: (id: string, patch: { body?: string; props?: Record<string, unknown>; label?: string; archived?: boolean }) => void room.patchNode(id, patch),
+      createNode: (label: string, opts: { type_id?: string; body?: string; props?: Record<string, unknown> }) => room.createNode(label, opts),
+      say: (text: string, nodeId?: string | null) => void room.send(text, nodeId ?? null),
+      askAgent: (agentId: string, text: string, nodeId?: string | null) => {
+        const a = s.agents.find((x) => x.id === agentId)
+        void room.send(`${a ? a.name.split(' ')[0] : agentId}, ${text}`, nodeId ?? null)
+      },
+      dm: (agentId: string) => openDm(agentId),
+      tend: (nodeId?: string) => api.tend(nodeId).then((r) => (void room.refresh(), r)),
+      audit: () => api.audit().then((r) => (void room.refresh(), r)),
+      chronicle: () => api.chronicle().then((r) => (void room.refresh(), r)),
+      snapshot: () => api.createSnapshot(),
+      tick: () => void room.tick(),
+      notify: (text: string) => {
+        setToast(text)
+        window.setTimeout(() => setToast(null), 3500)
+      },
+    },
+  }
+
   return (
+    <LiveProvider value={live}>
     <div className="scanlines relative flex flex-col bg-void" style={{ height: 'var(--app-height, 100%)' }}>
+      {toast && <div className="fixed bottom-16 left-1/2 z-[80] -translate-x-1/2 rounded border border-acid/60 bg-void px-3 py-1.5 font-mono text-xs text-acid shadow-glow">{toast}</div>}
       <header className="relative z-20 flex items-center gap-2 border-b border-line bg-void/95 px-3 py-1.5" style={{ paddingTop: 'calc(0.375rem + var(--tg-safe-top))' }}>
         <div className="relative">
           <button onClick={() => setMenu((v) => !v)} className={iconBtn} title="Меню">
@@ -622,5 +654,6 @@ export default function App() {
       />
       <CommandPalette open={palette} onClose={() => setPalette(false)} nodes={s.graph.nodes} types={s.types} agents={s.agents} commands={commands} onOpenNode={selectNode} onJumpMessage={jumpMessage} />
     </div>
+    </LiveProvider>
   )
 }

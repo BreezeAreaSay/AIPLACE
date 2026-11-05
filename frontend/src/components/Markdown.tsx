@@ -4,6 +4,9 @@ import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import rehypeHighlight from 'rehype-highlight'
 import type { GraphNode, ObjectType } from '../types'
+import { isLiveLang, LiveBlock, LiveButton } from '../live/LiveBlock'
+import { Embed } from '../live/Embed'
+import { useNoteScope } from '../live/LiveContext'
 
 interface Props {
   text: string
@@ -22,9 +25,38 @@ interface Props {
 
 const WIKI = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g
 
-/** Turn `[[Target|alias]]` into a markdown link with a `wiki:` scheme so the renderer can resolve it. */
+const EMBED = /!\[\[([^\]|#]+)(?:\|[^\]]*)?\]\]/g
+const BUTTON = /\[\[button:\s*([^|\]]+?)\s*\|\s*([^\]]+?)\s*\]\]/gi
+
+/** Wikilinks, embeds and buttons become links with private schemes; fenced code is left alone. */
 export function preprocessWikilinks(text: string): string {
-  return text.replace(WIKI, (_m, target: string, alias?: string) => `[${(alias ?? target).trim()}](wiki:${encodeURIComponent(target.trim())})`)
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, i) => {
+      if (i % 2 === 1) {
+        // "```ask Вера: вопрос" → "```ask\nask Вера: вопрос" so the widget sees the whole header line
+        return part.replace(/^```(query|table|kanban|calendar|chart|list|habit|ask|js|javascript)([^\n]+)\n/i, (_m, l: string, rest: string) => `\`\`\`${l}\n${l}${rest}\n`)
+      }
+      return part
+        .replace(BUTTON, (_m, label: string, action: string) => `[${label}](button:${encodeURIComponent(action)})`)
+        .replace(EMBED, (_m, target: string) => `[${target.trim()}](embed:${encodeURIComponent(target.trim())})`)
+        .replace(WIKI, (_m, target: string, alias?: string) => `[${(alias ?? target).trim()}](wiki:${encodeURIComponent(target.trim())})`)
+    })
+    .join('')
+}
+
+type Hast = { type?: string; value?: string; children?: Hast[]; properties?: { className?: string[] | string }; tagName?: string }
+function hastText(n: Hast | undefined): string {
+  if (!n) return ''
+  if (n.type === 'text') return n.value ?? ''
+  return (n.children ?? []).map(hastText).join('')
+}
+function codeLang(n: Hast | undefined): string {
+  const code = n?.children?.find((c) => c.tagName === 'code')
+  const cls = code?.properties?.className
+  const list = Array.isArray(cls) ? cls : typeof cls === 'string' ? cls.split(' ') : []
+  const l = list.find((c) => String(c).startsWith('language-'))
+  return l ? String(l).slice('language-'.length) : ''
 }
 
 export function resolveWikilink(target: string, nodes: GraphNode[]): GraphNode | undefined {
@@ -52,10 +84,19 @@ export function toggleTask(source: string, index: number): string {
 export function Markdown({ text, nodes = [], types = [], onOpen, onCreate, onChange, variant = 'note', breaks = variant === 'chat' }: Props) {
   // HTML comments (digest markers etc.) are bookkeeping, never content.
   const src = useMemo(() => preprocessWikilinks(text.replace(/<!--[\s\S]*?-->/g, '')), [text])
+  const scope = useNoteScope()
+  const replaceBlock = (oldSrc: string, newSrc: string) => {
+    if (!onChange) return
+    const i = text.indexOf(oldSrc)
+    if (i === -1) return
+    onChange(text.slice(0, i) + newSrc + text.slice(i + oldSrc.length))
+  }
   let taskIndex = -1
 
   const components: Components = {
     a: ({ href, children }) => {
+      if (href?.startsWith('embed:')) return <Embed target={decodeURIComponent(href.slice(6))} />
+      if (href?.startsWith('button:')) return <LiveButton label={String(Array.isArray(children) ? children.join('') : children ?? '')} action={decodeURIComponent(href.slice(7))} nodeId={scope.nodeId} />
       if (href?.startsWith('wiki:')) {
         const target = decodeURIComponent(href.slice(5))
         const n = resolveWikilink(target, nodes)
@@ -95,7 +136,33 @@ export function Markdown({ text, nodes = [], types = [], onOpen, onCreate, onCha
         />
       )
     },
-    pre: ({ children }) => <pre className="md-pre">{children}</pre>,
+    pre: ({ children, node }) => {
+      const lang = codeLang(node as Hast | undefined)
+      if (lang && isLiveLang(lang)) {
+        const body = hastText(node as Hast | undefined).replace(/\n$/, '')
+        // the block's source line (```lang …) carries options like "js auto" or "ask Вера: …"
+        const firstLine = body.split('\n')[0] ?? ''
+        const hasHeader = firstLine.toLowerCase().startsWith(lang.toLowerCase())
+        const full = hasHeader ? body : `${lang}\n${body}`
+        const infoLine = hasHeader ? firstLine : lang
+        // in the original text the block starts with "```<infoLine>\n<rest>"
+        const rest = hasHeader ? body.split('\n').slice(1).join('\n') : body
+        const original = `\`\`\`${infoLine}\n${rest}`
+        return (
+          <LiveBlock
+            lang={infoLine}
+            src={full}
+            onReplace={onChange ? (next) => {
+              const [nh, ...nb] = next.split('\n')
+              // an empty block's `original` ends right before the closing fence: keep it on its own line
+              const tail = rest === '' && nb.length ? '\n' : ''
+              replaceBlock(original, `\`\`\`${nh}\n${nb.join('\n')}${tail}`)
+            } : undefined}
+          />
+        )
+      }
+      return <pre className="md-pre">{children}</pre>
+    },
     blockquote: ({ children }) => {
       // Obsidian-style callouts: > [!note] / [!tip] / [!warning] / [!quote]
       const arr = Array.isArray(children) ? children : [children]
@@ -122,7 +189,7 @@ export function Markdown({ text, nodes = [], types = [], onOpen, onCreate, onCha
 
   return (
     <div className={variant === 'chat' ? 'chat-md' : 'note-md'}>
-      <ReactMarkdown remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]} rehypePlugins={variant === 'note' ? [[rehypeHighlight, { detect: false, ignoreMissing: true }]] : []} components={components} urlTransform={(u) => (u.startsWith('wiki:') ? u : defaultUrlTransform(u))}>
+      <ReactMarkdown remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]} rehypePlugins={variant === 'note' ? [[rehypeHighlight, { detect: false, ignoreMissing: true, plainText: ['query', 'table', 'kanban', 'calendar', 'chart', 'list', 'habit', 'ask', 'js', 'javascript'] }]] : []} components={components} urlTransform={(u) => (u.startsWith('wiki:') || u.startsWith('embed:') || u.startsWith('button:') ? u : defaultUrlTransform(u))}>
         {src}
       </ReactMarkdown>
     </div>

@@ -6,6 +6,7 @@ import { PropsEditor } from './PropsEditor'
 import { Markdown } from './Markdown'
 import { MdEditor } from './MdEditor'
 import { Attachments } from './Attachments'
+import { NoteScope } from '../live/LiveContext'
 import { api } from '../api'
 
 interface Props {
@@ -44,6 +45,7 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
   const [saved, setSaved] = useState<'idle' | 'dirty' | 'saved'>('idle')
   const [copied, setCopied] = useState(false)
   const [reading, setReading] = useState(false)
+  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null)
   const [myNote, setMyNote] = useState('')
   const [question, setQuestion] = useState('')
   const [backlinks, setBacklinks] = useState<Message[]>([])
@@ -185,7 +187,9 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
               </button>
             </div>
             <div className="text-[15px]">
-              <Markdown text={body} nodes={graph.nodes} types={types} onOpen={(id) => { setReading(false); onSelect(id) }} onChange={changeBody} />
+              <NoteScope nodeId={node.id}>
+                <Markdown text={body} nodes={graph.nodes} types={types} onOpen={(id) => { setReading(false); onSelect(id) }} onChange={changeBody} />
+              </NoteScope>
             </div>
           </div>
         </div>
@@ -272,9 +276,49 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
               <MdEditor value={body} onChange={changeBody} nodes={graph.nodes.filter((n) => n.id !== node.id)} types={types} autoFocus onDone={finish} />
             </div>
           ) : (
-            <div className="mt-2 cursor-text text-[13px] leading-relaxed text-zinc-300" onDoubleClick={() => setEditing(true)} title="Двойной клик — редактировать">
+            <div
+              className="relative mt-2 cursor-text text-[13px] leading-relaxed text-zinc-300"
+              onDoubleClick={() => setEditing(true)}
+              title="Двойной клик — редактировать · выдели текст, чтобы обсудить фрагмент"
+              onMouseUp={(e) => {
+                const s = window.getSelection()?.toString().trim() ?? ''
+                if (s.length >= 8 && s.length <= 600) {
+                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                  setSel({ text: s, x: Math.min(e.clientX - rect.left, rect.width - 160), y: e.clientY - rect.top })
+                } else setSel(null)
+              }}
+            >
+              {sel && (
+                <div className="absolute z-20 flex gap-1 rounded border border-line bg-void p-1 shadow-xl" style={{ left: Math.max(0, sel.x), top: sel.y + 8 }}>
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      onAsk(node.id, 'discuss', `Про этот фрагмент: «${sel.text.slice(0, 300)}» — что скажете?`)
+                      setSel(null)
+                    }}
+                    className="rounded bg-acid px-2 py-0.5 font-mono text-[10px] font-bold text-void"
+                  >
+                    обсудить с двором
+                  </button>
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      onAsk(node.id, 'dispute', `Оспорьте этот фрагмент: «${sel.text.slice(0, 300)}»`)
+                      setSel(null)
+                    }}
+                    className="rounded border border-magenta/50 px-2 py-0.5 font-mono text-[10px] text-magenta"
+                  >
+                    оспорить
+                  </button>
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={() => setSel(null)} className="px-1 font-mono text-[10px] text-zinc-500">
+                    ×
+                  </button>
+                </div>
+              )}
               {body.trim() ? (
-                <Markdown text={body} nodes={graph.nodes} types={types} onOpen={onSelect} onCreate={(title) => onCreate(title, { type_id: 'note' })} onChange={changeBody} />
+                <NoteScope nodeId={node.id}>
+                  <Markdown text={body} nodes={graph.nodes} types={types} onOpen={onSelect} onCreate={(title) => onCreate(title, { type_id: 'note' })} onChange={changeBody} />
+                </NoteScope>
               ) : (
                 <button onClick={() => setEditing(true)} className="text-xs text-zinc-600 underline hover:text-zinc-400">
                   тело пустое — написать
@@ -321,7 +365,9 @@ export function NodePanel({ node, graph, types, notes, agents, disabled, onClose
                 </button>
               )}
             </div>
-            <PropsEditor schema={type.schema.props} values={node.props} nodes={graph.nodes} onChange={(k, v) => onPatch(node.id, { props: { [k]: v } })} onOpen={onSelect} />
+            <NoteScope nodeId={node.id}>
+              <PropsEditor schema={type.schema.props} values={node.props} nodes={graph.nodes} onChange={(k, v) => onPatch(node.id, { props: { [k]: v } })} onOpen={onSelect} />
+            </NoteScope>
           </section>
         )}
 

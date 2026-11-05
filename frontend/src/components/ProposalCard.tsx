@@ -23,6 +23,7 @@ const KIND_LABEL: Record<string, string> = {
   new_type: 'новый тип',
   retitle: 'переименовать',
   retype: 'сменить тип',
+  edit: 'правка текста',
 }
 
 /** One proposal from an inhabitant: what changes, why, accept / reject. */
@@ -92,6 +93,16 @@ export function ProposalCard({ proposal: p, agents, nodes, types, onAccept, onRe
           <>
             {label(pl.id)} → тип {types.find((x) => x.id === pl.type)?.name ?? String(pl.type)}
           </>
+        )
+      case 'edit':
+        return (
+          <span className="block">
+            правка в {label(pl.id)}
+            <span className="mt-1 block space-y-0.5 font-mono text-[10px]">
+              <span className="block rounded bg-magenta/10 px-1.5 py-0.5 text-magenta/90 line-through decoration-magenta/60">− {String(pl.find ?? '')}</span>
+              <span className="block rounded bg-acid/10 px-1.5 py-0.5 text-acid">+ {String(pl.replace ?? '')}</span>
+            </span>
+          </span>
         )
       default:
         return <span className="font-mono text-[10px]">{JSON.stringify(pl)}</span>

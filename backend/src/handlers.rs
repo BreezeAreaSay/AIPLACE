@@ -137,6 +137,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/llm/log", get(llm_log))
         .route("/api/organism", get(organism_state))
         .route("/api/organism/audit", post(organism_audit))
+        .route("/api/nodes/:id/ask-inline", post(ask_inline))
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/:id/accept", post(accept_proposal))
         .route("/api/proposals/:id/reject", post(reject_proposal))
@@ -1286,6 +1287,39 @@ async fn dm_send(Room { app, .. }: Room, Path(agent): Path<String>, Json(req): J
     let reply = agent_runner::run_agent(&app, &agent, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
     app.emit(RoomEvent::Done);
     Ok(Json(vec![msg, reply]))
+}
+
+#[derive(serde::Deserialize)]
+struct AskInline {
+    question: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// A question asked from inside a note (```ask block): one inhabitant answers in the note's
+/// private channel `note:<id>`, with the note and its files in focus; the answer goes back
+/// into the block. Nothing lands in the yard chat.
+async fn ask_inline(Room { app, .. }: Room, Path(id): Path<String>, Json(req): Json<AskInline>) -> AppResult<Json<serde_json::Value>> {
+    let id = mermaid::safe_id(&id);
+    let Some(node) = db::get_node(&app.db, &id).await? else { return Err(AppError::bad_request("нет такого объекта")) };
+    let q = req.question.trim();
+    if q.is_empty() || q.chars().count() > 2000 {
+        return Err(AppError::bad_request("пустой или слишком длинный вопрос"));
+    }
+    let agents = db::list_agents(&app.db).await?;
+    let agent = match req.agent.as_deref().map(mermaid::safe_id) {
+        Some(a) if !a.is_empty() => agents.iter().find(|x| x.id == a && x.is_alive()).cloned(),
+        _ => crate::organism::pick_carer(&agents, &node, "manual").cloned(),
+    }
+    .ok_or_else(|| AppError::bad_request("некому отвечать"))?;
+    let channel = format!("note:{id}");
+    let _turn = app.turn_lock.lock().await;
+    let msg = db::insert_message_in(&app.db, &channel, USER_ID, None, &format!("(в заметке «{}») {q}", node.label), Some(&agent.id), None, Some(&id), None).await?;
+    app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} отвечает в заметке…", agent.name) });
+    let plan = agent_runner::TurnPlan { beat: None, scene_so_far: vec![], room_mood: None, focus_node: Some(&id), library: None, pre: None, pre_records: vec![], channel: Some(channel), reply_to: Some(msg.id) };
+    let reply = agent_runner::run_agent(&app, &agent.id, plan).await.map_err(|e| AppError::bad_request(format!("{e:#}")))?;
+    app.emit(RoomEvent::Done);
+    Ok(Json(json!({ "agent": agent.id, "answer": reply.content })))
 }
 
 // ───────────────────────────── Proposals ─────────────────────────────

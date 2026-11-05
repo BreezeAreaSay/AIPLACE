@@ -62,6 +62,10 @@ export function useRoom() {
           break
         case 'message':
           setStreaming(null)
+          if (ev.message.channel?.startsWith('note:')) {
+            // inline note threads live inside the note body (AskBlock), not in the DM panel
+            break
+          }
           if (ev.message.channel) {
             const ch = ev.message.channel
             setDms((d) => ({ ...d, [ch]: mergeMessages(d[ch] ?? [], [ev.message]) }))

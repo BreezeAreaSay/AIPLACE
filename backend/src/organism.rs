@@ -192,8 +192,8 @@ pub async fn tend(app: &AppState, agent_id: &str, node_id: &str, kind: &str) -> 
 
     let system = format!(
         "{GARDENER_MARK} {core}\n\nСейчас ты не разговариваешь, а ВОЗДЕЛЫВАЕШЬ библиотеку двора: приводишь в порядок один объект. Ты читал его целиком (и приложенные файлы). Верни ТОЛЬКО JSON:\n\
-{{\"summary\": \"1–2 предложения, о чём объект (для поля summary; null если не нужно)\",\n \"props\": {{\"ключ\": \"значение по схеме типа — заполняй только пустое и очевидное, null не пиши\"}},\n \"append\": {{\"heading\": \"Конспект|Главное|Лог|Мысли <твоё имя>\", \"text\": \"markdown: что стоит дописать в тело — конспект файла, главные тезисы, следующий шаг, твоё замечание. 3–12 строк, списками\"}},\n \"links\": [{{\"to\": \"id из КАНДИДАТОВ\", \"kind\": \"related|about|belongs_to|blocks|contradicts\", \"why\": \"3 слова\"}}],\n \"new_objects\": [{{\"type\": \"task|human|idea|quote|event|place|book\", \"title\": \"…\", \"props\": {{}}}}],\n \"new_types\": [{{\"name\": \"Название нового типа, если объектам такого рода в библиотеке нет подходящего\", \"icon\": \"эмодзи\", \"props\": [{{\"key\": \"snake_key\", \"label\": \"Подпись\", \"kind\": \"text|number|date|select|rating|checkbox|url|tags\"}}], \"why\": \"зачем\"}}],\n \"note\": \"короткая пометка от тебя в характере или null\",\n \"say\": \"одна реплика в чат от первого лица в твоём характере: что ты сделал и что заметил (1–2 предложения, без списков, с конкретикой из текста)\"}}\n\
-Правила: не выдумывай фактов, которых нет в тексте; не переписывай тело, только дописывай; new_objects — не больше 3 и только если в тексте есть конкретные люди/задачи/даты/цитаты (это ПРЕДЛОЖЕНИЯ, игрок их подтвердит); new_types — максимум один и только если действительно нет подходящего типа; links — только из кандидатов. Пиши по-русски.",
+{{\"summary\": \"1–2 предложения, о чём объект (для поля summary; null если не нужно)\",\n \"props\": {{\"ключ\": \"значение по схеме типа — заполняй только пустое и очевидное, null не пиши\"}},\n \"append\": {{\"heading\": \"Конспект|Главное|Лог|Мысли <твоё имя>\", \"text\": \"markdown: что стоит дописать в тело — конспект файла, главные тезисы, следующий шаг, твоё замечание. 3–12 строк, списками\"}},\n \"links\": [{{\"to\": \"id из КАНДИДАТОВ\", \"kind\": \"related|about|belongs_to|blocks|contradicts\", \"why\": \"3 слова\"}}],\n \"new_objects\": [{{\"type\": \"task|human|idea|quote|event|place|book\", \"title\": \"…\", \"props\": {{}}}}],\n \"edits\": [{{\"find\": \"точная фраза из тела (1–2 предложения), которую стоит поправить\", \"replace\": \"как должно быть\", \"why\": \"3–6 слов\"}}],\n \"new_types\": [{{\"name\": \"Название нового типа, если объектам такого рода в библиотеке нет подходящего\", \"icon\": \"эмодзи\", \"props\": [{{\"key\": \"snake_key\", \"label\": \"Подпись\", \"kind\": \"text|number|date|select|rating|checkbox|url|tags\"}}], \"why\": \"зачем\"}}],\n \"note\": \"короткая пометка от тебя в характере или null\",\n \"say\": \"одна реплика в чат от первого лица в твоём характере: что ты сделал и что заметил (1–2 предложения, без списков, с конкретикой из текста)\"}}\n\
+Правила: не выдумывай фактов, которых нет в тексте; не переписывай тело сам — правки предлагай через edits (не больше 2, find должен встречаться в теле дословно), а дописывай через append; new_objects — не больше 3 и только если в тексте есть конкретные люди/задачи/даты/цитаты (это ПРЕДЛОЖЕНИЯ, игрок их подтвердит); new_types — максимум один и только если действительно нет подходящего типа; links — только из кандидатов. Пиши по-русски.",
         core = agent.system_core
     );
     let user = format!(
@@ -262,6 +262,13 @@ pub async fn tend(app: &AppState, agent_id: &str, node_id: &str, kind: &str) -> 
         }
         let payload = json!({ "type": o.get("type").cloned().unwrap_or(json!("note")), "title": title, "props": o.get("props").cloned().unwrap_or(json!({})), "link_to": node.id });
         proposal_ids.push(db::insert_proposal(&app.db, &agent.id, "create", &payload, &format!("из разбора «{}»", node.label), None).await?);
+    }
+    for e in plan.get("edits").and_then(|l| l.as_array()).map(|a| a.iter().take(2).collect::<Vec<_>>()).unwrap_or_default() {
+        let find = e.get("find").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let replace = e.get("replace").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if find.chars().count() >= 8 && !replace.is_empty() && find != replace && node.body.contains(find) {
+            proposal_ids.push(db::insert_proposal(&app.db, &agent.id, "edit", &json!({ "id": node.id, "find": find, "replace": replace }), e.get("why").and_then(|x| x.as_str()).unwrap_or("правка"), None).await?);
+        }
     }
     for t in plan.get("new_types").and_then(|l| l.as_array()).map(|a| a.iter().take(1).collect::<Vec<_>>()).unwrap_or_default() {
         let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
@@ -446,6 +453,16 @@ pub async fn apply_proposal(app: &AppState, p: &crate::models::Proposal) -> Resu
             let props = v.get("props").cloned().unwrap_or(json!([]));
             db::insert_type(&app.db, &id, name, v.get("icon").and_then(|x| x.as_str()).unwrap_or("◇"), "#9a9ca8", &json!({ "props": props }), actor).await?;
             Ok(format!("тип «{name}» заведён"))
+        }
+        "edit" => {
+            let id = v.get("id").and_then(|x| x.as_str()).context("id")?;
+            let find = v.get("find").and_then(|x| x.as_str()).context("find")?;
+            let replace = v.get("replace").and_then(|x| x.as_str()).context("replace")?;
+            let node = db::get_node(&app.db, id).await?.context("объект")?;
+            anyhow::ensure!(node.body.contains(find), "этот фрагмент уже изменён — правка устарела");
+            let body = node.body.replacen(find, replace, 1);
+            db::update_node_fields(&app.db, id, None, Some(&body), None, None).await?;
+            Ok(format!("правка в «{}» применена", node.label))
         }
         "retitle" => {
             let id = v.get("id").and_then(|x| x.as_str()).context("id")?;

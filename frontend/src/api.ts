@@ -187,6 +187,8 @@ export const api = {
   acceptProposal: (id: number) => request<{ ok: boolean; result: string }>(`/api/proposals/${id}/accept`, { method: 'POST', body: '{}' }),
   rejectProposal: (id: number) => request<{ ok: boolean }>(`/api/proposals/${id}/reject`, { method: 'POST', body: '{}' }),
   audit: () => request<{ proposals: number }>('/api/organism/audit', { method: 'POST', body: '{}' }),
+  askInline: (nodeId: string, question: string, agent?: string) =>
+    request<{ agent: string; answer: string }>(`/api/nodes/${encodeURIComponent(nodeId)}/ask-inline`, { method: 'POST', body: JSON.stringify({ question, agent }) }),
   rooms: () => request<RoomInfo[]>('/api/rooms'),
   createRoom: (name: string) => request<RoomInfo>('/api/rooms', { method: 'POST', body: JSON.stringify({ name }) }),
   renameRoom: (id: string, name: string) => request<RoomInfo[]>(`/api/rooms/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),

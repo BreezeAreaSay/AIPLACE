@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { ExternalLink, Star, X } from 'lucide-react'
 import type { GraphNode, PropSchema } from '../types'
+import { useLive, useNoteScope } from '../live/LiveContext'
+import { evalFormula, formatValue } from '../live/formula'
 
 interface Props {
   schema: PropSchema[]
@@ -92,6 +94,8 @@ function asList(v: unknown): string[] {
 
 /** Renders a type's property schema as a compact form (Anytype-style relations panel). */
 export function PropsEditor({ schema, values, nodes, disabled, onChange, onOpen }: Props) {
+  const live = useLive()
+  const { nodeId } = useNoteScope()
   if (schema.length === 0) return null
   return (
     <div className="space-y-1.5">
@@ -99,6 +103,18 @@ export function PropsEditor({ schema, values, nodes, disabled, onChange, onOpen 
         const v = values[p.key]
         let field: JSX.Element
         switch (p.kind) {
+          case 'formula': {
+            const node = live?.nodes.find((n) => n.id === nodeId)
+            const r = node && live ? evalFormula(p.expr ?? '', { node, nodes: live.nodes, edges: live.edges }) : { value: null, error: 'вне заметки' }
+            field = (
+              <div className="flex items-center gap-2 text-xs" title={p.expr}>
+                <span className="font-mono text-zinc-100">{formatValue(r.value)}</span>
+                <span className="font-mono text-[9px] text-zinc-600">ƒ {p.expr}</span>
+                {r.error && <span className="font-mono text-[9px] text-magenta">{r.error}</span>}
+              </div>
+            )
+            break
+          }
           case 'checkbox':
             field = <input type="checkbox" checked={!!v} disabled={disabled} onChange={(e) => onChange(p.key, e.target.checked)} className="h-4 w-4 accent-[#CCFF00]" />
             break

@@ -196,6 +196,44 @@ export function MdEditor({ value, onChange, nodes, types, placeholder, autoFocus
             <a.icon size={13} />
           </button>
         ))}
+        <select
+          onMouseDown={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            const v = e.target.value
+            e.target.value = ''
+            if (!v) return
+            const snippets: Record<string, string> = {
+              query: '```query type:task done:false sort:due\n```',
+              table: '```table type:book cols:label,author,rating,status\n```',
+              kanban: '```kanban type:task group:status\n```',
+              calendar: '```calendar type:task\n```',
+              chart: '```chart type:book y:rating\n```',
+              habit: '```habit Зарядка\n```',
+              ask: '```ask Вера: что я здесь избегаю?\n```',
+              js: '```js\nconst tasks = lib.nodes.filter(n => n.type_id === "task" && !n.props.done)\ntable(tasks.map(t => ({ задача: t.label, срок: t.props.due ?? "" })))\n```',
+              button: '[[button: Разобрать | tend]] [[button: Таймер 25 | timer:25]] [[button: Спросить Веру | ask:shrink:что думаешь об этой заметке?]]',
+              embed: '![[Название объекта]]',
+              callout: '> [!tip] Заголовок\n> текст',
+            }
+            apply({ before: `\n${snippets[v]}\n`, block: false })
+          }}
+          defaultValue=""
+          className="ml-1 rounded border border-line bg-void px-1 py-0.5 font-mono text-[9px] text-zinc-400"
+          title="Живые блоки"
+        >
+          <option value="">+ живой блок…</option>
+          <option value="query">список по запросу</option>
+          <option value="table">таблица</option>
+          <option value="kanban">канбан</option>
+          <option value="calendar">календарь</option>
+          <option value="chart">график</option>
+          <option value="habit">привычка</option>
+          <option value="ask">вопрос жителю</option>
+          <option value="js">скрипт js</option>
+          <option value="button">кнопки</option>
+          <option value="embed">вставить объект</option>
+          <option value="callout">колаут</option>
+        </select>
         <span className="ml-auto pr-1 font-mono text-[9px] text-zinc-600">markdown · [[объект]] · Ctrl+Enter — готово</span>
       </div>
       <textarea

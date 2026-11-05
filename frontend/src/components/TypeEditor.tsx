@@ -73,7 +73,7 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
   }
   const save = () => {
     if (!t) return
-    const cleaned = props.filter((p) => p.key.trim() && p.label.trim()).map((p) => ({ ...p, key: slug(p.key) || slug(p.label), options: p.kind === 'select' || p.kind === 'multiselect' ? (p.options ?? []).filter(Boolean) : undefined, to: p.kind === 'relation' ? p.to || undefined : undefined, max: p.kind === 'rating' ? p.max ?? 5 : undefined }))
+    const cleaned = props.filter((p) => p.key.trim() && p.label.trim()).map((p) => ({ ...p, key: slug(p.key) || slug(p.label), options: p.kind === 'select' || p.kind === 'multiselect' ? (p.options ?? []).filter(Boolean) : undefined, to: p.kind === 'relation' ? p.to || undefined : undefined, max: p.kind === 'rating' ? p.max ?? 5 : undefined, expr: p.kind === 'formula' ? p.expr ?? '' : undefined }))
     onSave(t.id, { name: name.trim() || undefined, icon: icon.trim() || undefined, color: color || undefined, schema: { props: cleaned, template: template.trim() ? template : undefined } })
     setDirty(false)
   }
@@ -224,6 +224,9 @@ export function TypeEditor({ open, types, initialId, onClose, onSave, onCreate, 
                             </option>
                           ))}
                         </select>
+                      )}
+                      {p.kind === 'formula' && (
+                        <input value={p.expr ?? ''} onChange={(e) => setProp(i, { expr: e.target.value })} placeholder="done_ratio()  ·  days_until(due)  ·  count(linked, 'task')  ·  progress * 2" className={`${inp} col-span-2 font-mono sm:col-span-4`} />
                       )}
                       {p.kind === 'rating' && (
                         <label className="col-span-2 flex items-center gap-2 font-mono text-[10px] text-zinc-500 sm:col-span-4">

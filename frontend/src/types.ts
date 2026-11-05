@@ -88,7 +88,7 @@ export interface SnapshotInfo {
   kind: string
 }
 
-export type PropKind = 'text' | 'longtext' | 'number' | 'checkbox' | 'date' | 'datetime' | 'select' | 'multiselect' | 'tags' | 'rating' | 'url' | 'email' | 'phone' | 'image' | 'relation'
+export type PropKind = 'text' | 'longtext' | 'number' | 'checkbox' | 'date' | 'datetime' | 'select' | 'multiselect' | 'tags' | 'rating' | 'url' | 'email' | 'phone' | 'image' | 'relation' | 'formula'
 
 export const PROP_KINDS: { id: PropKind; label: string }[] = [
   { id: 'text', label: 'текст' },
@@ -106,6 +106,7 @@ export const PROP_KINDS: { id: PropKind; label: string }[] = [
   { id: 'email', label: 'email' },
   { id: 'phone', label: 'телефон' },
   { id: 'relation', label: 'объект' },
+  { id: 'formula', label: 'формула ƒ' },
 ]
 
 export interface PropSchema {
@@ -115,6 +116,8 @@ export interface PropSchema {
   options?: string[]
   to?: string
   max?: number
+  /** formula kind: expression over props, e.g. `done_ratio()` or `days_until(due)` */
+  expr?: string
 }
 
 export interface Attachment {
