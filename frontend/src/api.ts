@@ -45,10 +45,33 @@ export interface Health {
   telegram: { enabled: boolean; bot_username: string | null; anon_rooms: boolean }
 }
 
+export interface NodePatch {
+  label?: string
+  body?: string
+  type?: string
+  x?: number
+  y?: number
+  pinned?: boolean
+}
+
 export const api = {
   health: () => request<Health>('/api/health'),
   state: () => request<RoomState>('/api/state'),
-  chat: (message: string) => request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message }) }),
+  chat: (message: string, nodeId?: string | null) =>
+    request<RoomState>('/api/chat', { method: 'POST', body: JSON.stringify({ message, node_id: nodeId ?? null }) }),
+  createNode: (label: string, opts: { body?: string; type?: string; x?: number; y?: number } = {}) =>
+    request<RoomState>('/api/nodes', { method: 'POST', body: JSON.stringify({ label, ...opts }) }),
+  patchNode: (id: string, patch: NodePatch) =>
+    request<void>(`/api/nodes/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteNode: (id: string) => request<void>(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  createEdge: (source: string, target: string, label?: string) =>
+    request<void>('/api/edges', { method: 'POST', body: JSON.stringify({ source, target, label }) }),
+  deleteEdge: (id: number) => request<void>(`/api/edges/${id}`, { method: 'DELETE' }),
+  askNode: (id: string, mode: 'discuss' | 'develop' | 'dispute', message?: string) =>
+    request<RoomState>(`/api/nodes/${encodeURIComponent(id)}/ask`, { method: 'POST', body: JSON.stringify({ mode, message }) }),
+  addNote: (id: string, text: string) =>
+    request<void>(`/api/nodes/${encodeURIComponent(id)}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
+  exportUrl: () => `${API_BASE}/api/export.md`,
   tick: () => request<RoomState>('/api/tick', { method: 'POST' }),
   schema: () => request<RoomState>('/api/schema', { method: 'POST' }),
   reset: () => request<RoomState>('/api/reset', { method: 'POST' }),

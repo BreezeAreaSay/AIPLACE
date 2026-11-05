@@ -19,6 +19,9 @@ pub struct Agent {
     pub current_agenda: String,
     pub respect_user: i64,
     pub color: String,
+    /// One line in character, written by the Director each round (what the UI shows instead of numbers).
+    #[serde(default)]
+    pub inner_state: String,
 }
 
 impl Agent {
@@ -36,6 +39,15 @@ pub struct Message {
     pub ego_thought: Option<String>,
     pub content: String,
     pub created_at: String,
+    /// `user` | `room` | agent id — who the line is aimed at.
+    #[serde(default)]
+    pub addressee: Option<String>,
+    /// Conversational move chosen by the Director (атака, уступка, перебивка, молчание…).
+    #[serde(rename = "move", default)]
+    pub r#move: Option<String>,
+    /// Canvas node this line is about (focus of a node discussion).
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 // ───────────────────────────── Graph ─────────────────────────────
@@ -46,6 +58,25 @@ pub struct GraphNode {
     pub label: String,
     pub node_type: String,
     pub created_by: String,
+    pub created_at: String,
+    /// Markdown body of the note card.
+    #[serde(default)]
+    pub body: String,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub pinned: i64,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// An agent's (or the player's) annotation on a canvas node — their memory of that idea.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NodeNote {
+    pub id: i64,
+    pub node_id: String,
+    pub author: String,
+    pub text: String,
     pub created_at: String,
 }
 
@@ -175,6 +206,35 @@ pub struct NewNode {
     pub node_type: String,
     #[serde(alias = "created_by", default)]
     pub author: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeUpdate {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(rename = "type", alias = "node_type", default)]
+    pub node_type: Option<String>,
+}
+
+/// One beat of the scene the Director stages for this round.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Beat {
+    pub speaker: String,
+    /// `user` | `room` | agent id
+    #[serde(default)]
+    pub addressee: Option<String>,
+    #[serde(rename = "move", default)]
+    pub r#move: Option<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// How to deliver it: length / tempo / tone, e.g. «одним словом, устало».
+    #[serde(default)]
+    pub delivery: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -219,6 +279,14 @@ pub struct DirectorOutput {
     pub contract_updates: Vec<ContractUpdate>,
     #[serde(default)]
     pub relation_deltas: Vec<RelationDelta>,
+    /// The staged dialogue for this round (2–5 beats). `next_speakers` is derived from it.
+    #[serde(default)]
+    pub scene: Vec<Beat>,
+    /// agent_id → one line in character describing their state right now.
+    #[serde(default)]
+    pub inner_states: HashMap<String, String>,
+    #[serde(default)]
+    pub node_updates: Vec<NodeUpdate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +326,60 @@ pub struct SchemaDoc {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
+    /// Optional canvas node the player is talking about.
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CreateNodeRequest {
+    pub label: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(rename = "type", alias = "node_type", default)]
+    pub node_type: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PatchNodeRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(rename = "type", alias = "node_type", default)]
+    pub node_type: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateEdgeRequest {
+    pub source: String,
+    pub target: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AskNodeRequest {
+    /// discuss | develop | dispute
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NoteRequest {
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,6 +387,7 @@ pub struct RoomState {
     pub agents: Vec<Agent>,
     pub messages: Vec<Message>,
     pub graph: Graph,
+    pub node_notes: Vec<NodeNote>,
     pub graph_mermaid: String,
     pub schema: Option<SchemaDoc>,
     pub last_director: Option<DirectorLogEntry>,
@@ -319,6 +442,7 @@ pub enum RoomEvent {
     Director { entry: DirectorLogEntry },
     Agents { agents: Vec<Agent> },
     Graph { graph: Graph, mermaid: String },
+    Notes { notes: Vec<NodeNote> },
     Schema { schema: SchemaDoc },
     Contracts { contracts: Vec<Contract> },
     Relations { relations: Vec<Relation> },

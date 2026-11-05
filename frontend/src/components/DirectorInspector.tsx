@@ -145,15 +145,35 @@ export function DirectorInspector({ entry, agents, directorModel, relations, mem
       )}
 
       <section>
-        <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">next_speakers</h4>
-        <div className="flex flex-wrap gap-1.5">
-          {o.next_speakers.map((id, i) => (
-            <span key={id} className="rounded border px-2 py-0.5 font-medium" style={{ borderColor: AGENT_COLORS[id], color: AGENT_COLORS[id] }}>
-              {i + 1}. {name(id, agents)}
-            </span>
+        <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">сцена · биты</h4>
+        <div className="space-y-1.5">
+          {(o.scene ?? []).map((b, i) => (
+            <div key={i} className="rounded border-l-2 bg-panel px-2.5 py-1.5" style={{ borderColor: AGENT_COLORS[b.speaker] ?? '#666' }}>
+              <div className="flex flex-wrap items-baseline gap-x-2 font-mono text-[10px]">
+                <span style={{ color: AGENT_COLORS[b.speaker] }}>{name(b.speaker, agents)}</span>
+                <span className="text-zinc-500">→ {b.addressee === 'user' ? 'игроку' : b.addressee === 'room' ? 'комнате' : name(b.addressee ?? '', agents)}</span>
+                {b.move && <span className="uppercase tracking-wider text-zinc-400">{b.move}</span>}
+                {b.delivery && <span className="text-zinc-600">· {b.delivery}</span>}
+              </div>
+              {b.intent && <div className="mt-0.5 text-zinc-300">{b.intent}</div>}
+            </div>
           ))}
+          {(o.scene?.length ?? 0) === 0 && o.next_speakers.map((id) => <div key={id} style={{ color: AGENT_COLORS[id] }}>{name(id, agents)}</div>)}
         </div>
       </section>
+
+      {Object.keys(o.inner_states ?? {}).length > 0 && (
+        <section>
+          <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">inner_states · состояния</h4>
+          <div className="space-y-1">
+            {Object.entries(o.inner_states).map(([id, st]) => (
+              <div key={id} className="text-[11px] text-zinc-300">
+                <span className="font-mono text-[10px]" style={{ color: AGENT_COLORS[id] }}>{name(id, agents)}</span> — {st}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h4 className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">updated_agendas · скрытые цели</h4>

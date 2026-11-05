@@ -39,6 +39,9 @@ pub struct ChatOpts {
     pub json_mode: bool,
     /// Trailing `assistant` message — the model continues from here (`<ego_thought>`).
     pub prefill: Option<String>,
+    /// OpenAI-style repetition controls (ignored by providers that lack them).
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
 }
 
 pub struct LlmClient {
@@ -105,6 +108,12 @@ impl LlmClient {
         });
         if json_mode {
             body["response_format"] = json!({ "type": "json_object" });
+        }
+        if let Some(p) = opts.presence_penalty {
+            body["presence_penalty"] = json!(p);
+        }
+        if let Some(p) = opts.frequency_penalty {
+            body["frequency_penalty"] = json!(p);
         }
         let resp = self
             .http

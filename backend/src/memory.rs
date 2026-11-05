@@ -62,7 +62,7 @@ pub async fn consolidate_agent(app: &AppState, agent_id: &str, until: i64) -> Re
             &relations,
         )),
     ];
-    let opts = ChatOpts { temperature: 0.5, max_tokens: 450, json_mode: false, prefill: None };
+    let opts = ChatOpts { temperature: 0.5, max_tokens: 450, json_mode: false, prefill: None, presence_penalty: None, frequency_penalty: None };
     let model = app.llm_settings().await.director_model;
     let summary = app.llm.chat(&model, &msgs, &opts).await?;
     let summary = crate::mermaid::truncate_chars(summary.trim().trim_matches('"'), 1200);

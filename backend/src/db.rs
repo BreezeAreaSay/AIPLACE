@@ -10,7 +10,7 @@ use sqlx::{
 
 use crate::models::{
     Agent, AgentMemory, Contract, DirectorLogEntry, DirectorOutput, GraphEdge, GraphNode, Message,
-    Relation, RoomEventRecord, SchemaDoc,
+    NodeNote, Relation, RoomEventRecord, SchemaDoc,
 };
 
 pub type Db = SqlitePool;
@@ -104,6 +104,13 @@ pub async fn migrate(pool: &Db) -> Result<()> {
             narrated   INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
+        CREATE TABLE IF NOT EXISTS node_notes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id    TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+            author     TEXT NOT NULL,
+            text       TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
         CREATE TABLE IF NOT EXISTS schemas (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             title       TEXT NOT NULL,
@@ -116,6 +123,33 @@ pub async fn migrate(pool: &Db) -> Result<()> {
     .execute(pool)
     .await
     .context("migration failed")?;
+    // Additive column migrations for rooms created by earlier versions.
+    for (table, col, ddl) in [
+        ("agents", "inner_state", "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "addressee", "TEXT"),
+        ("messages", "move", "TEXT"),
+        ("messages", "node_id", "TEXT"),
+        ("graph_nodes", "body", "TEXT NOT NULL DEFAULT ''"),
+        ("graph_nodes", "x", "REAL"),
+        ("graph_nodes", "y", "REAL"),
+        ("graph_nodes", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+        ("graph_nodes", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        add_column_if_missing(pool, table, col, ddl).await?;
+    }
+    Ok(())
+}
+
+async fn add_column_if_missing(pool: &Db, table: &str, col: &str, ddl: &str) -> Result<()> {
+    let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+    if cols.iter().any(|c| c.1 == col) {
+        return Ok(());
+    }
+    sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN \"{col}\" {ddl}"))
+        .execute(pool)
+        .await
+        .with_context(|| format!("adding {table}.{col}"))?;
     Ok(())
 }
 
@@ -247,7 +281,8 @@ pub async fn reset_room(pool: &Db) -> Result<()> {
     sqlx::query(
         "DELETE FROM graph_edges; DELETE FROM graph_nodes; DELETE FROM messages;
          DELETE FROM director_log; DELETE FROM schemas; DELETE FROM agents;
-         DELETE FROM contracts; DELETE FROM relations; DELETE FROM agent_memory; DELETE FROM room_events;",
+         DELETE FROM contracts; DELETE FROM relations; DELETE FROM agent_memory; DELETE FROM room_events;
+         DELETE FROM node_notes;",
     )
     .execute(pool)
     .await?;
@@ -279,6 +314,15 @@ pub async fn update_agent_stats(
     Ok(())
 }
 
+pub async fn update_agent_inner_state(pool: &Db, id: &str, state: &str) -> Result<()> {
+    sqlx::query("UPDATE agents SET inner_state = ? WHERE id = ?")
+        .bind(state)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn update_agent_agenda(pool: &Db, id: &str, agenda: &str) -> Result<()> {
     sqlx::query("UPDATE agents SET current_agenda = ? WHERE id = ?")
         .bind(agenda)
@@ -296,15 +340,32 @@ pub async fn insert_message(
     ego_thought: Option<&str>,
     content: &str,
 ) -> Result<Message> {
+    insert_message_full(pool, sender_id, ego_thought, content, None, None, None).await
+}
+
+pub async fn insert_message_full(
+    pool: &Db,
+    sender_id: &str,
+    ego_thought: Option<&str>,
+    content: &str,
+    addressee: Option<&str>,
+    r#move: Option<&str>,
+    node_id: Option<&str>,
+) -> Result<Message> {
     // NOTE: no `INSERT … RETURNING` + fetch_one here. SQLite keeps the implicit write
     // transaction open until that statement is fully stepped, and a pooled reader on
     // another connection would miss the row (the Director would plan on a stale room).
-    let res = sqlx::query("INSERT INTO messages (sender_id, ego_thought, content) VALUES (?, ?, ?)")
-        .bind(sender_id)
-        .bind(ego_thought)
-        .bind(content)
-        .execute(pool)
-        .await?;
+    let res = sqlx::query(
+        "INSERT INTO messages (sender_id, ego_thought, content, addressee, \"move\", node_id) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(sender_id)
+    .bind(ego_thought)
+    .bind(content)
+    .bind(addressee)
+    .bind(r#move)
+    .bind(node_id)
+    .execute(pool)
+    .await?;
     Ok(sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = ?")
         .bind(res.last_insert_rowid())
         .fetch_one(pool)
@@ -364,17 +425,181 @@ pub async fn upsert_node(
     node_type: &str,
     created_by: &str,
 ) -> Result<()> {
+    upsert_node_full(pool, id, label, node_type, created_by, None, None, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_node_full(
+    pool: &Db,
+    id: &str,
+    label: &str,
+    node_type: &str,
+    created_by: &str,
+    body: Option<&str>,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<()> {
     sqlx::query(
-        "INSERT INTO graph_nodes (id, label, node_type, created_by) VALUES (?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET label = excluded.label, node_type = excluded.node_type",
+        "INSERT INTO graph_nodes (id, label, node_type, created_by, body, x, y, updated_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, ''), ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         ON CONFLICT(id) DO UPDATE SET label = excluded.label, node_type = excluded.node_type,
+         body = CASE WHEN excluded.body = '' THEN graph_nodes.body ELSE excluded.body END,
+         x = COALESCE(graph_nodes.x, excluded.x), y = COALESCE(graph_nodes.y, excluded.y),
+         updated_at = excluded.updated_at",
     )
     .bind(id)
     .bind(label)
     .bind(node_type)
     .bind(created_by)
+    .bind(body)
+    .bind(x)
+    .bind(y)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn get_node(pool: &Db, id: &str) -> Result<Option<GraphNode>> {
+    Ok(sqlx::query_as::<_, GraphNode>("SELECT * FROM graph_nodes WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn update_node_fields(
+    pool: &Db,
+    id: &str,
+    label: Option<&str>,
+    body: Option<&str>,
+    node_type: Option<&str>,
+    pinned: Option<bool>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE graph_nodes SET label = COALESCE(?, label), body = COALESCE(?, body),
+         node_type = COALESCE(?, node_type), pinned = COALESCE(?, pinned),
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+    )
+    .bind(label)
+    .bind(body)
+    .bind(node_type)
+    .bind(pinned.map(|p| p as i64))
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_node_position(pool: &Db, id: &str, x: f64, y: f64) -> Result<()> {
+    sqlx::query("UPDATE graph_nodes SET x = ?, y = ? WHERE id = ?")
+        .bind(x)
+        .bind(y)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_node(pool: &Db, id: &str) -> Result<bool> {
+    // Edges/notes cascade via FK; be explicit for DBs created before FK was on.
+    sqlx::query("DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?").bind(id).bind(id).execute(pool).await?;
+    sqlx::query("DELETE FROM node_notes WHERE node_id = ?").bind(id).execute(pool).await?;
+    let r = sqlx::query("DELETE FROM graph_nodes WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(r.rows_affected() > 0)
+}
+
+pub async fn delete_edge(pool: &Db, id: i64) -> Result<bool> {
+    let r = sqlx::query("DELETE FROM graph_edges WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(r.rows_affected() > 0)
+}
+
+pub async fn edges_of(pool: &Db, node_id: &str) -> Result<Vec<GraphEdge>> {
+    Ok(sqlx::query_as::<_, GraphEdge>("SELECT * FROM graph_edges WHERE source_id = ? OR target_id = ? ORDER BY id")
+        .bind(node_id)
+        .bind(node_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// Give every node without coordinates a sensible spot: next to a positioned neighbour,
+/// otherwise the next free slot of a loose grid. Keeps the canvas from piling up at (0,0).
+pub async fn place_unpositioned_nodes(pool: &Db) -> Result<usize> {
+    let nodes = list_nodes(pool).await?;
+    let edges = list_edges(pool).await?;
+    let mut placed: Vec<(f64, f64)> = nodes.iter().filter_map(|n| Some((n.x?, n.y?))).collect();
+    let mut positions: std::collections::HashMap<String, (f64, f64)> =
+        nodes.iter().filter_map(|n| Some((n.id.clone(), (n.x?, n.y?)))).collect();
+    let mut count = 0;
+    let free = |placed: &Vec<(f64, f64)>, x: f64, y: f64| !placed.iter().any(|(px, py)| (px - x).abs() < 240.0 && (py - y).abs() < 120.0);
+    for n in nodes.iter().filter(|n| n.x.is_none() || n.y.is_none()) {
+        let neighbour = edges
+            .iter()
+            .filter_map(|e| {
+                if e.source_id == n.id {
+                    positions.get(&e.target_id).copied()
+                } else if e.target_id == n.id {
+                    positions.get(&e.source_id).copied()
+                } else {
+                    None
+                }
+            })
+            .next();
+        let (mut x, mut y) = match neighbour {
+            Some((nx, ny)) => (nx + 320.0, ny),
+            None => (0.0, 0.0),
+        };
+        let mut tries = 0;
+        while !free(&placed, x, y) && tries < 200 {
+            tries += 1;
+            if neighbour.is_some() {
+                // fan out below/above the neighbour, then further right
+                let k = tries as f64;
+                y += if tries % 2 == 1 { 150.0 * k } else { -150.0 * k };
+                if tries % 6 == 0 {
+                    x += 320.0;
+                    y = neighbour.map(|p| p.1).unwrap_or(0.0);
+                }
+            } else {
+                x = (tries % 5) as f64 * 320.0;
+                y = (tries / 5) as f64 * 170.0;
+            }
+        }
+        set_node_position(pool, &n.id, x, y).await?;
+        placed.push((x, y));
+        positions.insert(n.id.clone(), (x, y));
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ───────────────────────────── Node notes ─────────────────────────────
+
+pub async fn insert_note(pool: &Db, node_id: &str, author: &str, text: &str) -> Result<NodeNote> {
+    let res = sqlx::query("INSERT INTO node_notes (node_id, author, text) VALUES (?, ?, ?)")
+        .bind(node_id)
+        .bind(author)
+        .bind(text)
+        .execute(pool)
+        .await?;
+    Ok(sqlx::query_as::<_, NodeNote>("SELECT * FROM node_notes WHERE id = ?")
+        .bind(res.last_insert_rowid())
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn list_notes(pool: &Db, limit: usize) -> Result<Vec<NodeNote>> {
+    let mut rows = sqlx::query_as::<_, NodeNote>("SELECT * FROM node_notes ORDER BY id DESC LIMIT ?")
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+pub async fn notes_for_node(pool: &Db, node_id: &str) -> Result<Vec<NodeNote>> {
+    Ok(sqlx::query_as::<_, NodeNote>("SELECT * FROM node_notes WHERE node_id = ? ORDER BY id")
+        .bind(node_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn insert_edge(

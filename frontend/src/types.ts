@@ -10,6 +10,7 @@ export interface Agent {
   current_agenda: string
   respect_user: number
   color: string
+  inner_state: string
 }
 
 export interface Message {
@@ -18,6 +19,9 @@ export interface Message {
   ego_thought: string | null
   content: string
   created_at: string
+  addressee: string | null
+  move: string | null
+  node_id: string | null
 }
 
 export interface GraphNode {
@@ -26,6 +30,27 @@ export interface GraphNode {
   node_type: 'concept' | 'task' | 'conflict' | 'insight' | string
   created_by: string
   created_at: string
+  body: string
+  x: number | null
+  y: number | null
+  pinned: number
+  updated_at: string
+}
+
+export interface NodeNote {
+  id: number
+  node_id: string
+  author: string
+  text: string
+  created_at: string
+}
+
+export interface Beat {
+  speaker: string
+  addressee: string | null
+  move: string | null
+  intent: string | null
+  delivery: string | null
 }
 
 export interface GraphEdge {
@@ -96,6 +121,9 @@ export interface DirectorOutput {
   new_contracts: { title: string; deadline?: string | null; guarantor: string; stake?: number | null; why?: string | null }[]
   contract_updates: { id: number | string; status: string; note?: string | null }[]
   relation_deltas: { a: string; b: string; delta: number; label?: string | null }[]
+  scene: Beat[]
+  inner_states: Record<string, string>
+  node_updates: { id: string; label?: string | null; body?: string | null; type?: string | null }[]
 }
 
 export interface DirectorLogEntry {
@@ -117,6 +145,7 @@ export interface RoomState {
   agents: Agent[]
   messages: Message[]
   graph: Graph
+  node_notes: NodeNote[]
   graph_mermaid: string
   schema: SchemaDoc | null
   last_director: DirectorLogEntry | null
@@ -165,6 +194,7 @@ export type RoomEvent =
   | { type: 'director'; entry: DirectorLogEntry }
   | { type: 'agents'; agents: Agent[] }
   | { type: 'graph'; graph: Graph; mermaid: string }
+  | { type: 'notes'; notes: NodeNote[] }
   | { type: 'schema'; schema: SchemaDoc }
   | { type: 'contracts'; contracts: Contract[] }
   | { type: 'relations'; relations: Relation[] }
@@ -177,6 +207,20 @@ export const AGENT_COLORS: Record<string, string> = {
   graffiti: '#CCFF00',
   user: '#ffffff',
   system: '#8b8d9a',
+}
+
+export const NODE_TYPE_LABEL: Record<string, string> = {
+  concept: 'концепт',
+  task: 'задача',
+  conflict: 'конфликт',
+  insight: 'инсайт',
+}
+
+export const NODE_TYPE_GLYPH: Record<string, string> = {
+  concept: '◇',
+  task: '☐',
+  conflict: '⚡',
+  insight: '✦',
 }
 
 export const AGENT_GLYPH: Record<string, string> = {

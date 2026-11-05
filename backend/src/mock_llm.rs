@@ -88,8 +88,27 @@ fn director(user_prompt: &str) -> String {
         .choose(&mut rng)
         .copied()
         .unwrap_or("напряжённое");
+    let focus_id = regex::Regex::new(r"УЗЕЛ id=(\w+)").ok().and_then(|r| r.captures(user_prompt).map(|c| c[1].to_string()));
+    let moves = ["ответ", "атака", "уступка", "перебивка", "желание", "насмешка"];
+    let scene: Vec<serde_json::Value> = speakers
+        .iter()
+        .enumerate()
+        .map(|(i, sp)| {
+            let addressee = if i == 0 { "user".to_string() } else { speakers[0].clone() };
+            json!({"speaker": sp, "addressee": addressee, "move": moves.choose(&mut rng).copied().unwrap_or("ответ"), "intent": format!("[MOCK] зацепиться за «{topic}»"), "delivery": if i == 0 { "развёрнуто" } else { "коротко, перебивая" }})
+        })
+        .collect();
+    let inner = json!({
+        "physicist": "Раздражён: вокруг шум без сигнала, но в воздухе запахло задачей.",
+        "lit_teacher": "Томится: ждёт хоть одного честного слова, чтобы вцепиться.",
+        "graffiti": "Чешутся руки — стена пустая, а все болтают."
+    });
+    let node_updates = focus_id.as_ref().map(|id| json!([{"id": id, "body": format!("[MOCK] уточнение после обсуждения «{topic}»")}])).unwrap_or(json!([]));
     json!({
         "room_mood": mood,
+        "scene": scene,
+        "inner_states": inner,
+        "node_updates": node_updates,
         "director_note": format!("[MOCK] Режиссёр без ключа OpenRouter раздаёт шаблонные повестки. Тема раунда: «{topic}». Говорят: {}.", speakers.join(", ")),
         "next_speakers": speakers,
         "updated_agendas": agendas,
@@ -172,7 +191,12 @@ fn agent(system_prompt: &str) -> String {
     };
     let ego = egos.choose(&mut rng).copied().unwrap_or("…");
     let speech = speeches.choose(&mut rng).copied().unwrap_or("…");
-    format!("<ego_thought>{ego}</ego_thought>\n\n{speech}")
+    let note = regex::Regex::new(r#"ФОКУС-УЗЕЛ id=(\w+)"#)
+        .ok()
+        .and_then(|r| r.captures(system_prompt).map(|c| c[1].to_string()))
+        .map(|id| format!("\n<note node=\"{id}\">[MOCK пометка] Моё мнение об этом узле: спорно, но живо.</note>"))
+        .unwrap_or_default();
+    format!("<ego_thought>{ego}</ego_thought>\n\n{speech}{note}")
 }
 
 fn schema(user_prompt: &str) -> String {
@@ -213,12 +237,12 @@ mod integration {
     use crate::prompts::{director_user, DirectorContext};
 
     fn msg(id: i64, who: &str, text: &str, ego: Option<&str>) -> Message {
-        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into() }
+        Message { id, sender_id: who.into(), ego_thought: ego.map(str::to_string), content: text.into(), created_at: "t".into(), addressee: None, r#move: None, node_id: None }
     }
 
     #[test]
     fn director_prompt_topic_is_latest_user_line() {
-        let agents = vec![Agent { id: "physicist".into(), name: "Аркадий Борисович".into(), archetype: "a".into(), system_core: "c".into(), hp: 100, dopamine: 50, current_agenda: "x".into(), respect_user: 0, color: "#fff".into() }];
+        let agents = vec![Agent { id: "physicist".into(), name: "Аркадий Борисович".into(), archetype: "a".into(), system_core: "c".into(), hp: 100, dopamine: 50, current_agenda: "x".into(), respect_user: 0, color: "#fff".into(), inner_state: String::new() }];
         let messages = vec![
             msg(1, "system", "Комната открыта.", None),
             msg(2, "user", "Я устал и ничего не хочу", None),
@@ -236,6 +260,8 @@ mod integration {
             memories: &[],
             events: &[],
             now: "2026-11-05T00:00:00Z",
+            focus: None,
+            recent_speakers: &[],
         };
         let prompt = director_user(&ctx);
         eprintln!("{prompt}");

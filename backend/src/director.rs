@@ -13,29 +13,32 @@ use crate::{
     state::AppState,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     UserMessage,
     Tick,
     /// A contract was resolved from the UI — the room reacts without a new player line.
     Event,
+    /// The player clicked a canvas node: discuss | develop | dispute.
+    Node { id: String, mode: String },
 }
 
 impl Trigger {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Trigger::UserMessage => "user_message",
             Trigger::Tick => "tick",
             Trigger::Event => "event",
+            Trigger::Node { .. } => "node",
         }
     }
 }
 
-const MAX_SPEAKERS: usize = 2;
+const MAX_BEATS: usize = 4;
 const MAX_NODES_PER_ROUND: usize = 6;
 const MAX_EDGES_PER_ROUND: usize = 8;
 
-pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLogEntry> {
+pub async fn run_director(app: &AppState, trigger: &Trigger) -> Result<DirectorLogEntry> {
     let agents = db::list_agents(&app.db).await?;
     let messages = db::recent_messages(&app.db, app.cfg.context_messages).await?;
     let nodes = db::list_nodes(&app.db).await?;
@@ -45,6 +48,36 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
     let memories = db::list_memories(&app.db).await?;
     let events = db::pending_events(&app.db).await?;
     let now = contracts::now_rfc3339();
+    let focus_node = match trigger {
+        Trigger::Node { id, .. } => db::get_node(&app.db, id).await?,
+        _ => None,
+    };
+    let focus_notes = match &focus_node {
+        Some(n) => db::notes_for_node(&app.db, &n.id).await?,
+        None => Vec::new(),
+    };
+    let focus = match (&focus_node, trigger) {
+        (Some(n), Trigger::Node { mode, .. }) => Some((n, focus_notes.as_slice(), mode.as_str())),
+        _ => None,
+    };
+    // Who spoke in the last two rounds (most recent first), for rotation.
+    let recent_speakers: Vec<String> = {
+        let mut seen = Vec::new();
+        let mut rounds = 0;
+        for m in messages.iter().rev() {
+            if m.sender_id == crate::models::USER_ID {
+                rounds += 1;
+                if rounds >= 2 {
+                    break;
+                }
+                continue;
+            }
+            if agents.iter().any(|a| a.id == m.sender_id) && !seen.contains(&m.sender_id) {
+                seen.push(m.sender_id.clone());
+            }
+        }
+        seen
+    };
 
     let ctx = DirectorContext {
         trigger: trigger.as_str(),
@@ -57,16 +90,20 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
         memories: &memories,
         events: &events,
         now: &now,
+        focus,
+        recent_speakers: &recent_speakers,
     };
     let msgs = [
         ChatMessage::system(prompts::director_system()),
         ChatMessage::user(prompts::director_user(&ctx)),
     ];
     let opts = ChatOpts {
-        temperature: 0.85,
-        max_tokens: 1800,
+        temperature: 0.8,
+        max_tokens: 2200,
         json_mode: true,
         prefill: None,
+        presence_penalty: None,
+        frequency_penalty: None,
     };
 
     let director_model = app.llm_settings().await.director_model;
@@ -75,17 +112,18 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
             Ok(o) => (o, "llm"),
             Err(e) => {
                 tracing::warn!(error = %e, "director JSON unusable → fallback plan");
-                (fallback_plan(&agents, trigger), "fallback")
+                (fallback_plan(&agents, trigger, &recent_speakers), "fallback")
             }
         },
         Err(e) => {
             tracing::warn!(error = %e, "director LLM call failed → fallback plan");
-            (fallback_plan(&agents, trigger), "fallback")
+            (fallback_plan(&agents, trigger, &recent_speakers), "fallback")
         }
     };
 
-    normalize_speakers(&mut output, &agents);
+    normalize_scene(&mut output, &agents, &recent_speakers);
     apply_agendas(app, &output, &agents).await?;
+    apply_inner_states(app, &output, &agents).await?;
     apply_stats(app, &output, &agents, trigger).await?;
     apply_graph(app, &output).await?;
     apply_relations(app, &output, &agents).await?;
@@ -96,11 +134,21 @@ pub async fn run_director(app: &AppState, trigger: Trigger) -> Result<DirectorLo
     // A freshly appointed guarantor must speak this round.
     for c in &created {
         if let Some(g) = &c.guarantor_id {
-            if !output.next_speakers.contains(g) {
-                if output.next_speakers.len() >= MAX_SPEAKERS {
-                    output.next_speakers.pop();
+            if !output.scene.iter().any(|b| &b.speaker == g) {
+                if output.scene.len() >= MAX_BEATS {
+                    output.scene.pop();
                 }
-                output.next_speakers.insert(0, g.clone());
+                output.scene.insert(
+                    0,
+                    crate::models::Beat {
+                        speaker: g.clone(),
+                        addressee: Some("user".into()),
+                        r#move: Some("предложение".into()),
+                        intent: Some(format!("принять ставку по слову #{} «{}» в своей манере и назвать цену провала", c.id, c.title)),
+                        delivery: Some("коротко, с нажимом".into()),
+                    },
+                );
+                output.next_speakers = derive_speakers(&output.scene);
             }
         }
     }
@@ -150,41 +198,122 @@ async fn apply_relations(app: &AppState, out: &DirectorOutput, agents: &[Agent])
 }
 
 /// Safety net: keep the room alive even with no model. Agendas are left untouched (we never
-/// hardcode goals) — only speakers are chosen.
-fn fallback_plan(agents: &[Agent], trigger: Trigger) -> DirectorOutput {
+/// hardcode goals) — only a minimal scene is staged, honouring rotation.
+fn fallback_plan(agents: &[Agent], trigger: &Trigger, recent: &[String]) -> DirectorOutput {
     let mut alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
     let mut rng = rand::thread_rng();
     alive.shuffle(&mut rng);
-    let n = if trigger == Trigger::UserMessage { 1 } else { 2 };
+    alive.sort_by_key(|a| recent.iter().position(|r| r == &a.id).map(|p| -(p as i64)).unwrap_or(-100));
+    let n = if matches!(trigger, Trigger::UserMessage) { 1 } else { 2 };
+    let scene: Vec<crate::models::Beat> = alive
+        .iter()
+        .take(n)
+        .enumerate()
+        .map(|(i, a)| crate::models::Beat {
+            speaker: a.id.clone(),
+            addressee: Some(if i == 0 { "user".to_string() } else { alive[0].id.clone() }),
+            r#move: Some("ответ".into()),
+            intent: Some("отреагировать на последнюю реплику своими словами".into()),
+            delivery: Some("коротко".into()),
+        })
+        .collect();
     DirectorOutput {
         room_mood: Some("помехи в эфире".into()),
         director_note: Some(
-            "Режиссёр не дозвонился до модели: говорящие выбраны случайно, повестки сохранены с прошлого хода.".into(),
+            "Режиссёр не дозвонился до модели: сцена поставлена вслепую, повестки сохранены с прошлого хода.".into(),
         ),
-        next_speakers: alive.iter().take(n).map(|a| a.id.clone()).collect(),
+        next_speakers: derive_speakers(&scene),
+        scene,
         ..Default::default()
     }
 }
 
-fn normalize_speakers(out: &mut DirectorOutput, agents: &[Agent]) {
-    let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
-    let mut speakers: Vec<String> = Vec::new();
-    for s in out.next_speakers.iter() {
-        let id = mermaid::normalize_author(s);
-        if id != "user" && alive.iter().any(|a| a.id == id) && !speakers.iter().any(|x| x == id) {
-            speakers.push(id.to_string());
+fn derive_speakers(scene: &[crate::models::Beat]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for b in scene {
+        if !out.contains(&b.speaker) {
+            out.push(b.speaker.clone());
         }
-        if speakers.len() == MAX_SPEAKERS {
+    }
+    out
+}
+
+/// Validate the staged scene: known alive speakers, sane addressees, at most MAX_BEATS beats,
+/// and a soft rotation rule (someone who spoke two rounds running yields unless addressed).
+fn normalize_scene(out: &mut DirectorOutput, agents: &[Agent], recent: &[String]) {
+    let alive: Vec<&Agent> = agents.iter().filter(|a| a.is_alive()).collect();
+    let mut scene: Vec<crate::models::Beat> = Vec::new();
+    // Legacy outputs without `scene`: synthesize from next_speakers.
+    if out.scene.is_empty() {
+        for s in &out.next_speakers {
+            scene.push(crate::models::Beat { speaker: s.clone(), addressee: Some("user".into()), ..Default::default() });
+        }
+    } else {
+        scene = out.scene.clone();
+    }
+    let mut cleaned: Vec<crate::models::Beat> = Vec::new();
+    for mut b in scene {
+        let id = mermaid::normalize_author(&b.speaker);
+        if id == "user" || !alive.iter().any(|a| a.id == id) {
+            continue;
+        }
+        b.speaker = id.to_string();
+        b.addressee = Some(match b.addressee.as_deref().map(str::trim) {
+            None | Some("") | Some("user") | Some("игрок") | Some("player") => "user".to_string(),
+            Some("room") | Some("all") | Some("комната") => "room".to_string(),
+            Some(x) => {
+                let n = mermaid::normalize_author(x);
+                if n == "user" || n == id { "user".to_string() } else { n.to_string() }
+            }
+        });
+        if let Some(m) = &b.r#move {
+            b.r#move = Some(mermaid::truncate_chars(m.trim(), 30));
+        }
+        cleaned.push(b);
+        if cleaned.len() == MAX_BEATS {
             break;
         }
     }
-    if speakers.is_empty() {
-        let mut rng = rand::thread_rng();
-        if let Some(a) = alive.choose(&mut rng) {
-            speakers.push(a.id.clone());
+    // Rotation: an agent who spoke in both of the last two rounds and is not addressed in this
+    // scene loses their beat, if someone else remains to speak.
+    if recent.len() >= 2 {
+        let addressed: Vec<String> = cleaned.iter().filter_map(|b| b.addressee.clone()).collect();
+        let tired: Vec<String> = alive
+            .iter()
+            .map(|a| a.id.clone())
+            .filter(|id| recent.iter().filter(|r| *r == id).count() >= 1 && recent.first() == Some(id))
+            .collect();
+        for t in tired {
+            let others_remain = cleaned.iter().any(|b| b.speaker != t);
+            if others_remain && !addressed.contains(&t) && cleaned.iter().filter(|b| b.speaker == t).count() == cleaned.len().min(2) {
+                cleaned.retain(|b| b.speaker != t);
+            }
         }
     }
-    out.next_speakers = speakers;
+    if cleaned.is_empty() {
+        let mut rng = rand::thread_rng();
+        let mut pool: Vec<&&Agent> = alive.iter().filter(|a| !recent.contains(&a.id)).collect();
+        if pool.is_empty() {
+            pool = alive.iter().collect();
+        }
+        if let Some(a) = pool.choose(&mut rng) {
+            cleaned.push(crate::models::Beat { speaker: a.id.clone(), addressee: Some("user".into()), ..Default::default() });
+        }
+    }
+    out.scene = cleaned;
+    out.next_speakers = derive_speakers(&out.scene);
+}
+
+async fn apply_inner_states(app: &AppState, out: &DirectorOutput, agents: &[Agent]) -> Result<()> {
+    for (raw_id, state) in out.inner_states.iter() {
+        let id = mermaid::normalize_author(raw_id);
+        let state = state.trim();
+        if id == "user" || state.is_empty() || !agents.iter().any(|a| a.id == id) {
+            continue;
+        }
+        db::update_agent_inner_state(&app.db, id, &mermaid::truncate_chars(state, 200)).await?;
+    }
+    Ok(())
 }
 
 async fn apply_agendas(app: &AppState, out: &DirectorOutput, agents: &[Agent]) -> Result<()> {
@@ -203,7 +332,7 @@ fn clamp(v: i64, lo: i64, hi: i64) -> i64 {
     v.max(lo).min(hi)
 }
 
-async fn apply_stats(app: &AppState, out: &DirectorOutput, agents: &[Agent], trigger: Trigger) -> Result<()> {
+async fn apply_stats(app: &AppState, out: &DirectorOutput, agents: &[Agent], trigger: &Trigger) -> Result<()> {
     for a in agents.iter().filter(|a| a.is_alive()) {
         let d = out
             .stat_deltas
@@ -215,7 +344,7 @@ async fn apply_stats(app: &AppState, out: &DirectorOutput, agents: &[Agent], tri
         let mut hp = a.hp + clamp(d.hp.round() as i64, -12, 12);
         let mut dopamine = a.dopamine + clamp(d.dopamine.round() as i64, -20, 20);
         let respect = clamp(a.respect_user + clamp(d.respect_user.round() as i64, -15, 15), -100, 100);
-        if trigger == Trigger::Tick {
+        if matches!(trigger, Trigger::Tick) {
             // Entropy: time alone without being fed costs something.
             hp -= app.cfg.tick_entropy_hp;
             dopamine -= app.cfg.tick_entropy_dopamine;
@@ -247,14 +376,28 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
         }
         let raw_id = if n.id.trim().is_empty() { n.label.as_str() } else { n.id.as_str() };
         let id = mermaid::safe_id(raw_id);
-        db::upsert_node(
+        let body = n.body.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(|b| mermaid::truncate_chars(b, 1500));
+        db::upsert_node_full(
             &app.db,
             &id,
             &label,
             mermaid::normalize_node_type(&n.node_type),
             mermaid::normalize_author(&n.author),
+            body.as_deref(),
+            None,
+            None,
         )
         .await?;
+    }
+    for u in out.node_updates.iter().take(6) {
+        let id = mermaid::safe_id(&u.id);
+        if !db::node_exists(&app.db, &id).await? {
+            continue;
+        }
+        let label = u.label.as_deref().map(mermaid::sanitize_label).filter(|l| l != "…");
+        let body = u.body.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(|b| mermaid::truncate_chars(b, 1500));
+        let nt = u.node_type.as_deref().map(mermaid::normalize_node_type);
+        db::update_node_fields(&app.db, &id, label.as_deref(), body.as_deref(), nt, None).await?;
     }
     for e in m.edges.iter().take(MAX_EDGES_PER_ROUND) {
         let from = mermaid::safe_id(&e.from);
@@ -274,5 +417,6 @@ async fn apply_graph(app: &AppState, out: &DirectorOutput) -> Result<()> {
         let label = if label == "…" { String::new() } else { mermaid::truncate_chars(&label, 30) };
         db::insert_edge(&app.db, &from, &to, &label, author).await?;
     }
+    db::place_unpositioned_nodes(&app.db).await?;
     Ok(())
 }

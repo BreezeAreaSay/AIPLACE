@@ -20,10 +20,23 @@ body { background: #0D0E12; overscroll-behavior: none; -webkit-tap-highlight-col
   background: repeating-linear-gradient(0deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px);
 }
 
-.mermaid-host svg { max-width: 100%; height: auto; }
-.mermaid-natural svg { max-width: none !important; width: 100% !important; }
-.mermaid-host .node rect, .mermaid-host .node polygon, .mermaid-host .node path { rx: 4px; }
-.mermaid-host .edgeLabel { background: #0D0E12 !important; color: #c9c9d1 !important; }
-.mermaid-host .edgeLabel rect, .mermaid-host .edgeLabel foreignObject div { background: #0D0E12 !important; }
-.mermaid-host .flowchart-link { stroke: #5b5d6e !important; }
-.mermaid-host .marker { fill: #5b5d6e !important; stroke: #5b5d6e !important; }
+/* ── React Flow dark theme ── */
+.react-flow { background: #0D0E12; }
+.react-flow__attribution { display: none; }
+.react-flow__controls { box-shadow: none; border: 1px solid #23242e; border-radius: 6px; overflow: hidden; }
+.react-flow__controls-button { background: #13141a; border-bottom: 1px solid #23242e; color: #c9c9d1; fill: #c9c9d1; }
+.react-flow__controls-button:hover { background: #1c1d26; }
+.react-flow__controls-button svg { fill: currentColor; }
+.react-flow__minimap { background: #0D0E12; border: 1px solid #23242e; border-radius: 6px; }
+.react-flow__edge-path { stroke: #4a4c5c; stroke-width: 1.5; }
+.react-flow__edge.selected .react-flow__edge-path, .react-flow__edge:hover .react-flow__edge-path { stroke: #CCFF00; }
+.react-flow__edge-text { fill: #9a9ca8; font: 10px ui-monospace, monospace; }
+.react-flow__edge-textbg { fill: #0D0E12; }
+.react-flow__handle { width: 9px; height: 9px; background: #0D0E12; border: 2px solid #4a4c5c; }
+.react-flow__node:hover .react-flow__handle { border-color: #CCFF00; }
+.react-flow__connectionline path { stroke: #CCFF00; stroke-dasharray: 4 3; }
+.react-flow__node { font-family: inherit; }
+.note-md p { margin: 0 0 .5em; } .note-md ul, .note-md ol { margin: 0 0 .5em 1.1em; } .note-md li { margin: .15em 0; }
+.note-md code { background: #1a1b26; padding: 0 .25em; border-radius: 3px; color: #CCFF00; font-size: .9em; }
+.note-md strong { color: #f4f4f5; } .note-md h1, .note-md h2, .note-md h3 { font-size: 1em; color: #f4f4f5; margin: .6em 0 .3em; }
+.note-md a { color: #00F0FF; text-decoration: underline; } .note-md blockquote { border-left: 2px solid #3a3b47; padding-left: .6em; color: #9a9ca8; }

@@ -1,7 +1,7 @@
 {
   "name": "triad-canvas-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,9 +10,10 @@
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
-    "mermaid": "^11.4.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "@xyflow/react": "^12.3.6",
+    "react-markdown": "^9.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

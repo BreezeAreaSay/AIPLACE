@@ -65,6 +65,9 @@ export function useRoom() {
         case 'graph':
           setState((s) => (s ? { ...s, graph: ev.graph, graph_mermaid: ev.mermaid } : s))
           break
+        case 'notes':
+          setState((s) => (s ? { ...s, node_notes: ev.notes } : s))
+          break
         case 'schema':
           setState((s) => (s ? { ...s, schema: ev.schema } : s))
           break
@@ -102,6 +105,16 @@ export function useRoom() {
     [],
   )
 
+  /** Fire-and-forget canvas edits: no busy state, errors surface in the banner. */
+  const quiet = useCallback(async (fn: () => Promise<unknown>) => {
+    try {
+      await fn()
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }, [])
+
   return {
     state,
     busy,
@@ -109,7 +122,42 @@ export function useRoom() {
     gate,
     live,
     refresh,
-    send: (text: string) => run('Отправляю в комнату…', () => api.chat(text)),
+    send: (text: string, nodeId?: string | null) => run('Отправляю в комнату…', () => api.chat(text, nodeId)),
+    createNode: (label: string, opts?: { body?: string; type?: string; x?: number; y?: number }) =>
+      run('Добавляю заметку…', () => api.createNode(label, opts)),
+    patchNode: (id: string, patch: Parameters<typeof api.patchNode>[1]) => {
+      // optimistic local update so the panel feels instant
+      setState((s) =>
+        s
+          ? {
+              ...s,
+              graph: {
+                ...s.graph,
+                nodes: s.graph.nodes.map((n) =>
+                  n.id === id
+                    ? {
+                        ...n,
+                        label: patch.label ?? n.label,
+                        body: patch.body ?? n.body,
+                        node_type: patch.type ?? n.node_type,
+                        x: patch.x ?? n.x,
+                        y: patch.y ?? n.y,
+                        pinned: patch.pinned === undefined ? n.pinned : patch.pinned ? 1 : 0,
+                      }
+                    : n,
+                ),
+              },
+            }
+          : s,
+      )
+      return quiet(() => api.patchNode(id, patch))
+    },
+    deleteNode: (id: string) => quiet(() => api.deleteNode(id)),
+    createEdge: (source: string, target: string, label?: string) => quiet(() => api.createEdge(source, target, label)),
+    deleteEdge: (id: number) => quiet(() => api.deleteEdge(id)),
+    addNote: (id: string, text: string) => quiet(() => api.addNote(id, text)),
+    askNode: (id: string, mode: 'discuss' | 'develop' | 'dispute', message?: string) =>
+      run('Триада смотрит на узел…', () => api.askNode(id, mode, message)),
     tick: () => run('Автономный тик…', api.tick),
     synthesize: () => run('Собираю схему…', api.schema),
     resolveContract: (id: number, status: 'done' | 'failed' | 'cancelled', note?: string) =>

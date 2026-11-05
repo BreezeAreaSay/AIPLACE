@@ -87,7 +87,7 @@ impl Config {
             port,
             static_dir: env_opt("STATIC_DIR"),
             app_url: env_or("APP_URL", &format!("http://localhost:{port}")),
-            context_messages: env_or("CONTEXT_MESSAGES", "14").parse().unwrap_or(14),
+            context_messages: env_or("CONTEXT_MESSAGES", "24").parse().unwrap_or(24),
             tick_entropy_hp: env_or("TICK_ENTROPY_HP", "2").parse().unwrap_or(2),
             tick_entropy_dopamine: env_or("TICK_ENTROPY_DOPAMINE", "3").parse().unwrap_or(3),
             allow_remote_settings: env_bool("ALLOW_REMOTE_SETTINGS"),

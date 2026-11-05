@@ -13,16 +13,25 @@ use crate::{
     state::AppState,
 };
 
-pub async fn run_agent(app: &AppState, agent_id: &str, room_mood: Option<&str>) -> Result<Message> {
-    run_agent_inner(app, agent_id, room_mood, false).await
+/// Everything a turn needs besides the agent id.
+#[derive(Default, Clone)]
+pub struct TurnPlan<'a> {
+    pub beat: Option<&'a crate::models::Beat>,
+    pub scene_so_far: Vec<(String, String)>,
+    pub room_mood: Option<&'a str>,
+    pub focus_node: Option<&'a str>,
+}
+
+pub async fn run_agent(app: &AppState, agent_id: &str, plan: TurnPlan<'_>) -> Result<Message> {
+    run_agent_inner(app, agent_id, plan, false).await
 }
 
 /// Final words of an agent that just hit 0 HP (bypasses the alive check once).
 pub async fn run_last_words(app: &AppState, agent_id: &str) -> Result<Message> {
-    run_agent_inner(app, agent_id, Some("траур и злорадство"), true).await
+    run_agent_inner(app, agent_id, TurnPlan { room_mood: Some("траур и злорадство"), ..Default::default() }, true).await
 }
 
-async fn run_agent_inner(app: &AppState, agent_id: &str, room_mood: Option<&str>, dying: bool) -> Result<Message> {
+async fn run_agent_inner(app: &AppState, agent_id: &str, plan: TurnPlan<'_>, dying: bool) -> Result<Message> {
     let agents = db::list_agents(&app.db).await?;
     let agent = agents
         .iter()
@@ -35,34 +44,53 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, room_mood: Option<&str>
     let others: Vec<_> = agents.iter().filter(|a| a.id != agent_id).cloned().collect();
     let messages = db::recent_messages(&app.db, app.cfg.context_messages).await?;
     let nodes = db::list_nodes(&app.db).await?;
-    let last_ego = db::last_ego_thought(&app.db, agent_id).await?;
+    let own_recent: Vec<String> = messages
+        .iter()
+        .rev()
+        .filter(|m| m.sender_id == agent_id && !m.content.is_empty())
+        .take(4)
+        .map(|m| m.content.clone())
+        .collect();
     let contracts = db::open_contracts(&app.db).await?;
     let relations = db::list_relations(&app.db).await?;
     let memory = db::get_memory(&app.db, agent_id).await?;
     let events = db::recent_events(&app.db, 4).await?;
+    let focus_node = match plan.focus_node {
+        Some(id) => db::get_node(&app.db, id).await?,
+        None => None,
+    };
+    let focus_notes = match &focus_node {
+        Some(n) => db::notes_for_node(&app.db, &n.id).await?,
+        None => Vec::new(),
+    };
 
     let ctx = AgentContext {
         agent: &agent,
         others: &others,
         messages: &messages,
         nodes: &nodes,
-        last_ego: last_ego.as_deref(),
-        room_mood,
+        own_recent: &own_recent,
+        room_mood: plan.room_mood,
         contracts: &contracts,
         relations: &relations,
         memory: memory.as_ref().map(|m| m.summary.as_str()),
         events: &events,
         dying,
+        beat: plan.beat,
+        scene_so_far: &plan.scene_so_far,
+        focus: focus_node.as_ref().map(|n| (n, focus_notes.as_slice())),
     };
     let msgs = [
         ChatMessage::system(prompts::agent_system(&ctx)),
         ChatMessage::user(prompts::agent_user(&ctx, &agents)),
     ];
     let opts = ChatOpts {
-        temperature: 0.95,
+        temperature: 0.9,
         max_tokens: 700,
         json_mode: false,
         prefill: Some(EGO_PREFILL.to_string()),
+        presence_penalty: Some(0.6),
+        frequency_penalty: Some(0.4),
     };
 
     let model = app.llm_settings().await.model;
@@ -77,9 +105,48 @@ async fn run_agent_inner(app: &AppState, agent_id: &str, room_mood: Option<&str>
         }
     };
     let speech = strip_name_prefix(&speech, &agent.name);
-    let msg = db::insert_message(&app.db, agent_id, ego.as_deref(), &speech).await?;
+    let (speech, notes) = extract_notes(&speech);
+    let speech = if speech.trim().is_empty() { "*молчит*".to_string() } else { speech };
+    let addressee = plan.beat.and_then(|b| b.addressee.clone());
+    let mv = plan.beat.and_then(|b| b.r#move.clone());
+    let msg = db::insert_message_full(
+        &app.db,
+        agent_id,
+        ego.as_deref(),
+        &speech,
+        addressee.as_deref(),
+        mv.as_deref(),
+        plan.focus_node,
+    )
+    .await?;
     app.emit(RoomEvent::Message { message: msg.clone() });
+    let mut stored = 0;
+    for (node_id, text) in notes {
+        let id = crate::mermaid::safe_id(&node_id);
+        if db::node_exists(&app.db, &id).await? {
+            db::insert_note(&app.db, &id, agent_id, &crate::mermaid::truncate_chars(text.trim(), 600)).await?;
+            stored += 1;
+        }
+    }
+    if stored > 0 {
+        app.emit(RoomEvent::Notes { notes: db::list_notes(&app.db, 400).await? });
+    }
     Ok(msg)
+}
+
+/// Pull `<note node="id">text</note>` annotations out of the speech.
+pub fn extract_notes(speech: &str) -> (String, Vec<(String, String)>) {
+    static NOTE: OnceLock<Regex> = OnceLock::new();
+    let re = NOTE.get_or_init(|| Regex::new(r#"(?is)<note\s+node\s*=\s*["']?([^"'>\s]+)["']?\s*>(.*?)</note>"#).expect("regex"));
+    let mut notes = Vec::new();
+    for c in re.captures_iter(speech) {
+        let text = c[2].trim();
+        if !text.is_empty() {
+            notes.push((c[1].to_string(), text.to_string()));
+        }
+    }
+    let cleaned = re.replace_all(speech, "").trim().to_string();
+    (cleaned, notes)
 }
 
 fn silence_line(agent_id: &str) -> String {
@@ -141,6 +208,13 @@ mod tests {
         let (ego, speech) = parse_agent_reply("<ego_thought>злюсь</ego_thought>\n\nНу и? Что дальше?");
         assert_eq!(ego.as_deref(), Some("злюсь"));
         assert_eq!(speech, "Ну и? Что дальше?");
+    }
+
+    #[test]
+    fn extracts_node_notes() {
+        let (speech, notes) = extract_notes("Полка — это масса на кронштейне.\n<note node=\"polka\">Считать нагрузку: 12 кг/м.</note>");
+        assert_eq!(speech, "Полка — это масса на кронштейне.");
+        assert_eq!(notes, vec![("polka".to_string(), "Считать нагрузку: 12 кг/м.".to_string())]);
     }
 
     #[test]
