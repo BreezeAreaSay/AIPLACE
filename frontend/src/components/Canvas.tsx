@@ -72,12 +72,13 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
   const tmap = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types])
   const visibleIds = useMemo(() => new Set(visible.map((n) => n.id)), [visible])
 
+  const SCALE = mode === 'dots' ? 0.4 : 1
   const nodes: (NoteNodeType | DotNodeType)[] = useMemo(
     () =>
       visible.map((n) => mode === 'dots' ? ({
         id: n.id,
         type: 'dot',
-        position: overrides[n.id] ?? { x: n.x ?? 0, y: n.y ?? 0 },
+        position: overrides[n.id] ?? { x: (n.x ?? 0) * SCALE, y: (n.y ?? 0) * SCALE },
         data: {
           label: n.label,
           color: AGENT_COLORS[n.created_by] ?? '#9a9ca8',
@@ -107,8 +108,13 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
         },
         draggable: n.pinned === 0,
       } as NoteNodeType)),
-    [visible, overrides, counts, selectedId, hotIds, tmap, mode, degree],
+    [visible, overrides, counts, selectedId, hotIds, tmap, mode, degree, SCALE],
   )
+  // Position overrides are in the current scale; drop them when the scale changes.
+  useEffect(() => {
+    setOverrides({})
+    setTimeout(() => rf.fitView({ padding: 0.2, duration: 250, maxZoom: mode === 'dots' ? 1.6 : 0.9 }), 60)
+  }, [mode, rf])
 
   const edges: Edge[] = useMemo(
     () =>
@@ -119,9 +125,10 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
           source: e.source_id,
           target: e.target_id,
           label: e.relation_label || (e.kind !== 'related' ? e.kind : undefined),
-          style: { stroke: `${AGENT_COLORS[e.created_by] ?? '#4a4c5c'}99` },
+          type: mode === 'dots' ? 'straight' : 'default',
+          style: { stroke: `${AGENT_COLORS[e.created_by] ?? '#8a8ca0'}${mode === 'dots' ? 'bb' : '99'}`, strokeWidth: mode === 'dots' ? 1.2 : 1 },
         })),
-    [graph.edges, visibleIds],
+    [graph.edges, visibleIds, mode],
   )
 
   useEffect(() => {
@@ -145,9 +152,9 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
 
   const onNodeDragStop = useCallback(
     (_: unknown, node: NoteNodeType | DotNodeType) => {
-      onMove(node.id, Math.round(node.position.x), Math.round(node.position.y))
+      onMove(node.id, Math.round(node.position.x / SCALE), Math.round(node.position.y / SCALE))
     },
-    [onMove],
+    [onMove, SCALE],
   )
 
   const onNodeClick: NodeMouseHandler<NoteNodeType | DotNodeType> = useCallback((_, node) => onSelect(node.id), [onSelect])
@@ -156,7 +163,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
     (ev: React.MouseEvent) => {
       if (ev.detail === 2) {
         const p = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
-        onCreate('Новая заметка', { x: Math.round(p.x), y: Math.round(p.y) })
+        onCreate('Новая заметка', { x: Math.round(p.x / SCALE), y: Math.round(p.y / SCALE) })
       } else {
         onSelect(null)
       }
@@ -168,7 +175,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
     const el = document.querySelector('.react-flow') as HTMLElement | null
     const r = el?.getBoundingClientRect()
     const p = rf.screenToFlowPosition({ x: (r?.left ?? 0) + (r?.width ?? 800) / 2, y: (r?.top ?? 0) + (r?.height ?? 600) / 2 })
-    onCreate('Новая заметка', { x: Math.round(p.x), y: Math.round(p.y) })
+    onCreate('Новая заметка', { x: Math.round(p.x / SCALE), y: Math.round(p.y / SCALE) })
   }
 
   const handleConnect = useCallback(
@@ -194,7 +201,7 @@ function CanvasInner({ graph, notes, agents, types, selectedId, hotIds, onSelect
         maxZoom={2}
         proOptions={{ hideAttribution: true }}
         fitView
-        fitViewOptions={{ padding: 0.2, maxZoom: mode === 'dots' ? 1.4 : 0.9 }}
+        fitViewOptions={{ padding: 0.2, maxZoom: mode === 'dots' ? 1.6 : 0.9 }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#23242e" />
         <Controls position="bottom-left" showInteractive={false} />

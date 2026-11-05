@@ -119,6 +119,8 @@ npm run dev                   # http://localhost:5173 — /api проксиру�
 | `DAILY_CALL_BUDGET` | `400` | Потолок вызовов LLM в сутки на все комнаты (0 — без лимита) |
 | `DIRECTOR_MODE` | `pipeline` | `pipeline` (субагенты) или `single` (один запрос Режиссёра) |
 | `AGENT_MODE` | `pipeline` | `pipeline` (мысль → реплика → пометка) или `single` (один вызов с prefill) |
+| `AGENT_TOOLS` | `auto` | как агенты трогают библиотеку: `native` (function calling OpenAI-формата), `tags` (`<act>` в тексте), `auto` — native, если модель умеет tools по каталогу OpenRouter |
+| `MCP_TOKEN` | — | Bearer-токен для внешних MCP-клиентов на `POST /mcp` (с localhost не нужен) |
 | `TICK_ENTROPY_HP` / `TICK_ENTROPY_DOPAMINE` | `2` / `3` | Сколько теряет каждый за автономный тик |
 
 ## Релизы (для мейнтейнера)
@@ -163,6 +165,36 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
 - **Страница объекта**: тип (меняется), свойства по схеме (форма), тело в markdown, пометки друзей, связи с
   видом, «где всплывало», архив, кнопки «обсудить / развить / оспорить».
 - **Экспорт** всей библиотеки в Markdown (`GET /api/export.md`); поиск `GET /api/search?q=&type=`.
+
+## Агенты чувствуют систему как MCP
+
+Библиотека для агентов — не текст в промпте, а **набор инструментов** в формате MCP (Model Context Protocol).
+Один и тот же реестр (`backend/src/tools.rs`) отдаётся трём потребителям:
+
+| Кто | Как |
+|---|---|
+| Агенты комнаты | `AGENT_TOOLS=native` — реплика идёт через function calling: модель сама вызывает `library_search`, `library_create`… до 4 раундов, потом говорит. `tags` — те же действия тегами `<act>{"op":…}</act>` в тексте (для моделей без tools). `auto` смотрит в каталог OpenRouter. |
+| Ты в UI | каждое действие агента становится чипом под его репликой: «завёл задачу», «закрыл», «связал», «запись в …» |
+| Внешние клиенты | `POST /mcp` — JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`), streamable-http без SSE. Подключай Claude Desktop / Cursor / свой скрипт — они видят ту же библиотеку, что и друзья в комнате. |
+
+Инструменты: `library_search` (запрос, тип), `library_get` (объект + свойства + пометки + связи + где всплывал),
+`library_create` (тип, заголовок, свойства, тело), `library_update` (свойства, тело, архив), `library_link`
+(`belongs_to` / `about` / `blocks` / `assigned_to` / `contradicts` / `related`…), `library_note`, `library_types`
+(схемы всех типов), `contracts_list` (слово игрока), `room_status` (кто жив, отношения, когда игрок был).
+Список с JSON-схемами — `GET /api/tools`.
+
+Каждому агенту в system prompt попадает короткий «ГДЕ ТЫ»-бриф (комната, библиотека, игрок, Режиссёр) и
+правило: инструменты — это руки, пользоваться ими по делу и в характере, а не отчитываться о них.
+
+```bash
+# внешний MCP-клиент (с другой машины нужен MCP_TOKEN)
+curl -s http://localhost:3000/mcp -H 'content-type: application/json' \
+  -H 'authorization: Bearer $MCP_TOKEN' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"library_search","arguments":{"query":"осциллограф"}}}'
+```
+
+Claude Desktop (`claude_desktop_config.json`): `{"mcpServers":{"triad":{"url":"http://localhost:3000/mcp"}}}` —
+через `mcp-remote`, если клиент умеет только stdio.
 
 ## Холст и сцена
 
@@ -247,6 +279,8 @@ CI (`ci.yml`) на каждый push гоняет `npm run build`, `cargo clippy
 | `POST` | `/api/nodes/{id}/ask` `{mode: discuss\|develop\|dispute, message?}` | триада обсуждает узел и оставляет на нём пометки |
 | `POST` | `/api/nodes/{id}/notes` · `POST /api/edges` · `DELETE /api/edges/{id}` | своя пометка, связи |
 | `GET` | `/api/export.md` | вся доска в Markdown |
+| `GET` | `/api/tools` | реестр инструментов агентов (MCP-схемы) |
+| `GET`/`POST` | `/mcp` | MCP-сервер: JSON-RPC 2.0 `initialize` / `tools/list` / `tools/call`; auth — localhost или `Authorization: Bearer <MCP_TOKEN>` |
 | `POST` | `/api/schema` | (legacy) Mermaid-схема спора |
 | `POST` | `/api/contracts/{id}/resolve` `{status: done\|failed\|cancelled}` | закрыть слово из UI; done/failed запускают раунд реакции (поручитель первым) |
 | `POST` | `/api/seen` `{message_id}` | игрок дочитал до сюда (непрочитанное, сброс паузы пульса) |
@@ -330,18 +364,19 @@ backend/src/
   db.rs           пул, миграции, сид трёх персонажей и их отношений, CRUD
   contracts.rs    слово игрока: дедлайны, поручители, последствия, события
   memory.rs       фоновое сворачивание дневников агентов
-  openrouter.rs   reqwest-клиент, prefill, extract_json
+  openrouter.rs   reqwest-клиент, prefill, стриминг, function calling, бюджет, ретраи
   mock_llm.rs     офлайн-заглушка LLM (для UI/пайплайна без ключа)
   prompts.rs      Режиссёр / анти-ассистентское ядро агента / синтез схемы
   director.rs     монолитный Режиссёр (single) + общие apply_* для обоих режимов
   pipeline.rs     субагенты Reader / Caster / Archivist / Psychologist
   types_seed.rs   встроенные типы объектов (Anytype-style) со схемами свойств
   catalog.rs      каталог моделей OpenRouter для селектора
+  tools.rs        MCP-реестр инструментов библиотеки: схемы, исполнитель, бриф «где ты»
   heartbeat.rs    пульс комнаты: действия без игрока, бэкофф, Telegram-пуш
   intake.rs       ссылки → текст → выжимка → объект «Закладка»
-  agent_runner.rs ход агента, парсинг <ego_thought>
+  agent_runner.rs ход агента: мысль → инструменты/реплика → пометка, <act>-действия
   mermaid.rs      safe_id, sanitize_label, build_graph, classDef-раскраска
-  handlers.rs     axum-роуты + SSE + /api/settings (только localhost)
+  handlers.rs     axum-роуты + SSE + /api/settings (только localhost) + /mcp JSON-RPC
   state.rs        AppState
 desktop/
   src-tauri/src/main.rs  запуск встроенного сервера, окно, трей; tauri.conf.json, иконки

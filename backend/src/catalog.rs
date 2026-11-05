@@ -17,6 +17,7 @@ pub struct ModelInfo {
     pub completion_price: f64,
     pub free: bool,
     pub json_mode: bool,
+    pub tools: bool,
 }
 
 #[derive(Default)]
@@ -53,6 +54,14 @@ fn per_million(s: &Option<String>) -> f64 {
 }
 
 impl Catalog {
+    /// Does this model advertise native tool calling? Unknown models → false (tags fallback).
+    pub async fn supports_tools(&self, api_key: Option<&str>, model: &str) -> bool {
+        match self.models(api_key).await {
+            Ok(list) => list.iter().find(|m| m.id == model).map(|m| m.tools).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
     pub async fn models(&self, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
         if let Some((at, list)) = self.cache.read().await.as_ref() {
             if at.elapsed() < Duration::from_secs(3600) {
@@ -77,7 +86,9 @@ impl Catalog {
                     .as_ref()
                     .map(|p| p.iter().any(|x| x == "response_format" || x == "structured_outputs"))
                     .unwrap_or(false);
+                let tools = m.supported_parameters.as_ref().map(|p| p.iter().any(|x| x == "tools" || x == "tool_choice")).unwrap_or(false);
                 ModelInfo {
+                    tools,
                     name: if m.name.is_empty() { m.id.clone() } else { m.name },
                     id: m.id,
                     context_length: m.context_length.unwrap_or(0),

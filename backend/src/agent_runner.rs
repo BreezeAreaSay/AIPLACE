@@ -196,6 +196,18 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
         None => None,
     };
 
+    // Native tool calling when the model supports it (or forced): the agent *uses* the system.
+    let native = match app.cfg.agent_tools.as_str() {
+        "native" => true,
+        "tags" => false,
+        _ => {
+            let key = app.llm_settings().await.api_key;
+            key.is_some() && app.catalog.supports_tools(key.as_deref(), model).await
+        }
+    };
+    if native {
+        return speak_with_tools(app, model, ctx, agents, &ego, &hook, found.as_deref()).await;
+    }
     app.emit(RoomEvent::StreamStart { agent: ctx.agent.id.clone() });
     let agent_id = ctx.agent.id.clone();
     let emitter = app.clone();
@@ -234,6 +246,65 @@ async fn think_then_speak(app: &AppState, model: &str, ctx: &AgentContext<'_>, a
     (if ego.is_empty() { None } else { Some(ego) }, speech)
 }
 
+/// Tools-enabled Speak: the model may call library functions (search before answering,
+/// create/update/link/note as acts); results come back as ActionRecords appended as <act>-free
+/// records via a side channel (we encode them into the speech tail for the common path).
+async fn speak_with_tools(app: &AppState, model: &str, ctx: &AgentContext<'_>, agents: &[crate::models::Agent], ego: &str, hook: &str, found: Option<&str>) -> (Option<String>, String) {
+    use crate::openrouter::ToolTurn;
+    let opts = ChatOpts { temperature: 0.9, max_tokens: 500, json_mode: false, prefill: None, presence_penalty: Some(0.6), frequency_penalty: Some(0.5) };
+    let tools = crate::tools::as_openai_tools();
+    let mut history: Vec<serde_json::Value> = vec![
+        serde_json::json!({ "role": "system", "content": prompts::speak_system_native(ctx) }),
+        serde_json::json!({ "role": "user", "content": prompts::speak_user(ctx, agents, ego, hook, found) }),
+    ];
+    let mut records: Vec<crate::models::ActionRecord> = Vec::new();
+    let mut text = String::new();
+    for round in 0..4 {
+        match app.llm.chat_tools_step(model, &history, &tools, &opts).await {
+            Ok(ToolTurn::Text(t)) => {
+                text = t;
+                break;
+            }
+            Ok(ToolTurn::Calls { assistant_message, calls }) => {
+                history.push(assistant_message);
+                for c in calls.iter().take(4) {
+                    app.emit(RoomEvent::Status { stage: "agent".into(), detail: format!("{} → {}", ctx.agent.name, c.name) });
+                    let (result, rec) = match crate::tools::call(app, &ctx.agent.id, &c.name, &c.args).await {
+                        Ok(r) => r,
+                        Err(e) => (serde_json::json!({ "error": e.to_string() }), None),
+                    };
+                    if let Some(r) = rec {
+                        records.push(r);
+                    }
+                    history.push(serde_json::json!({ "role": "tool", "tool_call_id": c.id, "name": c.name, "content": result.to_string() }));
+                }
+                if round == 3 {
+                    // Out of rounds: ask for the line without tools.
+                    if let Ok(t) = app.llm.chat(model, &[ChatMessage::system(prompts::speak_system_native(ctx)), ChatMessage::user(format!("{}\n\n(Инструменты уже использованы. Теперь только реплика.)", prompts::speak_user(ctx, agents, ego, hook, found)))], &opts).await {
+                        text = t;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent.id, error = %e, "tools step failed → tag mode for this line");
+                if let Ok(t) = app.llm.chat(model, &[ChatMessage::system(prompts::speak_system(ctx)), ChatMessage::user(prompts::speak_user(ctx, agents, ego, hook, found))], &opts).await {
+                    text = t;
+                }
+                break;
+            }
+        }
+    }
+    let speech = strip_labels(text.trim().trim_matches('"'));
+    // Carry the tool records through the common path as synthetic <act> markers.
+    let mut tail = String::new();
+    for r in records {
+        tail.push_str(&format!("\n<act>{}</act>", serde_json::json!({ "op": "record", "object_id": r.object_id, "text": r.text, "kind": r.op })));
+    }
+    app.emit(RoomEvent::StreamStart { agent: ctx.agent.id.clone() });
+    app.emit(RoomEvent::Delta { agent: ctx.agent.id.clone(), text: speech.clone() });
+    (if ego.is_empty() { None } else { Some(ego.to_string()) }, format!("{speech}{tail}"))
+}
+
 fn strip_labels(s: &str) -> String {
     // Some models still emit the two-layer format: keep only the public part.
     let s = match s.find("</ego_thought>") {
@@ -267,6 +338,11 @@ async fn apply_acts(app: &AppState, agent_id: &str, acts: &[serde_json::Value], 
         let op = a.get("op").and_then(|o| o.as_str()).unwrap_or("").to_lowercase();
         let res: anyhow::Result<Option<crate::models::ActionRecord>> = async {
             match op.as_str() {
+                "record" => Ok(Some(crate::models::ActionRecord {
+                    op: a.get("kind").and_then(|k| k.as_str()).unwrap_or("update").to_string(),
+                    object_id: a.get("object_id").and_then(|k| k.as_str()).unwrap_or("").to_string(),
+                    text: a.get("text").and_then(|k| k.as_str()).unwrap_or("").to_string(),
+                })),
                 "create" => {
                     let title = a.get("title").and_then(|t| t.as_str()).map(crate::mermaid::sanitize_label).filter(|t| t != "…");
                     let Some(title) = title else { return Ok(None) };
@@ -280,7 +356,7 @@ async fn apply_acts(app: &AppState, agent_id: &str, acts: &[serde_json::Value], 
                     let props = a.get("props").and_then(|p| p.as_object()).map(|m| serde_json::Value::Object(m.iter().filter(|(k, _)| keys.is_empty() || keys.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect()));
                     db::upsert_object(&app.db, &id, &title, &type_id, agent_id, body.as_deref(), props.as_ref(), None, None).await?;
                     db::place_unpositioned_nodes(&app.db).await?;
-                    let tname = types.iter().find(|t| t.id == type_id).map(|t| t.name.to_lowercase()).unwrap_or(type_id.clone());
+                    let tname = crate::tools::type_name_acc(types, &type_id);
                     Ok(Some(crate::models::ActionRecord { op: "create".into(), object_id: id, text: format!("завёл {tname} «{title}»") }))
                 }
                 "update" | "done" => {

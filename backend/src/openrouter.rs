@@ -294,6 +294,99 @@ impl LlmClient {
     }
 }
 
+/// A tool call requested by the model.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
+}
+
+/// Result of one tools-enabled round: either the model asked for tools, or it answered.
+pub enum ToolTurn {
+    Calls { assistant_message: Value, calls: Vec<ToolCall> },
+    Text(String),
+}
+
+impl LlmClient {
+    /// One step of a native tool-calling conversation (OpenAI format). `history` holds the
+    /// running message list including prior assistant tool_calls and `tool` results.
+    pub async fn chat_tools_step(&self, model: &str, history: &[Value], tools: &[Value], opts: &ChatOpts) -> Result<ToolTurn> {
+        let key = self.settings.read().await.api_key.clone().ok_or_else(|| anyhow!("no api key"))?;
+        if !self.budget_left() {
+            bail!("daily LLM budget exhausted ({} calls)", self.daily_budget);
+        }
+        self.roll_day();
+        self.calls_today.fetch_add(1, Ordering::Relaxed);
+        let mut body = json!({
+            "model": model,
+            "messages": history,
+            "temperature": opts.temperature,
+            "max_tokens": opts.max_tokens,
+            "tools": tools,
+            "tool_choice": "auto",
+        });
+        if let Some(p) = opts.presence_penalty {
+            body["presence_penalty"] = json!(p);
+        }
+        if let Some(p) = opts.frequency_penalty {
+            body["frequency_penalty"] = json!(p);
+        }
+        let mut last_err = None;
+        for (i, wait) in [0u64, 3, 8].iter().enumerate() {
+            if *wait > 0 {
+                tokio::time::sleep(Duration::from_secs(*wait)).await;
+            }
+            let resp = self
+                .http
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .bearer_auth(&key)
+                .header("HTTP-Referer", &self.app_url)
+                .header("X-Title", "Triad Canvas")
+                .json(&body)
+                .send()
+                .await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(anyhow!("openrouter request failed: {e}"));
+                    continue;
+                }
+            };
+            let status = resp.status();
+            let raw = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 429 || status.is_server_error() {
+                last_err = Some(anyhow!("openrouter {status}"));
+                if i < 2 {
+                    continue;
+                }
+                bail!("openrouter {status}: {}", crate::mermaid::truncate_chars(&raw, 300));
+            }
+            if !status.is_success() {
+                bail!("openrouter {status}: {}", crate::mermaid::truncate_chars(&raw, 400));
+            }
+            let v: Value = serde_json::from_str(&raw).context("openrouter non-JSON")?;
+            let msg = v.pointer("/choices/0/message").cloned().ok_or_else(|| anyhow!("empty choices"))?;
+            if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()).filter(|c| !c.is_empty()) {
+                let parsed = calls
+                    .iter()
+                    .filter_map(|c| {
+                        let id = c.get("id").and_then(|x| x.as_str()).unwrap_or("call").to_string();
+                        let name = c.pointer("/function/name")?.as_str()?.to_string();
+                        let args_raw = c.pointer("/function/arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                        let args = serde_json::from_str::<Value>(args_raw).or_else(|_| extract_json(args_raw)).unwrap_or(json!({}));
+                        Some(ToolCall { id, name, args })
+                    })
+                    .collect();
+                return Ok(ToolTurn::Calls { assistant_message: msg, calls: parsed });
+            }
+            let text = msg.get("content").cloned().map(content_to_text).unwrap_or_default();
+            return Ok(ToolTurn::Text(text));
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("tool step failed")))
+    }
+}
+
 fn today() -> i64 {
     chrono::Utc::now().format("%Y%m%d").to_string().parse().unwrap_or(0)
 }

@@ -830,8 +830,12 @@ pub async fn place_unpositioned_nodes(pool: &Db) -> Result<usize> {
                     y = neighbour.map(|p| p.1).unwrap_or(0.0);
                 }
             } else {
-                x = (tries % 5) as f64 * 320.0;
-                y = (tries / 5) as f64 * 170.0;
+                // golden-angle spiral around the origin: reads as a constellation in dot mode
+                let k = tries as f64;
+                let ang = k * 2.399_963;
+                let rad = 170.0 * k.sqrt();
+                x = (rad * ang.cos() * 1.6).round();
+                y = (rad * ang.sin()).round();
             }
         }
         set_node_position(pool, &n.id, x, y).await?;

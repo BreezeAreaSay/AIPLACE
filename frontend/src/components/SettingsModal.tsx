@@ -135,8 +135,9 @@ export function SettingsModal({ open, onClose, onSaved }: Props) {
               <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Модель Режиссёра и субагентов</div>
               <ModelPicker value={director} onChange={setDirector} models={models} status={catalog} disabled={!editable} preferJson />
               <div className="mt-1 text-[11px] text-zinc-500">
-                Reader / Caster / Картограф / Психолог — маленькие JSON-задачи, подойдёт быстрая. Режимы: Режиссёр <code className="text-zinc-300">{view.director_mode}</code>, агенты{' '}
-                <code className="text-zinc-300">{view.agent_mode}</code> (DIRECTOR_MODE / AGENT_MODE в config.env).
+                Reader / Caster / Архивариус / Психолог — маленькие JSON-задачи, подойдёт быстрая. Режимы: Режиссёр <code className="text-zinc-300">{view.director_mode}</code>, агенты{' '}
+                <code className="text-zinc-300">{view.agent_mode}</code>, инструменты <code className="text-zinc-300">{view.agent_tools}</code> (native tool calling, если модель умеет; иначе теги).
+                Внешний MCP: <code className="text-zinc-300">POST /mcp</code>.
               </div>
             </div>
 

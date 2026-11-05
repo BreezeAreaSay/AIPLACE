@@ -98,6 +98,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:id/backlinks", get(node_backlinks))
         .route("/api/search", get(search))
         .route("/api/seen", post(mark_seen))
+        .route("/api/tools", get(list_tools))
+        .route("/mcp", post(mcp_rpc).get(mcp_info))
         .route("/api/edges/:id", delete(delete_edge))
         .route("/api/export.md", get(export_markdown))
         .with_state(state)
@@ -153,6 +155,74 @@ pub async fn build_state(app: &AppState, editable: bool, user: Option<&TgUser>) 
     })
 }
 
+async fn list_tools(Room { .. }: Room) -> Json<Vec<crate::tools::ToolDef>> {
+    Json(crate::tools::definitions())
+}
+
+async fn mcp_info() -> Json<serde_json::Value> {
+    Json(json!({ "name": "triad-canvas", "transport": "streamable-http (JSON-RPC over POST)", "version": crate::update::VERSION, "hint": "POST JSON-RPC 2.0: initialize, tools/list, tools/call. Auth: loopback, or Authorization: Bearer <MCP_TOKEN>." }))
+}
+
+/// Minimal MCP server (JSON-RPC 2.0 over HTTP POST): lets Claude Desktop / Cursor / any agent
+/// read and write this room's library with the same tools the inhabitants use.
+async fn mcp_rpc(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    let loopback = peer.ip().is_loopback() && !is_forwarded(&headers);
+    let token_ok = match &app.cfg.mcp_token {
+        Some(t) => headers.get("authorization").and_then(|v| v.to_str().ok()).map(|v| v.trim() == format!("Bearer {t}")).unwrap_or(false),
+        None => false,
+    };
+    if !loopback && !token_ok {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "jsonrpc": "2.0", "id": req.get("id"), "error": { "code": -32001, "message": "unauthorized: set MCP_TOKEN and send Authorization: Bearer" } }))).into_response();
+    }
+    // External MCP clients act on the local room (desktop) — the same one the player sees.
+    let room = match app.for_room(crate::rooms::LOCAL_ROOM).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(json!({}));
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("2025-03-26"),
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "triad-canvas", "version": crate::update::VERSION },
+            "instructions": crate::tools::system_brief(),
+        }),
+        "notifications/initialized" | "initialized" => return StatusCode::ACCEPTED.into_response(),
+        "ping" => json!({}),
+        "tools/list" => json!({ "tools": crate::tools::definitions() }),
+        "tools/call" => {
+            let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            match crate::tools::call(&room, "mcp", name, &args).await {
+                Ok((v, rec)) => {
+                    if rec.is_some() {
+                        let graph = Graph { nodes: db::list_nodes(&room.db).await.unwrap_or_default(), edges: db::list_edges(&room.db).await.unwrap_or_default() };
+                        let mermaid = mermaid::build_graph(&graph.nodes, &graph.edges);
+                        room.emit(RoomEvent::Graph { graph, mermaid });
+                        if let Ok(notes) = db::list_notes(&room.db, 400).await {
+                            room.emit(RoomEvent::Notes { notes });
+                        }
+                    }
+                    let is_err = v.get("error").is_some();
+                    json!({ "content": [{ "type": "text", "text": v.to_string() }], "isError": is_err })
+                }
+                Err(e) => json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true }),
+            }
+        }
+        other => {
+            return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("method not found: {other}") } })).into_response();
+        }
+    };
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
 #[derive(serde::Deserialize)]
 pub struct SeenRequest {
     pub message_id: i64,
@@ -189,6 +259,7 @@ async fn settings_view(app: &AppState, editable: bool) -> SettingsView {
         ui_embedded: crate::web::is_embedded(),
         director_mode: app.cfg.director_mode.clone(),
         agent_mode: app.cfg.agent_mode.clone(),
+        agent_tools: app.cfg.agent_tools.clone(),
     }
 }
 

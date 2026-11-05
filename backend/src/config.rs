@@ -78,6 +78,10 @@ pub struct Config {
     pub daily_call_budget: u64,
     /// Let the heartbeat run even in mock mode (for testing).
     pub heartbeat_in_mock: bool,
+    /// How agents use tools: auto (native tool calling if the model supports it, else tags) | native | tags.
+    pub agent_tools: String,
+    /// Bearer token for external MCP clients on /mcp (loopback needs none).
+    pub mcp_token: Option<String>,
     /// Telegram Mini App mode: validate initData, one room per Telegram user, /start bot.
     pub telegram_bot_token: Option<String>,
     pub telegram_admin_ids: Vec<i64>,
@@ -111,6 +115,8 @@ impl Config {
             quiet_hours: env_or("QUIET_HOURS", "23-08"),
             daily_call_budget: env_or("DAILY_CALL_BUDGET", "400").parse().unwrap_or(400),
             heartbeat_in_mock: env_bool("HEARTBEAT_IN_MOCK"),
+            agent_tools: env_or("AGENT_TOOLS", "auto").to_lowercase(),
+            mcp_token: env_opt("MCP_TOKEN"),
             telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
             telegram_admin_ids: env_or("TELEGRAM_ADMIN_IDS", "")
                 .split([',', ' ', ';'])

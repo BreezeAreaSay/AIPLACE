@@ -223,6 +223,7 @@ export interface SettingsView {
   ui_embedded: boolean
   director_mode: string
   agent_mode: string
+  agent_tools: string
 }
 
 export interface SettingsPatch {

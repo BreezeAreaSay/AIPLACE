@@ -499,6 +499,7 @@ pub struct SettingsView {
     pub ui_embedded: bool,
     pub director_mode: String,
     pub agent_mode: String,
+    pub agent_tools: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

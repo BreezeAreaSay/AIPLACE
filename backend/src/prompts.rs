@@ -831,14 +831,32 @@ pub fn split_thought(raw: &str) -> (String, String, Option<String>) {
     (crate::mermaid::truncate_chars(&thought.join(" "), 600), crate::mermaid::truncate_chars(&hook, 120), query)
 }
 
+pub fn speak_system_native(ctx: &AgentContext) -> String {
+    // Same as speak_system, but tools arrive natively — no <act> syntax, just a brief.
+    let a = ctx.agent;
+    let all: Vec<Agent> = std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect();
+    let others = ctx.others.iter().map(|o| format!("{} — {}", o.name, if o.is_alive() { relations_for(&o.id, ctx.relations, &all).split(';').next().unwrap_or("").to_string() } else { "мёртв".into() })).collect::<Vec<_>>().join("; ");
+    let dying = if ctx.dying { "\nЭТО ТВОЯ ПОСЛЕДНЯЯ РЕПЛИКА: ты умираешь прямо сейчас — предсмертные слова в характере." } else { "" };
+    let relevant = if ctx.relevant.is_empty() { String::new() } else { format!("\nОбъекты по теме (id): {}", ctx.relevant.iter().take(10).map(|n| format!("{} «{}»", n.id, n.label)).collect::<Vec<_>>().join("; ")) };
+    format!(
+        "{core}\n\n{brief}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная, не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\nИНСТРУМЕНТЫ: у тебя есть функции библиотеки (library_search, library_create, library_update, library_link, library_note, contracts_list, room_status). Вызывай их, когда нужны факты или когда по делу завести/закрыть/связать что-то; потом говори. Не объявляй вызовы словами.{relevant}\nОтвечай ТОЛЬКО репликой, без имени и пояснений, на русском.",
+        core = a.system_core,
+        brief = crate::tools::system_brief(),
+        forbidden = FORBIDDEN_PHRASES,
+        state = short_state(a),
+        beat = beat_text(ctx, &all),
+    )
+}
+
 pub fn speak_system(ctx: &AgentContext) -> String {
     let a = ctx.agent;
     let all: Vec<Agent> = std::iter::once(a.clone()).chain(ctx.others.iter().cloned()).collect();
     let others = ctx.others.iter().map(|o| format!("{} — {}", o.name, if o.is_alive() { relations_for(&o.id, ctx.relations, &all).split(';').next().unwrap_or("").to_string() } else { "мёртв".into() })).collect::<Vec<_>>().join("; ");
     let dying = if ctx.dying { "\nЭТО ТВОЯ ПОСЛЕДНЯЯ РЕПЛИКА: ты умираешь прямо сейчас — предсмертные слова в характере." } else { "" };
     format!(
-        "{core}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная (одно слово, перебивка, абзац — как требует подача), не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\n\n{tools}\n\nОтвечай репликой (без имени и пояснений, на русском); действия <act> и пометки <note> — отдельными строками после неё.",
+        "{core}\n\n{brief}\n\nТы — живой субъект, не ассистент; запрещены формы: {forbidden}. Не упоминай HP/дофамин/статы.\nГовори ЖИВО: цепляйся за конкретную фразу, длина свободная (одно слово, перебивка, абзац — как требует подача), не заканчивай вопросом по привычке, не повторяй свои прошлые формулировки. Если ход — молчание: только *короткая ремарка в звёздочках*.\nТвоё состояние: {state}. Соседи: {others}.\nТвой ход в сцене — {beat}.{dying}\n\n{tools}\n\nОтвечай репликой (без имени и пояснений, на русском); действия <act> и пометки <note> — отдельными строками после неё.",
         core = a.system_core,
+        brief = crate::tools::system_brief(),
         forbidden = FORBIDDEN_PHRASES,
         state = short_state(a),
         beat = beat_text(ctx, &all),

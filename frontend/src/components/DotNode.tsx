@@ -17,8 +17,8 @@ export type DotNodeType = Node<DotData, 'dot'>
 function DotNodeInner({ data }: NodeProps<DotNodeType>) {
   const r = 7 + Math.min(data.degree, 8) * 1.6
   return (
-    <div className="flex flex-col items-center" style={{ width: 120, marginLeft: -60 + r, marginTop: -r }}>
-      <Handle type="target" position={Position.Left} style={{ opacity: 0, left: 60 - r }} />
+    <div className="relative flex flex-col items-center" style={{ width: 120, marginLeft: -60 + r, marginTop: -r }}>
+      <Handle type="target" position={Position.Left} style={{ opacity: 0, left: 60, top: r, pointerEvents: 'none' }} />
       <div
         className="rounded-full transition-shadow"
         style={{
@@ -33,7 +33,7 @@ function DotNodeInner({ data }: NodeProps<DotNodeType>) {
       <div className="mt-1 max-w-[120px] truncate text-center font-mono text-[10px] leading-tight text-zinc-300" style={{ textShadow: '0 0 4px #0D0E12' }}>
         {data.typeIcon} {data.label}
       </div>
-      <Handle type="source" position={Position.Right} style={{ opacity: 0, left: 60 + r }} />
+      <Handle type="source" position={Position.Right} style={{ opacity: 0, left: 60, top: r, pointerEvents: 'none' }} />
     </div>
   )
 }
